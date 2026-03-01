@@ -994,6 +994,7 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         "latest_temp": latest.get("temp"),
         "latest_dewpoint": latest.get("dewp"),
         "latest_cloud_code": latest_cloud_code,
+        "latest_wx": latest.get("wxString") or latest.get("wx") or "",
         "cloud_trend": cloud_tr,
         "temp_trend_1step_c": t_trend,
         "temp_trend_smooth_c": t_trend_smooth,
@@ -1615,6 +1616,99 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
         return None
 
+    def _sounding_factor_pack() -> dict[str, Any]:
+        def _f(v: Any) -> float | None:
+            try:
+                return float(v)
+            except Exception:
+                return None
+
+        low_cloud = _f(primary_window.get("low_cloud_pct"))
+        w850 = _f(primary_window.get("w850_kmh"))
+        wind_chg = _f(metar_diag.get("wind_dir_change_deg"))
+        t_now = _f(metar_diag.get("latest_temp"))
+        td_now = _f(metar_diag.get("latest_dewpoint"))
+        wx = str(metar_diag.get("latest_wx") or "").upper()
+
+        up_adj = 0.0
+        down_adj = 0.0
+        profile_score = 0.0
+        tags: list[str] = []
+
+        # 1) stability / inversion
+        inv = 0.0
+        if low_cloud is not None and low_cloud >= 70:
+            inv += 0.6
+        if w850 is not None and w850 <= 15:
+            inv += 0.35
+        if "耦合偏弱" in h925_summary:
+            inv += 0.35
+        if inv >= 0.9:
+            down_adj += 0.55
+            profile_score += 0.35
+            tags.append("逆温/稳定约束偏强")
+        elif inv >= 0.45:
+            down_adj += 0.25
+            profile_score += 0.25
+            tags.append("低层稳定约束")
+
+        # 2) convection
+        capev = snd_thermo.get("sbcape_jkg") or snd_thermo.get("mlcape_jkg") or snd_thermo.get("mucape_jkg")
+        cinv = snd_thermo.get("sbcin_jkg") if snd_thermo.get("sbcin_jkg") is not None else snd_thermo.get("mlcin_jkg")
+        if isinstance(capev, (int, float)):
+            profile_score += 0.2
+            if float(capev) >= 500 and (not isinstance(cinv, (int, float)) or float(cinv) > -75):
+                down_adj += 0.2
+                tags.append("对流可触发（云发展风险）")
+            elif isinstance(cinv, (int, float)) and float(cinv) <= -125:
+                up_adj += 0.15
+                tags.append("抑制偏强（对流受限）")
+
+        # 3) phase-change / latent-cooling risk
+        if any(k in wx for k in ["RA", "SN", "PL", "FZ", "DZ"]):
+            if t_now is not None and -1.5 <= t_now <= 2.0:
+                down_adj += 0.25
+                profile_score += 0.2
+                tags.append("近0°C相变/潜热冷却风险")
+
+        # 4) moisture structure (mid-dry / upper moist hints)
+        mid_dry = "干层" in h700_summary
+        if mid_dry:
+            profile_score += 0.45
+            if cloud_code_now in {"CLR", "CAVOK", "FEW", "SCT"}:
+                up_adj += 0.45
+                tags.append("中层偏干+云开（增温效率高）")
+            else:
+                up_adj += 0.15
+                tags.append("中层偏干（但低层云仍有限制）")
+        elif ("湿层" in h700_summary) or ("约束" in h700_summary):
+            profile_score += 0.35
+            down_adj += 0.25
+            tags.append("中层湿层约束")
+
+        # 5) shear / mixing
+        if w850 is not None:
+            if w850 >= 25 and (low_cloud is None or low_cloud <= 55):
+                up_adj += 0.2
+                profile_score += 0.2
+                tags.append("混合条件较好")
+            elif w850 <= 12 and low_cloud is not None and low_cloud >= 65:
+                down_adj += 0.18
+                profile_score += 0.15
+                tags.append("混合偏弱")
+        if wind_chg is not None and wind_chg >= 45:
+            up_adj += 0.08
+            down_adj += 0.08
+            profile_score += 0.1
+            tags.append("风切节奏扰动")
+
+        return {
+            "up_adj": up_adj,
+            "down_adj": down_adj,
+            "profile_score": profile_score,
+            "tags": tags,
+        }
+
     def _signal_scores() -> tuple[float, float, str]:
         up = 0.0
         down = 0.0
@@ -1644,6 +1738,10 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
             down += 0.5
         if ("开窗" in ctrend) or ("减弱" in ctrend):
             up += 0.5
+
+        sf = _sounding_factor_pack()
+        up += float(sf.get("up_adj") or 0.0)
+        down += float(sf.get("down_adj") or 0.0)
 
         phase = str(classify_window_phase(primary_window, metar_diag).get("phase") or "unknown")
         return up, down, phase
@@ -1676,6 +1774,8 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
                 profile_score -= 0.15
         if snd_thermo.get("has_profile"):
             profile_score += 0.35
+        sf = _sounding_factor_pack()
+        profile_score += float(sf.get("profile_score") or 0.0)
 
         # obs route
         obs_score = 0.0
@@ -1839,6 +1939,7 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
     def _sounding_layer_note() -> str | None:
         bits: list[str] = []
+        sf = _sounding_factor_pack()
 
         if h700_summary:
             if "干层" in h700_summary:
@@ -1854,12 +1955,17 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
             if isinstance(cinv, (int, float)):
                 bits.append(f"抑制 CIN≈{float(cinv):.0f}J/kg")
 
+        tags = [str(x) for x in (sf.get("tags") or [])]
+        for t in tags:
+            if t not in bits:
+                bits.append(t)
+
         if cloud_code_now in {"BKN", "OVC", "VV"}:
             bits.append("当前低层云量偏多（地面辐射受限）")
 
         if not bits:
             return None
-        return "；".join(bits[:2]) + "。"
+        return "；".join(bits[:3]) + "。"
 
     snd_note = _sounding_layer_note()
     if snd_note:
@@ -2005,6 +2111,7 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         lo = max(lo, float(obs_max) - 0.25)
 
     # anti-collapse guard near peak: avoid over-compressing main band when warm-support evidence is aligned.
+    sf_local = _sounding_factor_pack()
     warm_support = 0.0
     if "暖平流" in line850:
         warm_support += 0.6
@@ -2012,13 +2119,14 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         warm_support += 0.4
     if cloud_code_now not in {"BKN", "OVC", "VV"}:
         warm_support += 0.5
-    if isinstance(metar_diag.get("temp_bias_c"), (int, float)) and float(metar_diag.get("temp_bias_c") or 0.0) >= 0.5:
+    if isinstance(metar_diag.get("temp_bias_smooth_c"), (int, float)) and float(metar_diag.get("temp_bias_smooth_c") or 0.0) >= 0.5:
         warm_support += 0.4
+    warm_support += min(0.6, max(0.0, float(sf_local.get("up_adj") or 0.0) - 0.3 * float(sf_local.get("down_adj") or 0.0)))
 
     if phase_now in {"near_window", "in_window"} and warm_support >= 1.2 and obs_max is not None:
         try:
             peak_local_txt = str(primary_window.get("peak_local") or "")
-            latest_local_txt = str(metar_diag.get("latest_time_local") or "")
+            latest_local_txt = str(metar_diag.get("latest_report_local") or "")
             if peak_local_txt and latest_local_txt:
                 hleft = max(0.0, (datetime.fromisoformat(peak_local_txt) - datetime.fromisoformat(latest_local_txt)).total_seconds() / 3600.0)
             else:
