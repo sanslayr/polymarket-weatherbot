@@ -936,27 +936,50 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
 
             w0 = latest.get("wdir")
             w1 = prev.get("wdir")
-            wind_shift_txt = ""
+            dchg = 0.0
             if w0 not in (None, "", "VRB") and w1 not in (None, "", "VRB"):
                 a = abs(float(w0) - float(w1)) % 360.0
                 dchg = min(a, 360.0 - a)
-                if dchg >= 35:
-                    wind_shift_txt = "，风向也在变"
 
             cloud_txt = _cloud_trend(latest, prev)
-            if dt_now >= 0.5 and dt_prev >= 0.5:
-                ttxt = "温度在持续上升"
-            elif dt_now >= 0.5 > dt_prev:
-                ttxt = "温度又开始加速上升"
-            elif dt_now <= -0.5 and dt_prev <= -0.5:
-                ttxt = "温度在持续回落"
-            elif abs(dt_now) < 0.35 and abs(dt_prev) < 0.35:
-                ttxt = "温度基本没动"
-            else:
-                ttxt = "温度在来回波动"
 
-            ptxt = "气压在走低" if dp2h <= -0.8 else ("气压在走高" if dp2h >= 0.8 else "气压基本平稳")
-            rhythm_line = f"• 近两小时：{ttxt}，{ptxt}{wind_shift_txt}；{cloud_txt}。"
+            temp_signal = (abs(dt_now) >= 0.5) or (abs(dt_prev) >= 0.5)
+            press_signal = abs(dp2h) >= 1.2
+            wind_signal = dchg >= 35
+            cloud_signal = ("回补" in cloud_txt) or ("开窗" in cloud_txt) or ("减少" in cloud_txt) or ("增加" in cloud_txt)
+
+            # No meaningful change -> skip this line to avoid mechanical noise.
+            if not (temp_signal or press_signal or wind_signal or cloud_signal):
+                rhythm_line = None
+            else:
+                chunks: list[str] = []
+                if dt_now >= 0.5 and dt_prev >= 0.2:
+                    chunks.append("温度仍在上行")
+                elif dt_now <= -0.5 and dt_prev <= -0.2:
+                    chunks.append("温度有回落迹象")
+                elif temp_signal:
+                    chunks.append("温度在窄幅震荡")
+
+                if press_signal:
+                    if dp2h <= -1.2:
+                        chunks.append("气压继续走低")
+                    elif dp2h >= 1.2:
+                        chunks.append("气压明显回升")
+
+                if wind_signal:
+                    chunks.append("风向正在重排")
+
+                if cloud_signal:
+                    # compress cloud phrase into plain short cue
+                    if "回补" in cloud_txt or "增加" in cloud_txt:
+                        chunks.append("云量有回补")
+                    elif "开窗" in cloud_txt or "减少" in cloud_txt:
+                        chunks.append("云量在转疏")
+
+                if chunks:
+                    rhythm_line = f"• 近两小时节奏：{'，'.join(chunks)}。"
+                else:
+                    rhythm_line = None
     except Exception:
         rhythm_line = None
 
