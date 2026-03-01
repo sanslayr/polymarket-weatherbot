@@ -1427,6 +1427,72 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
             return "斜压与风切并行，局地变化节奏可能加快"
         return None
 
+    def _regime_scores() -> dict[str, float]:
+        s = {
+            "advection": 0.0,
+            "dynamic": 0.0,
+            "stability": 0.0,
+            "baroclinic": 0.0,
+            "shear": 0.0,
+        }
+
+        txt850 = str(line850)
+        txt500 = str(line500)
+        txtx = str(extra)
+
+        if _contains_any(txt850, ["暖平流", "冷平流", "平流"]):
+            s["advection"] += 1.0
+        if _contains_any(txt500, ["槽", "抬升", "PVA", "涡度"]):
+            s["dynamic"] += 0.9
+        if _contains_any(txtx, ["封盖", "压制", "湿层", "低云", "耦合偏弱"]):
+            s["stability"] += 1.0
+        if _contains_any(txtx + txt850, ["锋", "锋生", "斜压"]):
+            s["baroclinic"] += 1.0
+        if _contains_any(txtx + txt850, ["风切", "切换"]):
+            s["shear"] += 0.7
+
+        o = dict(obj) if isinstance(obj, dict) else {}
+        if o:
+            t = str(o.get("type") or "").lower()
+            conf_boost = {"high": 1.2, "medium": 0.8, "low": 0.3}.get(str(o.get("confidence") or ""), 0.3)
+            if "advection" in t:
+                s["advection"] += conf_boost
+            if "dynamic" in t or "trough" in t:
+                s["dynamic"] += conf_boost
+            if "dry_intrusion" in t or "subsidence" in t:
+                s["stability"] += conf_boost
+            if "baroclinic" in t or "front" in t:
+                s["baroclinic"] += conf_boost
+            if "shear" in t:
+                s["shear"] += conf_boost
+
+        for c in candidates[:4]:
+            if not isinstance(c, dict):
+                continue
+            t = str(c.get("type") or "").lower()
+            w = {"high": 0.45, "medium": 0.35, "low": 0.12}.get(str(c.get("confidence") or ""), 0.1)
+            if "advection" in t:
+                s["advection"] += w
+            if "dynamic" in t or "trough" in t:
+                s["dynamic"] += w
+            if "dry_intrusion" in t or "subsidence" in t:
+                s["stability"] += w
+            if "baroclinic" in t or "front" in t:
+                s["baroclinic"] += w
+            if "shear" in t:
+                s["shear"] += w
+
+        return s
+
+    def _regime_label(k: str) -> str:
+        return {
+            "advection": "平流输送",
+            "dynamic": "高空动力触发",
+            "stability": "低层稳定约束",
+            "baroclinic": "锋面/斜压调整",
+            "shear": "风切节奏扰动",
+        }.get(k, k)
+
     def _dir_cn_from_deg(deg: float) -> str:
         dirs = ["北", "东北", "东", "东南", "南", "西南", "西", "西北"]
         idx = int(((deg % 360) + 22.5) // 45) % 8
@@ -1497,7 +1563,7 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
         return None
 
-    def _impact_direction_and_trigger() -> tuple[str, str]:
+    def _signal_scores() -> tuple[float, float, str]:
         up = 0.0
         down = 0.0
 
@@ -1527,6 +1593,11 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
             up += 0.5
 
         phase = str(classify_window_phase(primary_window, metar_diag).get("phase") or "unknown")
+        return up, down, phase
+
+    def _impact_direction_and_trigger() -> tuple[str, str]:
+        up, down, phase = _signal_scores()
+
         if abs(up - down) < 0.55:
             direction = "暂时看不出明显偏高或偏低"
         elif up > down:
@@ -1544,7 +1615,14 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         return direction, trigger
 
     direction_txt, trigger_txt = _impact_direction_and_trigger()
-    inter_note = _interaction_note(_candidate_groups())
+    cgroups = _candidate_groups()
+    inter_note = _interaction_note(cgroups)
+
+    rs = _regime_scores()
+    r_sorted = sorted(rs.items(), key=lambda x: x[1], reverse=True)
+    r1, s1 = r_sorted[0]
+    r2, s2 = r_sorted[1]
+    has_primary_regime = s1 >= 0.9
 
     if obj:
         otype = str(obj.get("type") or "").lower()
@@ -1552,12 +1630,21 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         regime, desc = _infer_regime_and_desc(otype, impact)
 
         # 1) 主导系统（一句话）
-        syn_lines.append(f"- **主导系统**：{regime}（{desc}）。")
+        if has_primary_regime:
+            syn_lines.append(f"- **主导系统**：{_regime_label(r1)}（{regime}）。")
+        else:
+            syn_lines.append(f"- **主导系统**：{regime}（{desc}）。")
         sys_desc = _system_plain_desc(otype)
         if sys_desc:
             syn_lines.append(f"- **系统性质**：{sys_desc}。")
 
-        # 2) 落地影响（方向 + 触发 + 交互）
+        # 2) 次级系统 / 冲突（仅证据足够时展示）
+        if s2 >= 0.8 and (s1 - s2) <= 0.55:
+            syn_lines.append(f"- **次级系统**：{_regime_label(r2)}。")
+        if {"advection", "stability"}.issubset(cgroups):
+            syn_lines.append("- **冲突项**：升温输送与低层约束并存，临窗可能出现节奏反复。")
+
+        # 3) 落地影响（方向 + 触发 + 交互）
         if impact == "station_relevant":
             scope_txt = "系统近站，影响将直接落在峰值窗"
         elif impact == "possible_override":
@@ -1572,7 +1659,15 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         syn_lines.append(f"- **落地影响**：{impact_line}")
 
     else:
-        syn_lines.append("- **主导系统**：当前未识别到可稳定追踪的同一套分层系统。")
+        if has_primary_regime:
+            syn_lines.append(f"- **主导系统**：{_regime_label(r1)}（结构未闭合，暂不立3D主系统）。")
+            if s2 >= 0.8 and (s1 - s2) <= 0.55:
+                syn_lines.append(f"- **次级系统**：{_regime_label(r2)}。")
+            if {"advection", "stability"}.issubset(cgroups):
+                syn_lines.append("- **冲突项**：升温输送与低层约束并存，临窗可能出现节奏反复。")
+        else:
+            syn_lines.append("- **主导系统**：当前未识别到可稳定追踪的同一套分层系统。")
+
         tail = f"。当前组合关系：{inter_note}" if inter_note else ""
         syn_lines.append(f"- **落地影响**：{direction_txt}；短时以实况触发为主。建议：{trigger_txt}{tail}。")
 
@@ -1660,7 +1755,7 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     phase_now = str(gate.get('phase') or 'unknown')
 
     # Quantization-aware dynamic range (METAR usually integer-rounded; avoid overfitting tiny jumps)
-    # Target: majority-probability band (not full-tail envelope).
+    # Target: main-band (majority scenarios) + optional tail-risk note.
     u = 0.0
     q_state = str((quality or {}).get("source_state") or "")
     if q_state in {"degraded", "fallback-cache"}:
@@ -1692,8 +1787,10 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         u += 0.12
 
     try:
-        babs = abs(float(metar_diag.get("temp_bias_c") or 0.0))
+        b = float(metar_diag.get("temp_bias_c") or 0.0)
+        babs = abs(b)
     except Exception:
+        b = 0.0
         babs = 0.0
     if babs >= 2.0:
         u += 0.15
@@ -1709,22 +1806,40 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
     half_range = min(1.25, max(0.55, 0.75 + u))
 
-    lo_model = peak_c - half_range
-    hi_model = peak_c + half_range
-    lo, hi = lo_model, hi_model
+    # center = model baseline + observed deviation (window-weighted) + excess-bias correction
+    center = float(peak_c)
+    try:
+        tstep = float(metar_diag.get("temp_trend_1step_c") or 0.0)
+    except Exception:
+        tstep = 0.0
     if obs_max is not None:
-        # Treat observed integer as bin center, not exact decimal truth.
-        obs_lo = obs_max - 0.35
-        obs_hi = obs_max + 0.35
-        w_obs = {
-            "far": 0.10,
-            "near_window": 0.24,
-            "in_window": 0.40,
-            "post": 0.60,
-        }.get(phase_now, 0.18)
-        lo = (1 - w_obs) * lo_model + w_obs * (obs_lo - 0.1)
-        hi = (1 - w_obs) * hi_model + w_obs * (obs_hi + 0.1)
-        lo = max(lo, obs_max - 0.25)
+        obs_proj = float(obs_max) + max(0.0, min(0.9, tstep * 0.35))
+        w_center = {
+            "far": 0.20,
+            "near_window": 0.38,
+            "in_window": 0.58,
+            "post": 0.70,
+        }.get(phase_now, 0.26)
+        center = (1 - w_center) * center + w_center * obs_proj
+
+    # avoid double-counting model priced-in move: only use excess bias above tolerance.
+    excess_up = max(0.0, b - 0.9)
+    excess_dn = max(0.0, -b - 0.9)
+    center += min(0.45, 0.18 * excess_up)
+    center -= min(0.45, 0.18 * excess_dn)
+
+    up_s, down_s, _ = _signal_scores()
+    denom = max(1e-6, up_s + down_s)
+    skew = max(-0.8, min(0.8, (up_s - down_s) / denom))
+
+    major_half = min(1.05, max(0.45, half_range * 0.68))
+    left_hw = major_half * (1.0 - 0.35 * skew)
+    right_hw = major_half * (1.0 + 0.35 * skew)
+
+    lo = center - left_hw
+    hi = center + right_hw
+    if obs_max is not None:
+        lo = max(lo, float(obs_max) - 0.25)
 
     def _soft_snap(v: float) -> float:
         iv = round(v)
@@ -1737,9 +1852,16 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
     peak_range_block = [
         "🌡️ **可能最高温区间**",
-        f"- **{lo:.1f}~{hi:.1f}°C**（峰值窗 {_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local）",
-        "- 注：该区间覆盖大多数情景，不追求覆盖所有极端尾部。",
+        f"- **主带 {lo:.1f}~{hi:.1f}°C**（峰值窗 {_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local）",
+        "- 注：主带覆盖大多数情景，不包含极端尾部。",
     ]
+
+    if skew >= 0.20:
+        tail_hi = _soft_snap(hi + min(0.8, 0.4 + 0.3 * max(0.0, skew)))
+        peak_range_block.append(f"- 尾部上破风险：若云量继续开窗且升温斜率延续，最高温可触及 **{hi:.1f}~{tail_hi:.1f}°C**。")
+    elif skew <= -0.20:
+        tail_lo = _soft_snap(max(lo - min(0.8, 0.4 + 0.3 * max(0.0, -skew)), lo - 1.0))
+        peak_range_block.append(f"- 尾部下探风险：若云量回补并伴随偏冷来流增强，最高温可能回落到 **{tail_lo:.1f}~{lo:.1f}°C**。")
     if bool(metar_diag.get("obs_correction_applied")):
         peak_range_block.append("- 注：已应用实况纠偏（模型峰值偏低，窗口锚定到当日实况峰值时段）。")
 
@@ -1909,11 +2031,11 @@ def render_report(command_text: str) -> str:
     except ValueError as exc:
         raise ValueError("date must be YYYY-MM-DD (or YYYYMMDD)") from exc
 
-    # 统一输出：固定走简版主报告（不再支持 mode/section 参数）。
-    model = (params.get("model") or default_model_for_station(st)).lower()
+    # 统一输出：固定走简版主报告（不再支持 mode/section/model/provider 参数）。
+    model = default_model_for_station(st).lower()
     if model not in {"gfs", "ecmwf"}:
-        raise ValueError("model must be gfs or ecmwf")
-    provider = (params.get("provider") or "auto").strip().lower()
+        model = "gfs"
+    provider = "auto"
 
     t0 = time.perf_counter()
     provider_used = "unknown"
