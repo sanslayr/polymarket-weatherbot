@@ -1371,21 +1371,20 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         syn_lines.append("  • 解释：稳定多层系统要求同类型扰动在多个高度层可配对且位置接近；当前更像层间不同步或离站偏远。")
         syn_lines.append("  • 影响：短时以实况（云量开合/温度斜率/近地风）为主判，3D仅作弱背景参考。")
 
-    syn_lines.append("- **证据层（分层）**：")
-    syn_lines.append(f"  • 500hPa：{line500}。")
-    syn_lines.append(f"  • 850hPa：{line850}。")
+    # concise evidence line (avoid spreading full layer-by-layer by default)
+    evidence_bits = [f"500hPa:{line500}", f"850hPa:{line850}"]
     if extra:
-        syn_lines.append(f"  • 补充约束：{extra}。")
+        evidence_bits.append(f"约束:{extra}")
+    syn_lines.append(f"- **关键证据**：{'；'.join(evidence_bits[:2])}。")
 
     if str(d.get("override_risk") or "low") == "high":
-        syn_lines.append("- **窗口改写风险**：存在窗口外系统改写风险，需关注后续实况触发。")
+        syn_lines.append("- **改写风险**：中到高，窗口前后需盯实况触发。")
 
     if str(quality.get("source_state") or "") == "degraded":
-        syn_lines.append("- **数据状态**：forecast 链路部分降级（已用可用信息输出）。")
+        syn_lines.append("- **数据状态**：环流链路降级（结论偏保守）。")
 
     syn_lines.append(
-        f"- **峰值窗口**：{_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local（{phase_mode}）；"
-        "临窗优先看实况触发（云量开合、温度斜率、近地风向切换）。"
+        f"- **峰值窗口**：{_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local。"
     )
 
     metar_prefix = []
@@ -1725,8 +1724,7 @@ def render_report(command_text: str) -> str:
             or ("Too Many Requests" in err_txt)
             or ("breaker active" in err_txt)
             or breaker_active
-            or ("429" in str(breaker_reason))
-            or ("grid_429" in str(breaker_reason))
+            or (breaker_active and (("429" in str(breaker_reason)) or ("grid_429" in str(breaker_reason))))
         )
         if syn_fail and rate_limited:
             if breaker_until is not None:
