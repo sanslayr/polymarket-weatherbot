@@ -821,16 +821,7 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
     b0 = _hour_bias(latest)
     b1 = _hour_bias(prev) if prev else None
     b2 = _hour_bias(prev2) if prev2 else None
-    if b0 is not None and b1 is not None:
-        delta = b0 - b1
-        if delta >= 0.4:
-            btrend = "偏暖扩大"
-        elif delta <= -0.4:
-            btrend = "偏冷加深"
-        else:
-            btrend = "偏差收敛/平稳"
-        tail = f"；再上一报 {b2:+.2f}°C" if b2 is not None else ""
-        lines.append(f"• 偏差轨迹：当前 {b0:+.2f}°C，上一报 {b1:+.2f}°C{tail}（{btrend}）。")
+    # Bias trajectory line removed by operator preference: keep report concise.
 
     # 5) 高影响触发告警（仅触发时显示）
     alert = None
