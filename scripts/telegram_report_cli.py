@@ -1938,7 +1938,12 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         evidence_bits.append(f"约束: {extra}")
 
     if evidence_bits:
-        syn_lines.append(f"- **关键证据**：{'；'.join(evidence_bits[:2])}。")
+        if len(evidence_bits) == 1:
+            syn_lines.append(f"- **关键证据**：{evidence_bits[0]}。")
+        else:
+            syn_lines.append("- **关键证据**：")
+            for e in evidence_bits[:3]:
+                syn_lines.append(f"  • {e}")
 
     def _sounding_layer_note() -> str | None:
         bits: list[str] = []
