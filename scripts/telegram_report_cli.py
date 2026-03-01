@@ -85,15 +85,22 @@ def _perf_log(stage: str, seconds: float) -> None:
         pass
 
 
-def _openmeteo_breaker_active() -> bool:
+def _openmeteo_breaker_info() -> tuple[bool, datetime | None, str | None]:
     try:
         if not OPENMETEO_BREAKER_FILE.exists():
-            return False
+            return False, None, None
         obj = json.loads(OPENMETEO_BREAKER_FILE.read_text(encoding="utf-8"))
         ts = datetime.fromisoformat(str(obj.get("until", "")).replace("Z", "+00:00"))
-        return datetime.now(timezone.utc) < ts
+        reason = str(obj.get("reason") or "")
+        active = datetime.now(timezone.utc) < ts
+        return active, ts, reason
     except Exception:
-        return False
+        return False, None, None
+
+
+def _openmeteo_breaker_active() -> bool:
+    active, _until, _reason = _openmeteo_breaker_info()
+    return active
 
 
 def _retry_after_seconds_from_exc(exc: Exception) -> int | None:
@@ -1602,14 +1609,40 @@ def render_report(command_text: str) -> str:
     if len(rt) == 10 and rt.isdigit():
         rt_fmt = f"{rt[0:4]}/{rt[4:6]}/{rt[6:8]} {rt[8:10]}Z"
 
-    header = (
-        f"📍 **{st.icao} ({st.city}) | {abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}**\n"
-        f"判断时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC | "
-        f"{now_local.strftime('%Y-%m-%d %H:%M')} Local (UTC{now_local.strftime('%z')[:3]})\n"
-        f"分析基准模型: {analysis_model.upper()}（运行时次: {rt_fmt}） | 数据源: {provider_used}\n"
-        f"🕒 请求接收: {req_start_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
-        f"⏱️ forecast耗时: {forecast_elapsed:.2f}s | 脚本端到端: {time.perf_counter() - t_e2e:.2f}s"
-    )
+    header_lines = [
+        f"📍 **{st.icao} ({st.city}) | {abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}**",
+        f"判断时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC | {now_local.strftime('%Y-%m-%d %H:%M')} Local (UTC{now_local.strftime('%z')[:3]})",
+        f"分析基准模型: {analysis_model.upper()}（运行时次: {rt_fmt}） | 数据源: {provider_used}",
+        f"🕒 请求接收: {req_start_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC",
+        f"⏱️ forecast耗时: {forecast_elapsed:.2f}s | 脚本端到端: {time.perf_counter() - t_e2e:.2f}s",
+    ]
+
+    try:
+        quality = (forecast_decision.get("quality") or {}) if isinstance(forecast_decision, dict) else {}
+        missing = set(quality.get("missing_layers") or [])
+        degraded = str(quality.get("source_state") or "") == "degraded"
+        syn_fail = ("synoptic" in missing) or degraded
+        err_txt = str(_synoptic_error or "")
+        breaker_active, breaker_until, breaker_reason = _openmeteo_breaker_info()
+        rate_limited = (
+            ("429" in err_txt)
+            or ("Too Many Requests" in err_txt)
+            or ("breaker active" in err_txt)
+            or breaker_active
+            or ("429" in str(breaker_reason))
+            or ("grid_429" in str(breaker_reason))
+        )
+        if syn_fail and rate_limited:
+            if breaker_until is not None:
+                header_lines.append(
+                    f"⚠️ 数据提醒：Open-Meteo 限流（429），synoptic 已降级；breaker截止 {breaker_until.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+                )
+            else:
+                header_lines.append("⚠️ 数据提醒：Open-Meteo 限流（429），synoptic 已降级。")
+    except Exception:
+        pass
+
+    header = "\n".join(header_lines)
 
     t0 = time.perf_counter()
     body = choose_section_text(
