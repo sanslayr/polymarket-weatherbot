@@ -1370,6 +1370,35 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
             return "弱信号背景", "背景噪声"
         return "混合主导", "混合扰动"
 
+    candidates = (((fdec.get("features") or {}).get("objects_3d") or {}).get("candidates") or []) if isinstance(fdec, dict) else []
+
+    def _candidate_groups() -> set[str]:
+        gs: set[str] = set()
+        for c in candidates[:4]:
+            t = str((c or {}).get("type") or "").lower()
+            if "advection" in t:
+                gs.add("advection")
+            elif "baroclinic" in t or "frontal" in t:
+                gs.add("baroclinic")
+            elif "dry_intrusion" in t or "subsidence" in t:
+                gs.add("stability")
+            elif "dynamic" in t or "trough" in t:
+                gs.add("dynamic")
+            elif "shear" in t:
+                gs.add("shear")
+        return gs
+
+    def _interaction_note(gs: set[str]) -> str | None:
+        if {"advection", "stability"}.issubset(gs):
+            return "暖平流与稳定层约束并存，强度取决于云层能否持续开窗"
+        if {"advection", "baroclinic"}.issubset(gs):
+            return "输送与锋生叠加，主要影响峰值时段重排"
+        if {"dynamic", "stability"}.issubset(gs):
+            return "高空触发存在，但低层落地受约束"
+        if {"baroclinic", "shear"}.issubset(gs):
+            return "斜压与风切并行，局地变化节奏可能加快"
+        return None
+
     def _impact_direction_and_trigger() -> tuple[str, str]:
         up = 0.0
         down = 0.0
@@ -1400,23 +1429,24 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
             up += 0.5
 
         phase = str(classify_window_phase(primary_window, metar_diag).get("phase") or "unknown")
-        if abs(up - down) < 0.45:
-            direction = "方向偏重排（幅度中性）"
+        if abs(up - down) < 0.55:
+            direction = "暂无单边方向（条件依赖）"
         elif up > down:
             direction = "方向偏上修（上沿抬高）"
         else:
             direction = "方向偏压制（上沿下压）"
 
         if phase in {"near_window", "in_window"}:
-            trigger = "临窗优先盯云量开合与风向切换"
+            trigger = "临窗优先看云量开合与风向切换"
         elif phase == "far":
-            trigger = "临窗前先看升温斜率是否连续转正"
+            trigger = "临窗前先看升温斜率能否连续转正"
         else:
             trigger = "优先看温度斜率与云量相变"
 
         return direction, trigger
 
     direction_txt, trigger_txt = _impact_direction_and_trigger()
+    inter_note = _interaction_note(_candidate_groups())
 
     if obj:
         otype = str(obj.get("type") or "").lower()
@@ -1426,18 +1456,24 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         # 1) 主导系统（一句话）
         syn_lines.append(f"- **主导系统**：{regime}（{desc}）。")
 
-        # 2) 落地影响（方向 + 触发）
+        # 2) 落地影响（方向 + 触发 + 交互）
         if impact == "station_relevant":
-            impact_line = f"{direction_txt}；系统近站，影响将直接落在峰值窗。触发点：{trigger_txt}。"
+            scope_txt = "系统近站，影响将直接落在峰值窗"
         elif impact == "possible_override":
-            impact_line = f"{direction_txt}；系统在外围，主要改写峰值时段。触发点：{trigger_txt}。"
+            scope_txt = "系统在外围，主要改写峰值时段"
         else:
-            impact_line = f"{direction_txt}；当前以背景场为主。触发点：{trigger_txt}。"
+            scope_txt = "当前以背景场为主，短时改写概率有限"
+
+        impact_line = f"{direction_txt}；{scope_txt}"
+        if inter_note:
+            impact_line += f"；{inter_note}"
+        impact_line += f"。触发点：{trigger_txt}。"
         syn_lines.append(f"- **落地影响**：{impact_line}")
 
     else:
         syn_lines.append("- **主导系统**：当前未识别到可稳定追踪的同一套分层系统。")
-        syn_lines.append(f"- **落地影响**：{direction_txt}；短时以实况触发为主（{trigger_txt}）。")
+        tail = f"；{inter_note}" if inter_note else ""
+        syn_lines.append(f"- **落地影响**：{direction_txt}；短时以实况触发为主（{trigger_txt}）{tail}。")
 
     # concise evidence line (avoid spreading full layer-by-layer by default)
     def _humanize_850(s: str) -> str:
