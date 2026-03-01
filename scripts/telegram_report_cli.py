@@ -1370,6 +1370,54 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
             return "弱信号背景", "背景噪声"
         return "混合主导", "混合扰动"
 
+    def _impact_direction_and_trigger() -> tuple[str, str]:
+        up = 0.0
+        down = 0.0
+
+        if "暖平流" in line850:
+            up += 1.0
+        if "冷平流" in line850:
+            down += 1.0
+
+        if _contains_any(extra, ["封盖", "压制", "湿层", "低云"]):
+            down += 1.0
+        if _contains_any(extra, ["干层", "日照", "升温加速"]):
+            up += 0.8
+
+        try:
+            b = float(metar_diag.get("temp_bias_c")) if metar_diag.get("temp_bias_c") is not None else 0.0
+        except Exception:
+            b = 0.0
+        if b >= 0.8:
+            up += 0.6
+        elif b <= -0.8:
+            down += 0.6
+
+        ctrend = str(metar_diag.get("cloud_trend") or "")
+        if ("增加" in ctrend) or ("回补" in ctrend):
+            down += 0.5
+        if ("开窗" in ctrend) or ("减弱" in ctrend):
+            up += 0.5
+
+        phase = str(classify_window_phase(primary_window, metar_diag).get("phase") or "unknown")
+        if abs(up - down) < 0.45:
+            direction = "方向偏重排（幅度中性）"
+        elif up > down:
+            direction = "方向偏上修（上沿抬高）"
+        else:
+            direction = "方向偏压制（上沿下压）"
+
+        if phase in {"near_window", "in_window"}:
+            trigger = "临窗优先盯云量开合与风向切换"
+        elif phase == "far":
+            trigger = "临窗前先看升温斜率是否连续转正"
+        else:
+            trigger = "优先看温度斜率与云量相变"
+
+        return direction, trigger
+
+    direction_txt, trigger_txt = _impact_direction_and_trigger()
+
     if obj:
         otype = str(obj.get("type") or "").lower()
         impact = str(obj.get("impact_scope") or "background_only")
@@ -1378,18 +1426,18 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         # 1) 主导系统（一句话）
         syn_lines.append(f"- **主导系统**：{regime}（{desc}）。")
 
-        # 2) 落地影响（一句话）
+        # 2) 落地影响（方向 + 触发）
         if impact == "station_relevant":
-            impact_line = "系统近站，后续1-3小时上修/压制将主要由实况触发决定。"
+            impact_line = f"{direction_txt}；系统近站，影响将直接落在峰值窗。触发点：{trigger_txt}。"
         elif impact == "possible_override":
-            impact_line = "系统在外围，若风向切换或云层突变，峰值区间仍可能被改写。"
+            impact_line = f"{direction_txt}；系统在外围，主要改写峰值时段。触发点：{trigger_txt}。"
         else:
-            impact_line = "当前以背景信号为主，短时改写最高温概率偏低。"
+            impact_line = f"{direction_txt}；当前以背景场为主。触发点：{trigger_txt}。"
         syn_lines.append(f"- **落地影响**：{impact_line}")
 
     else:
         syn_lines.append("- **主导系统**：当前未识别到可稳定追踪的同一套分层系统。")
-        syn_lines.append("- **落地影响**：短时以实况（云量、温度斜率、近地风）为主判。")
+        syn_lines.append(f"- **落地影响**：{direction_txt}；短时以实况触发为主（{trigger_txt}）。")
 
     # concise evidence line (avoid spreading full layer-by-layer by default)
     def _humanize_850(s: str) -> str:
@@ -1763,9 +1811,9 @@ def render_report(command_text: str) -> str:
     direction_factor = _direction_factor_for(st.icao)
     head_geo = f"{abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}"
     if site_tag:
-        head_geo = f"{head_geo} | 站点画像:{site_tag}"
+        head_geo = f"{head_geo} ({site_tag})"
     elif terrain_tag:
-        head_geo = f"{head_geo} | 地形:{terrain_tag}"
+        head_geo = f"{head_geo} ({terrain_tag})"
 
     header_lines = [
         f"📍 **{st.icao} ({st.city}) | {head_geo}**",
