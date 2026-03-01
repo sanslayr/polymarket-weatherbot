@@ -652,7 +652,7 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
 
     def _delta_text(v: float, unit: str) -> str:
         if abs(v) < 0.05:
-            return f"较上一报持平（0.0{unit}）"
+            return "较上一报持平"
         return f"较上一报 {v:+.1f}{unit}"
 
     def fmt_latest_obs(x: dict[str, Any], prev_x: dict[str, Any] | None) -> list[str]:
@@ -671,14 +671,26 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
                 pass
             prev_raw = (prev_x.get("rawOb") or "").strip()
             prev_cloud = parse_cloud_layers(prev_raw, prev_x.get("cover"))
-        cloud_note = f"；云层较上一报：{_cloud_trend(x, prev_x)}" if prev_x else ""
+        cloud_compare = ""
+        if prev_x:
+            prev_code = _cloud_token(prev_x) or "未知"
+            tr = _cloud_trend(x, prev_x)
+            if "稳定" in tr:
+                tr_txt = "云层稳定无变化"
+            elif "增加" in tr or "回补" in tr:
+                tr_txt = "云量增加"
+            elif "减弱" in tr or "开窗" in tr:
+                tr_txt = "云量减少"
+            else:
+                tr_txt = "云层趋势待确认"
+            cloud_compare = f"（上一报{prev_code}，{tr_txt}）"
         lines = [
             f"**最新报（{local.strftime('%H:%M')} {time_label}）**",
             f"• **气温**：{x.get('temp')}°C（{_delta_text(dt, '°C')}）",
             f"• **露点**：{x.get('dewp')}°C（{_delta_text(dp, '°C')}）",
             f"• **气压**：{x.get('altim')} hPa（{_delta_text(dpres, ' hPa')}）",
             f"• **风**：{fmt_wind(x)}",
-            f"• **云层**：{cloud}" + (f"（较上一报：{prev_cloud}）" if prev_cloud else "") + cloud_note,
+            f"• **云层**：{cloud}{cloud_compare}",
         ]
         if wx and wx != "无降水天气现象":
             lines.append(f"• **天气现象**：{wx}")
@@ -696,6 +708,19 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         if m:
             return m.group(1)
         return str(x.get("cover") or "").upper()
+
+    def _cloud_token(x: dict[str, Any] | None) -> str:
+        if not x:
+            return ""
+        raw = (x.get("rawOb") or "")
+        if " CAVOK" in raw:
+            return "CAVOK"
+        if " CLR" in raw:
+            return "CLR"
+        m = re.search(r"\b(FEW|SCT|BKN|OVC|VV)\d{3}\b", raw)
+        if m:
+            return m.group(0)
+        return _cloud_code(x)
 
     def _cloud_trend(cur: dict[str, Any], prev_x: dict[str, Any] | None) -> str:
         rank = {"CLR": 0, "CAVOK": 0, "FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4, "VV": 5}
@@ -1204,7 +1229,6 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     extra = str(bg.get("extra") or "")
 
     syn_lines = ["🧭 **环流背景**"]
-    syn_lines.append(f"- **主判定**：{phase_mode}。")
 
     obj = (d.get("object_3d_main") or {}) if isinstance(d, dict) else {}
     if obj:
@@ -1260,7 +1284,7 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         }
         r_main = _infer_main_regime()
         desc = _infer_descriptor()
-        syn_lines.append(f"- **3D主导因子**：{regime_human.get(r_main, '混合主导型')}（{desc}）。")
+        syn_lines.append(f"- **3D天气系统一句话**：{regime_human.get(r_main, '混合主导型')}（{desc}）。")
 
         def _lvl(v: Any) -> str:
             try:
@@ -1285,7 +1309,8 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
             syn_lines.append("  • 落地影响：目前以背景信号为主，短时改写最高温的概率偏低。")
 
     else:
-        syn_lines.append("- **3D系统主线**：当前未识别到稳定多层系统。")
+        syn_lines.append("- **3D天气系统一句话**：当前没有可直接追踪到站点的“同一套分层系统”。")
+        syn_lines.append("  • 解释：稳定多层系统要求同类型扰动在多个高度层可配对且位置接近；当前更像层间不同步或离站偏远。")
         syn_lines.append("  • 影响：短时以实况（云量开合/温度斜率/近地风）为主判，3D仅作弱背景参考。")
 
     syn_lines.append("- **证据层（分层）**：")
@@ -1318,7 +1343,7 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
                 except Exception:
                     tmax_txt = ""
             if tmax_txt:
-                metar_prefix.append(f"• 今日已观测最高温：{mx_txt}°C（出现在 {tmax_txt}）")
+                metar_prefix.append(f"• 今日已观测最高温：{mx_txt}°C（{tmax_txt}）")
             else:
                 metar_prefix.append(f"• 今日已观测最高温：{mx_txt}°C")
     except Exception:
