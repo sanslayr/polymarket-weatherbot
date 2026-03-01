@@ -2689,6 +2689,8 @@ def choose_section_text(
             hi = min(hi, thermal_cap_hi)
             lo = min(lo, hi - 0.2)
 
+    strict_late_cap = False
+
     # Afternoon solar-decay + plateau gate:
     # if already in/near window with weak temp slope, avoid optimistic late-window rebound tails.
     if phase_now in {"near_window", "in_window"} and clear_sky_stable and (not precip_cooling) and (not precip_residual):
@@ -2697,6 +2699,11 @@ def choose_section_text(
             peak_local_txt = str(primary_window.get("peak_local") or "")
             latest_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
             peak_dt = datetime.fromisoformat(peak_local_txt) if peak_local_txt else None
+            if latest_dt is not None and peak_dt is not None:
+                if latest_dt.tzinfo is not None and peak_dt.tzinfo is None:
+                    peak_dt = peak_dt.replace(tzinfo=latest_dt.tzinfo)
+                elif latest_dt.tzinfo is None and peak_dt.tzinfo is not None:
+                    latest_dt = latest_dt.replace(tzinfo=peak_dt.tzinfo)
             hour_local = (latest_dt.hour + latest_dt.minute / 60.0) if latest_dt else None
             hleft = max(0.0, (peak_dt - latest_dt).total_seconds() / 3600.0) if (latest_dt and peak_dt) else None
         except Exception:
@@ -2721,6 +2728,46 @@ def choose_section_text(
                     solar_plateau_cap = max(solar_plateau_cap, float(obs_max) + 0.35)
                 hi = min(hi, solar_plateau_cap)
                 lo = min(lo, hi - 0.2)
+
+    # Quantized-METAR near-end guard:
+    # many stations report integer-like temp steps; when close to window end, avoid reading a single +1C step
+    # as sustained acceleration.
+    if phase_now in {"near_window", "in_window"} and bool(metar_diag.get("metar_temp_quantized")):
+        try:
+            latest_local_txt = str(metar_diag.get("latest_report_local") or "")
+            end_local_txt = str(primary_window.get("end_local") or "")
+            latest_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
+            end_dt = datetime.fromisoformat(end_local_txt) if end_local_txt else None
+            if latest_dt is not None and end_dt is not None:
+                if latest_dt.tzinfo is not None and end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=latest_dt.tzinfo)
+                elif latest_dt.tzinfo is None and end_dt.tzinfo is not None:
+                    latest_dt = latest_dt.replace(tzinfo=end_dt.tzinfo)
+            h_to_end = max(0.0, (end_dt - latest_dt).total_seconds() / 3600.0) if (latest_dt and end_dt) else None
+        except Exception:
+            h_to_end = None
+        try:
+            t_now = float(metar_diag.get("latest_temp"))
+        except Exception:
+            t_now = None
+        if t_now is not None and (h_to_end is not None) and h_to_end <= 1.0:
+            q_add = 0.95
+            if t_cons <= 0.20:
+                q_add = 0.65
+            elif t_cons <= 0.45:
+                q_add = 0.80
+            elif t_cons <= 0.75:
+                q_add = 0.95
+            else:
+                q_add = 1.05
+            if "暖平流" in line850 and b_cons >= 0.8 and t_cons >= 0.4:
+                q_add += 0.10
+            q_cap = t_now + q_add
+            if obs_max is not None:
+                q_cap = max(q_cap, float(obs_max) + 0.25)
+            hi = min(hi, q_cap)
+            lo = min(lo, hi - 0.2)
+            strict_late_cap = True
 
     # Far-window cold-advection sanity cap: avoid over-projecting rapid afternoon rebound
     # when low-level northerly cold feed persists.
@@ -2777,6 +2824,8 @@ def choose_section_text(
 
     if skew >= 0.20:
         tail_ext = min(0.8, 0.4 + 0.3 * max(0.0, skew))
+        if strict_late_cap:
+            tail_ext = min(tail_ext, 0.18)
         if clear_sky_stable and phase_now in {"near_window", "in_window"} and t_cons <= 0.15:
             tail_ext = min(tail_ext, 0.45)
         if phase_now in {"near_window", "in_window"} and low_cloud_peak >= 70 and t_cons <= 0.20:
