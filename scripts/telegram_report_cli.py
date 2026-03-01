@@ -917,25 +917,72 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
     else:
         trend_hint = "短时温度节奏待确认"
 
+    def _wx_state(wx: str) -> str:
+        s = str(wx or "").upper()
+        if not s:
+            return "none"
+        if "TS" in s:
+            return "convective"
+        if any(k in s for k in ["RA", "DZ", "SN", "PL", "GR", "GS"]):
+            if "+" in s:
+                return "heavy"
+            if "-" in s:
+                return "light"
+            return "moderate"
+        return "none"
+
+    def _wx_hint(wx: str) -> str:
+        s = str(wx or "").upper()
+        if not s:
+            return ""
+        if "TS" in s:
+            return "对流降水干扰在场"
+        if any(k in s for k in ["RA", "DZ"]):
+            if "-RA" in s or "-DZ" in s:
+                return "弱降雨干扰在场"
+            if "+RA" in s or "+DZ" in s:
+                return "较强降雨干扰在场"
+            return "降雨干扰在场"
+        if any(k in s for k in ["SN", "PL", "GR", "GS"]):
+            return "降水相态干扰在场"
+        return ""
+
     wx_now = str(latest.get("wxString") or latest.get("wx") or "").upper()
-    wx_hint = ""
-    if wx_now:
-        if "TS" in wx_now:
-            wx_hint = "对流降水干扰在场"
-        elif any(k in wx_now for k in ["RA", "DZ"]):
-            if "-RA" in wx_now or "-DZ" in wx_now:
-                wx_hint = "弱降雨干扰在场"
-            elif "+RA" in wx_now or "+DZ" in wx_now:
-                wx_hint = "较强降雨干扰在场"
-            else:
-                wx_hint = "降雨干扰在场"
-        elif any(k in wx_now for k in ["SN", "PL", "GR", "GS"]):
-            wx_hint = "降水相态干扰在场"
+    wx_prev = str((prev or {}).get("wxString") or (prev or {}).get("wx") or "").upper() if prev else ""
+    wx_state_now = _wx_state(wx_now)
+    wx_state_prev = _wx_state(wx_prev)
+
+    rank = {"none": 0, "light": 1, "moderate": 2, "heavy": 3, "convective": 4}
+    if rank.get(wx_state_now, 0) > 0 and rank.get(wx_state_prev, 0) == 0:
+        wx_trend = "new"
+    elif rank.get(wx_state_now, 0) == 0 and rank.get(wx_state_prev, 0) > 0:
+        wx_trend = "end"
+    elif rank.get(wx_state_now, 0) > rank.get(wx_state_prev, 0):
+        wx_trend = "intensify"
+    elif rank.get(wx_state_now, 0) < rank.get(wx_state_prev, 0):
+        wx_trend = "weaken"
+    elif rank.get(wx_state_now, 0) > 0:
+        wx_trend = "steady"
+    else:
+        wx_trend = "none"
+
+    wx_hint = _wx_hint(wx_now)
+    wx_change_hint = ""
+    if wx_trend == "new":
+        wx_change_hint = "降水新出现"
+    elif wx_trend == "intensify":
+        wx_change_hint = "降水在增强"
+    elif wx_trend == "weaken":
+        wx_change_hint = "降水在减弱"
+    elif wx_trend == "end":
+        wx_change_hint = "降水已结束"
 
     lines.append("")
     summary_bits = [trend_hint, cloud_hint]
     if wx_hint:
         summary_bits.append(wx_hint)
+    if wx_change_hint:
+        summary_bits.append(wx_change_hint)
     lines.append(f"• 最新实况简评：{'，'.join(summary_bits)}。")
 
     # 追加“近两小时节奏”一句：把短样本变化压缩成可执行线索
@@ -1042,7 +1089,9 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
     # 5) 高影响触发告警（仅触发时显示）
     alert = None
     ctrend = _cloud_trend(latest, prev)
-    if isinstance(t_trend, (int, float)) and t_trend >= 0.5 and ("开窗" in ctrend or "减弱" in ctrend):
+    if wx_trend in {"new", "intensify"}:
+        alert = "⚠️ 实况触发：降水出现/增强，短时压温风险上升。"
+    elif isinstance(t_trend, (int, float)) and t_trend >= 0.5 and ("开窗" in ctrend or "减弱" in ctrend):
         alert = "⚠️ 实况触发：短时升温 + 云层转疏，窗口上沿风险上调。"
     elif isinstance(t_trend, (int, float)) and t_trend <= -0.5 and ("回补" in ctrend or "增加" in ctrend):
         alert = "⚠️ 实况触发：降温 + 云层增厚，峰值窗口可能提前结束。"
@@ -1099,6 +1148,8 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         "latest_dewpoint": latest.get("dewp"),
         "latest_cloud_code": latest_cloud_code,
         "latest_wx": latest.get("wxString") or latest.get("wx") or "",
+        "latest_precip_state": wx_state_now,
+        "precip_trend": wx_trend,
         "cloud_trend": cloud_tr,
         "temp_trend_1step_c": t_trend,
         "temp_trend_smooth_c": t_trend_smooth,
@@ -1616,6 +1667,8 @@ def choose_section_text(
     h925_summary = str((((fdec.get("features") or {}).get("h925") or {}).get("summary") if isinstance(fdec, dict) else "") or "")
     snd_thermo = ((((fdec.get("features") or {}).get("sounding") or {}).get("thermo") if isinstance(fdec, dict) else None) or {})
     cloud_code_now = str(metar_diag.get("latest_cloud_code") or "").upper()
+    precip_state = str(metar_diag.get("latest_precip_state") or "none").lower()
+    precip_trend = str(metar_diag.get("precip_trend") or "none").lower()
 
     syn_lines = ["🧭 **环流背景**"]
 
@@ -1956,6 +2009,16 @@ def choose_section_text(
         if ("开窗" in ctrend) or ("减弱" in ctrend):
             up += 0.5
 
+        # precipitation evolution effect (change > state)
+        if precip_trend in {"new", "intensify"}:
+            down += 0.75
+        elif precip_trend in {"weaken", "end"}:
+            up += 0.35
+        elif precip_trend == "steady" and precip_state in {"moderate", "heavy", "convective"}:
+            down += 0.45
+        if precip_state == "convective":
+            down += 0.25
+
         sf = _sounding_factor_pack()
         up += float(sf.get("up_adj") or 0.0)
         down += float(sf.get("down_adj") or 0.0)
@@ -2220,10 +2283,16 @@ def choose_section_text(
         if w850 >= 38 and thermal_txt:
             thermal_txt = thermal_txt + "，强风混合使节奏更易重排"
 
+        precip_tail = ""
+        if precip_trend in {"new", "intensify"}:
+            precip_tail = "；降水正在增强，短时压温风险抬升"
+        elif precip_state in {"moderate", "heavy", "convective"}:
+            precip_tail = "；降水仍在，白天增温效率受抑"
+
         tail = f"；{thermal_txt}" if thermal_txt else ""
         syn_lines = [
             "🧭 **今日最高温影响（一句话）**",
-            f"- {direction_txt}；{short_cue}，{trigger_txt}{tail}。",
+            f"- {direction_txt}；{short_cue}，{trigger_txt}{tail}{precip_tail}。",
         ]
 
     metar_prefix = []
@@ -2388,6 +2457,17 @@ def choose_section_text(
         if b_cons > 0.0 and t_cons <= 0.05:
             consistency_shift = min(consistency_shift, 0.12)
 
+    precip_cooling = False
+    if phase_now in {"near_window", "in_window"}:
+        if precip_trend in {"new", "intensify"}:
+            precip_cooling = True
+        elif precip_state in {"moderate", "heavy", "convective"} and precip_trend in {"steady", "none"}:
+            precip_cooling = True
+
+    if precip_cooling:
+        consistency_shift = min(consistency_shift, 0.10)
+        center -= 0.18
+
     consistency_shift = max(-0.75, min(0.75, consistency_shift))
     center += consistency_shift
 
@@ -2446,6 +2526,9 @@ def choose_section_text(
         elif low_cloud_peak >= 65:
             thermal_cap_hi = float(peak_c) + 1.2
 
+        if precip_cooling:
+            thermal_cap_hi = min(thermal_cap_hi, float(peak_c) + 1.0) if thermal_cap_hi is not None else (float(peak_c) + 1.0)
+
         if thermal_cap_hi is not None:
             if t_cons <= 0.15:
                 thermal_cap_hi -= 0.15
@@ -2453,8 +2536,10 @@ def choose_section_text(
                 thermal_cap_hi += 0.20  # strong-wind cities can keep mixed layer warmer
             if "暖平流" in line850 and b_cons >= 1.0:
                 thermal_cap_hi += 0.10
+            if precip_trend in {"new", "intensify"}:
+                thermal_cap_hi -= 0.20
             if obs_max is not None:
-                thermal_cap_hi = max(thermal_cap_hi, float(obs_max) + 0.7)
+                thermal_cap_hi = max(thermal_cap_hi, float(obs_max) + 0.6)
             hi = min(hi, thermal_cap_hi)
             lo = min(lo, hi - 0.2)
 
@@ -2487,6 +2572,8 @@ def choose_section_text(
             tail_ext = min(tail_ext, 0.45)
         if phase_now in {"near_window", "in_window"} and low_cloud_peak >= 70 and t_cons <= 0.20:
             tail_ext = min(tail_ext, 0.25)
+        if precip_cooling:
+            tail_ext = min(tail_ext, 0.20)
         tail_hi = _soft_snap(hi + tail_ext)
         disp_hi = tail_hi
         peak_range_block.append(
@@ -2550,6 +2637,14 @@ def choose_section_text(
         focus.append((0.85, "• 云量回补迹象增强 → 临窗压制风险抬升。"))
     elif ("开窗" in cloud_tr) or ("减弱" in cloud_tr):
         focus.append((0.7, "• 云量转疏在延续 → 地面增温效率仍有支撑。"))
+
+    # precipitation evolution: prioritize change signal
+    if precip_trend in {"new", "intensify"}:
+        focus.append((1.08, "• 降水出现/增强 → 蒸发冷却与云厚效应上升，最高温上沿需下修。"))
+    elif precip_trend in {"weaken", "end"}:
+        focus.append((0.82, "• 降水减弱/结束 → 压温约束减轻，若云层不回补上沿可恢复。"))
+    elif precip_state in {"moderate", "heavy", "convective"}:
+        focus.append((0.9, "• 降水仍在持续 → 白天增温效率受抑，峰值更易提前锁定。"))
 
     try:
         if snd_thermo.get("has_profile"):
