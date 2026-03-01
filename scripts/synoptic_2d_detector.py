@@ -276,6 +276,144 @@ def detect_850_bands(
     return out
 
 
+def detect_llj_shear_zones(
+    lat: np.ndarray,
+    lon: np.ndarray,
+    u850: np.ndarray,
+    v850: np.ndarray,
+    u925: np.ndarray | None,
+    v925: np.ndarray | None,
+    station: dict[str, float],
+) -> list[dict[str, Any]]:
+    if u925 is None or v925 is None:
+        return []
+    lat_step, lon_step = grid_step_degrees(lat, lon)
+    cell_area = approx_cell_area_km2(float(np.median(lat)), lat_step, lon_step)
+    min_pixels = max(5, int(round(80000.0 / max(cell_area, 1.0))))
+
+    ws925 = np.sqrt(u925 * u925 + v925 * v925)
+    ws850 = np.sqrt(u850 * u850 + v850 * v850)
+    shear = np.sqrt((u850 - u925) ** 2 + (v850 - v925) ** 2)
+
+    j_cut = np.nanpercentile(ws925, 85)
+    s_cut = np.nanpercentile(shear, 75)
+    mask = (ws925 >= j_cut) & (shear >= s_cut)
+
+    systems: list[dict[str, Any]] = []
+    for comp in connected_components(mask):
+        if len(comp) < min_pixels:
+            continue
+        c_lat, c_lon = centroid(lat, lon, comp)
+        dist = haversine_km(station["lat"], station["lon"], c_lat, c_lon)
+        geo = build_geo_context(station, c_lat, c_lon, dist)
+        llj = float(np.nanmean([ws925[i, j] for i, j in comp]))
+        shk = float(np.nanmean([shear[i, j] for i, j in comp]))
+        systems.append(
+            {
+                "system_type": "llj_shear_zone",
+                "scale": "synoptic",
+                "level": "925-850",
+                "center_lat": geo["center_lat"],
+                "center_lon": geo["center_lon"],
+                "llj_ms": round(llj, 2),
+                "shear_ms": round(shk, 2),
+                "area_pixels": len(comp),
+                "distance_to_station_km": geo["distance_km"],
+                "region_name": station_sector_label(station["lat"], station["lon"], c_lat, c_lon, dist),
+                "geo_context": geo,
+            }
+        )
+    systems.sort(key=lambda x: x["distance_to_station_km"])
+    return systems[:4]
+
+
+def detect_dry_intrusion_700(
+    lat: np.ndarray,
+    lon: np.ndarray,
+    t700: np.ndarray | None,
+    t850: np.ndarray,
+    station: dict[str, float],
+) -> list[dict[str, Any]]:
+    if t700 is None:
+        return []
+    lat_step, lon_step = grid_step_degrees(lat, lon)
+    cell_area = approx_cell_area_km2(float(np.median(lat)), lat_step, lon_step)
+    min_pixels = max(5, int(round(80000.0 / max(cell_area, 1.0))))
+
+    lapse = t850 - t700
+    l_cut = np.nanpercentile(lapse, 80)
+    mask = lapse >= l_cut
+    systems: list[dict[str, Any]] = []
+    for comp in connected_components(mask):
+        if len(comp) < min_pixels:
+            continue
+        c_lat, c_lon = centroid(lat, lon, comp)
+        dist = haversine_km(station["lat"], station["lon"], c_lat, c_lon)
+        geo = build_geo_context(station, c_lat, c_lon, dist)
+        lv = float(np.nanmean([lapse[i, j] for i, j in comp]))
+        systems.append(
+            {
+                "system_type": "dry_intrusion_700",
+                "scale": "synoptic",
+                "level": "700",
+                "center_lat": geo["center_lat"],
+                "center_lon": geo["center_lon"],
+                "lapse_t850_t700_c": round(lv, 2),
+                "area_pixels": len(comp),
+                "distance_to_station_km": geo["distance_km"],
+                "region_name": station_sector_label(station["lat"], station["lon"], c_lat, c_lon, dist),
+                "geo_context": geo,
+            }
+        )
+    systems.sort(key=lambda x: x["distance_to_station_km"])
+    return systems[:4]
+
+
+def detect_baroclinic_coupling(
+    lat: np.ndarray,
+    lon: np.ndarray,
+    mslp: np.ndarray,
+    t850: np.ndarray,
+    station: dict[str, float],
+) -> list[dict[str, Any]]:
+    lat_step, lon_step = grid_step_degrees(lat, lon)
+    cell_area = approx_cell_area_km2(float(np.median(lat)), lat_step, lon_step)
+    min_pixels = max(5, int(round(100000.0 / max(cell_area, 1.0))))
+
+    dpy, dpx = finite_diff(lat, lon, mslp)
+    dtY, dtX = finite_diff(lat, lon, t850)
+    g_p = np.sqrt(dpx * dpx + dpy * dpy)
+    g_t = np.sqrt(dtX * dtX + dtY * dtY)
+    score = g_p * g_t
+
+    cut = np.nanpercentile(score, 85)
+    mask = score >= cut
+    systems: list[dict[str, Any]] = []
+    for comp in connected_components(mask):
+        if len(comp) < min_pixels:
+            continue
+        c_lat, c_lon = centroid(lat, lon, comp)
+        dist = haversine_km(station["lat"], station["lon"], c_lat, c_lon)
+        geo = build_geo_context(station, c_lat, c_lon, dist)
+        sc = float(np.nanmean([score[i, j] for i, j in comp]))
+        systems.append(
+            {
+                "system_type": "baroclinic_coupling",
+                "scale": "synoptic",
+                "level": "mslp-850",
+                "center_lat": geo["center_lat"],
+                "center_lon": geo["center_lon"],
+                "coupling_score": round(sc, 8),
+                "area_pixels": len(comp),
+                "distance_to_station_km": geo["distance_km"],
+                "region_name": station_sector_label(station["lat"], station["lon"], c_lat, c_lon, dist),
+                "geo_context": geo,
+            }
+        )
+    systems.sort(key=lambda x: x["distance_to_station_km"])
+    return systems[:4]
+
+
 def detect_frontogenesis_zones(
     lat: np.ndarray,
     lon: np.ndarray,
@@ -457,6 +595,7 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
     t925 = np.asarray(fields.get("t925_c"), dtype=float) if fields.get("t925_c") is not None else None
     u925 = np.asarray(fields.get("u925_ms"), dtype=float) if fields.get("u925_ms") is not None else None
     v925 = np.asarray(fields.get("v925_ms"), dtype=float) if fields.get("v925_ms") is not None else None
+    t700 = np.asarray(fields.get("t700_c"), dtype=float) if fields.get("t700_c") is not None else None
 
     prev = payload.get("previous_fields")
     prev_mslp = None
@@ -467,10 +606,13 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
     highs = detect_pressure_centers(lat, lon, mslp, station, "surface_high", prev_mslp)
     bands = detect_850_bands(lat, lon, t850, u850, v850, station)
     fronts = detect_frontogenesis_zones(lat, lon, t850, u850, v850, t925, u925, v925, mslp, station)
+    llj = detect_llj_shear_zones(lat, lon, u850, v850, u925, v925, station)
+    dry700 = detect_dry_intrusion_700(lat, lon, t700, t850, station)
+    baro = detect_baroclinic_coupling(lat, lon, mslp, t850, station)
     axes = detect_500_axes(lat, lon, z500, station)
     planetary = diagnose_planetary(lat, z500, u850)
 
-    systems = planetary + lows + highs + axes + fronts + bands["warm_advection"] + bands["cold_advection"]
+    systems = planetary + lows + highs + axes + fronts + llj + dry700 + baro + bands["warm_advection"] + bands["cold_advection"]
     systems_sorted = sorted(
         systems,
         key=lambda x: (

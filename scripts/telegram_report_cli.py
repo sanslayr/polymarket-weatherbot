@@ -1251,6 +1251,13 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
         def _infer_main_regime() -> str:
             # Orthogonal main regimes: ADV / DYN / BARO / STAB / MIXED / WEAK
+            otype_l = str(otype).lower()
+            if ("front" in otype_l) or ("baroclinic" in otype_l):
+                return "BARO"
+            if "dry_intrusion" in otype_l:
+                return "STAB"
+            if "shear" in otype_l:
+                return "MIXED"
             if _contains_any(line850 + extra, ["冷平流", "暖平流", "平流"]):
                 return "ADV"
             if _contains_any(line500 + extra, ["抬升", "槽前", "PVA", "涡度"]):

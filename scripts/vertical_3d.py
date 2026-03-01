@@ -18,6 +18,10 @@ def _stype_group(stype: str) -> str:
     s = (stype or "").lower()
     if "front" in s:
         return "frontal"
+    if "baroclinic" in s:
+        return "baroclinic"
+    if "llj" in s or "shear" in s:
+        return "shear"
     if "trough" in s or "vortic" in s:
         return "dynamic"
     if "ridge" in s or "subsidence" in s:
