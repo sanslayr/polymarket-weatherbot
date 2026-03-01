@@ -2176,42 +2176,60 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
     phase_map = {"far": "远离窗口", "near_window": "接近窗口", "in_window": "窗口内", "post": "窗口后", "unknown": "窗口状态未知"}
     vars_block = [f"⚠️ **关注变量**（{phase_map.get(phase_now, '窗口状态未知')}）"]
-    t_bias = metar_diag.get("temp_bias_smooth_c") if metar_diag.get("temp_bias_smooth_c") is not None else metar_diag.get("temp_bias_c")
-    if cloud_code in {"BKN", "OVC", "VV"}:
-        vars_block.append("• 低云维持/继续增厚 → 最高温上沿下压，峰值可能提前结束。")
-    elif cloud_code in {"CLR", "CAVOK"}:
-        vars_block.append("• 晴空维持 → 地面增温效率较高，最高温上沿仍有上修空间。")
-    else:
-        vars_block.append("• 少云继续维持/进一步转疏 → 地面增温效率抬升，最高温上沿有上修空间。")
 
+    t_bias = metar_diag.get("temp_bias_smooth_c") if metar_diag.get("temp_bias_smooth_c") is not None else metar_diag.get("temp_bias_c")
+    t_tr = metar_diag.get("temp_trend_smooth_c") if metar_diag.get("temp_trend_smooth_c") is not None else metar_diag.get("temp_trend_1step_c")
+    cloud_tr = str(metar_diag.get("cloud_trend") or "")
+    focus: list[tuple[float, str]] = []
+
+    # 温度趋势（优先）
+    try:
+        tv = float(t_tr or 0.0)
+        if tv >= 0.6:
+            focus.append((1.0, "• 未来30-60分钟升温斜率若继续维持正值 → 最高温上沿仍可上修。"))
+        elif tv <= -0.6:
+            focus.append((1.0, "• 短时斜率若持续转负 → 峰值可能提前锁定并压低上沿。"))
+        else:
+            focus.append((0.55, "• 先盯温度斜率是否重新放大，这是临窗改判的最快信号。"))
+    except Exception:
+        focus.append((0.45, "• 先盯温度斜率是否重新放大，这是临窗改判的最快信号。"))
+
+    # 偏差驱动
+    if isinstance(t_bias, (int, float)):
+        if t_bias >= 1.5:
+            focus.append((0.95, "• 实况持续高于同小时模式（偏暖延续） → 最高温更偏上沿。"))
+        elif t_bias <= -1.5:
+            focus.append((0.95, "• 实况持续低于同小时模式（偏冷延续） → 最高温更偏下沿。"))
+
+    # 风场重排
     try:
         wdir = metar_diag.get("latest_wdir")
         wspd = metar_diag.get("latest_wspd")
+        wdchg = float(metar_diag.get("wind_dir_change_deg") or 0.0)
         if wdir not in (None, "", "VRB") and wspd is not None:
-            vars_block.append(f"• 近地风若从当前风场（{wdir}° {wspd}kt）明显转向/增风 → 峰值时段与幅度都可能重排。")
+            sc = 0.9 if wdchg >= 35 else 0.6
+            focus.append((sc, f"• 近地风若从当前风场（{wdir}° {wspd}kt）明显转向/增风 → 峰值时段与幅度可能重排。"))
         else:
-            vars_block.append("• 近地风场若由不定转为稳定单一来流 → 峰值时段可能后移并抬升。")
+            focus.append((0.45, "• 近地风场若由不定转为稳定单一来流 → 峰值时段可能后移并抬升。"))
     except Exception:
-        vars_block.append("• 近地风向/风速若突变 → 峰值出现时段与幅度可能改写。")
+        focus.append((0.45, "• 近地风向/风速若突变 → 峰值出现时段与幅度可能改写。"))
 
-    if isinstance(t_bias, (int, float)):
-        if t_bias >= 1.5:
-            vars_block.append("• 实况持续高于同小时模式（偏暖延续） → 最高温更偏上沿。")
-        elif t_bias <= -1.5:
-            vars_block.append("• 实况持续低于同小时模式（偏冷延续） → 最高温更偏下沿。")
-        else:
-            vars_block.append("• 未来30-60分钟温度斜率若重新转正并放大 → 仍可小幅上修最高温。")
-    else:
-        vars_block.append("• 未来30-60分钟温度斜率若持续为正 → 仍有上修空间。")
+    # 云量只在“有信号”时上提，不再每次默认主重点
+    if cloud_code in {"BKN", "OVC", "VV"}:
+        focus.append((0.95, "• 低云维持/继续增厚 → 最高温上沿下压，峰值可能提前结束。"))
+    elif ("回补" in cloud_tr) or ("增加" in cloud_tr):
+        focus.append((0.85, "• 云量回补迹象增强 → 临窗压制风险抬升。"))
+    elif ("开窗" in cloud_tr) or ("减弱" in cloud_tr):
+        focus.append((0.7, "• 云量转疏在延续 → 地面增温效率仍有支撑。"))
 
     try:
         if snd_thermo.get("has_profile"):
             capev = snd_thermo.get("sbcape_jkg") or snd_thermo.get("mlcape_jkg") or snd_thermo.get("mucape_jkg")
             cinv = snd_thermo.get("sbcin_jkg") if snd_thermo.get("sbcin_jkg") is not None else snd_thermo.get("mlcin_jkg")
             if isinstance(capev, (int, float)) and capev >= 300 and (not isinstance(cinv, (int, float)) or cinv > -75):
-                vars_block.append("• 探空显示可用对流能量且抑制偏弱 → 午后云量/阵性扰动上升，峰值波动风险增加。")
+                focus.append((0.8, "• 探空显示可用对流能量且抑制偏弱 → 午后云量/阵性扰动上升，峰值波动风险增加。"))
             elif isinstance(cinv, (int, float)) and cinv <= -125:
-                vars_block.append("• 探空抑制偏强（CIN较大） → 云对流触发受限，升温路径更看近地风云条件。")
+                focus.append((0.6, "• 探空抑制偏强（CIN较大） → 对流触发受限，升温路径更看近地风场。"))
     except Exception:
         pass
 
@@ -2221,17 +2239,22 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         phase_now = str(gate.get("phase") or "unknown")
         if rt_triggers:
             vars_block = vars_block[:1] + rt_triggers[:3]
-        elif phase_now == "far":
-            vars_block = [
-                vars_block[0],
-                "• 当前远离峰值窗口：先跟踪上午到中午的升温斜率是否连续转正。",
-                "• 临窗前关键观察：云量是否回补到BKN/OVC（压制）或维持少云/晴空（上修）。",
-                "• 进入窗口前1-2小时再重点评估：风向切换与偏差漂移是否触发改判。",
-            ]
         else:
-            vars_block = vars_block[:4]
+            if phase_now == "far":
+                focus.append((1.05, "• 当前远离峰值窗口：先跟踪上午到中午的升温斜率是否连续转正。"))
+            focus_sorted = [txt for _s, txt in sorted(focus, key=lambda x: x[0], reverse=True)]
+            # 去重保序
+            uniq: list[str] = []
+            for t in focus_sorted:
+                if t not in uniq:
+                    uniq.append(t)
+            vars_block = vars_block[:1] + uniq[:3]
+            if len(vars_block) == 1:
+                vars_block.append("• 临窗前继续跟踪温度斜率与风向节奏，必要时再改判。")
     except Exception:
-        vars_block = vars_block[:4]
+        vars_block = vars_block[:1] + [
+            "• 临窗前继续跟踪温度斜率与风向节奏，必要时再改判。"
+        ]
 
     try:
         poly_block = _build_polymarket_section(polymarket_event_url, primary_window, metar_diag=metar_diag)
