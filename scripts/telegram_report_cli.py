@@ -1433,7 +1433,14 @@ def _build_polymarket_section(
     return "\n".join(lines)
 
 
-def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_diag: dict[str, Any], polymarket_event_url: str, forecast_decision: dict[str, Any] | None = None) -> str:
+def choose_section_text(
+    primary_window: dict[str, Any],
+    metar_text: str,
+    metar_diag: dict[str, Any],
+    polymarket_event_url: str,
+    forecast_decision: dict[str, Any] | None = None,
+    compact_synoptic: bool = False,
+) -> str:
     """Render-only section builder.
 
     Decision/diagnostics should come from forecast_pipeline; this function only translates
@@ -2025,6 +2032,19 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         f"- **峰值窗口**：{_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local。"
     )
 
+    if compact_synoptic:
+        short_cue = "以实况触发为主"
+        if "暖平流" in line850 and "冷平流" not in line850:
+            short_cue = "暖平流对上沿仍有支撑"
+        elif "冷平流" in line850:
+            short_cue = "冷平流对上沿有抑制"
+        elif "干层" in h700_summary:
+            short_cue = "中层偏干有利白天增温"
+        syn_lines = [
+            "🧭 **今日最高温影响（一句话）**",
+            f"- {direction_txt}；{short_cue}，{trigger_txt}。",
+        ]
+
     metar_prefix = []
     try:
         if metar_diag and metar_diag.get("observed_max_temp_c") is not None:
@@ -2577,13 +2597,20 @@ def render_report(command_text: str) -> str:
     elif terrain_tag:
         head_geo = f"{head_geo} ({terrain_tag})"
 
+    gate_now = classify_window_phase(primary, metar_diag)
+    phase_now = str(gate_now.get("phase") or "unknown")
+    compact_synoptic = phase_now in {"near_window", "in_window"}
+
     header_lines = [
         f"📍 **{st.icao} ({st.city}) | {head_geo}**",
         f"生成时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC | {now_local.strftime('%H:%M')} Local (UTC{now_local.strftime('%z')[:3]})",
-        f"分析基准模型: {analysis_model.upper()}（运行时次: {rt_fmt}） | 小时预报源: {provider_used} | 3D场源: {SYNOPTIC_PROVIDER}",
     ]
-    if direction_factor:
-        header_lines.append(f"方位因子: {direction_factor}")
+    if not compact_synoptic:
+        header_lines.append(
+            f"分析基准模型: {analysis_model.upper()}（运行时次: {rt_fmt}） | 小时预报源: {provider_used} | 3D场源: {SYNOPTIC_PROVIDER}"
+        )
+        if direction_factor:
+            header_lines.append(f"方位因子: {direction_factor}")
 
     # Show timing only when forecast-data acquisition is meaningful (non-trivial fetch cost).
     hf = float(perf_local.get('hourly_fetch', 0.0) or 0.0)
@@ -2623,6 +2650,7 @@ def render_report(command_text: str) -> str:
         metar_diag,
         links_payload["links"]["polymarket_event"],
         forecast_decision=forecast_decision,
+        compact_synoptic=compact_synoptic,
     )
     _mark("render_body", time.perf_counter() - t0)
 
