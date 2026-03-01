@@ -1663,6 +1663,7 @@ def choose_section_text(
     polymarket_event_url: str,
     forecast_decision: dict[str, Any] | None = None,
     compact_synoptic: bool = False,
+    temp_unit: str = "C",
 ) -> str:
     """Render-only section builder.
 
@@ -1676,6 +1677,20 @@ def choose_section_text(
             return dt.strftime("%H:%M")
         except Exception:
             return str(s)
+
+    unit = "F" if str(temp_unit).upper() == "F" else "C"
+
+    def _to_unit(c: float) -> float:
+        return (c * 9.0 / 5.0 + 32.0) if unit == "F" else c
+
+    def _fmt_temp(v_c: float) -> str:
+        v = _to_unit(float(v_c))
+        return f"{v:.1f}°{unit}"
+
+    def _fmt_range(lo_c: float, hi_c: float) -> str:
+        lo_u = _to_unit(float(lo_c))
+        hi_u = _to_unit(float(hi_c))
+        return f"{lo_u:.1f}~{hi_u:.1f}°{unit}"
 
     fdec = forecast_decision if isinstance(forecast_decision, dict) else {}
     d = (fdec.get("decision") or {}) if isinstance(fdec, dict) else {}
@@ -2632,16 +2647,16 @@ def choose_section_text(
         tail_hi = _soft_snap(hi + tail_ext)
         disp_hi = tail_hi
         peak_range_block.append(
-            f"- **{disp_lo:.1f}~{disp_hi:.1f}°C**（主看 {core_lo:.1f}~{core_hi:.1f}°C；峰值窗 {window_txt}；{tail_up_cond}）"
+            f"- **{_fmt_range(disp_lo, disp_hi)}**（主看 {_fmt_range(core_lo, core_hi)}；峰值窗 {window_txt}；{tail_up_cond}）"
         )
     elif skew <= -0.20:
         tail_lo = _soft_snap(max(lo - min(0.8, 0.4 + 0.3 * max(0.0, -skew)), lo - 1.0))
         disp_lo = tail_lo
         peak_range_block.append(
-            f"- **{disp_lo:.1f}~{disp_hi:.1f}°C**（主看 {core_lo:.1f}~{core_hi:.1f}°C；峰值窗 {window_txt}；若云量回补并伴随偏冷来流增强）"
+            f"- **{_fmt_range(disp_lo, disp_hi)}**（主看 {_fmt_range(core_lo, core_hi)}；峰值窗 {window_txt}；若云量回补并伴随偏冷来流增强）"
         )
     else:
-        peak_range_block.append(f"- **{disp_lo:.1f}~{disp_hi:.1f}°C**（峰值窗 {window_txt}）")
+        peak_range_block.append(f"- **{_fmt_range(disp_lo, disp_hi)}**（峰值窗 {window_txt}）")
     if bool(metar_diag.get("obs_correction_applied")):
         peak_range_block.append("- 注：已应用实况纠偏（模型峰值偏低，窗口锚定到当日实况峰值时段）。")
 
@@ -3023,6 +3038,7 @@ def render_report(command_text: str) -> str:
     header = "\n".join(header_lines)
 
     t0 = time.perf_counter()
+    unit_pref = "F" if str(st.icao).upper().startswith("K") else "C"
     body = choose_section_text(
         primary,
         metar_text,
@@ -3030,6 +3046,7 @@ def render_report(command_text: str) -> str:
         links_payload["links"]["polymarket_event"],
         forecast_decision=forecast_decision,
         compact_synoptic=compact_synoptic,
+        temp_unit=unit_pref,
     )
     _mark("render_body", time.perf_counter() - t0)
 
