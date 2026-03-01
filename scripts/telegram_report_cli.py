@@ -150,6 +150,7 @@ def _station_meta_for(icao: str) -> dict[str, str]:
                     terr = t1 if (t1 and (not t2 or redundant)) else (f"{t1}·{t2}" if (t1 and t2) else (t1 or ""))
                     mp[k] = {
                         "terrain": terr,
+                        "site_tag": str(row.get("site_tag") or "").strip(),
                         "factor_summary": str(row.get("factor_summary") or "").strip(),
                         "terrain_sector": str(row.get("terrain_sector") or "").strip(),
                         "water_factor": str(row.get("water_factor") or "").strip(),
@@ -163,6 +164,11 @@ def _station_meta_for(icao: str) -> dict[str, str]:
 
 def _terrain_tag_for(icao: str) -> str | None:
     t = _station_meta_for(icao).get("terrain")
+    return t if t else None
+
+
+def _site_tag_for(icao: str) -> str | None:
+    t = _station_meta_for(icao).get("site_tag")
     return t if t else None
 
 
@@ -1736,9 +1742,11 @@ def render_report(command_text: str) -> str:
     fc_fallback = perf_local.get("forecast.synoptic_fallback_cache", 0.0)
 
     terrain_tag = _terrain_tag_for(st.icao)
-    factor_summary = _factor_summary_for(st.icao)
+    site_tag = _site_tag_for(st.icao)
     head_geo = f"{abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}"
-    if terrain_tag:
+    if site_tag:
+        head_geo = f"{head_geo} | 站点画像:{site_tag}"
+    elif terrain_tag:
         head_geo = f"{head_geo} | 地形:{terrain_tag}"
 
     header_lines = [
@@ -1746,8 +1754,6 @@ def render_report(command_text: str) -> str:
         f"生成时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC | {now_local.strftime('%H:%M')} Local (UTC{now_local.strftime('%z')[:3]})",
         f"分析基准模型: {analysis_model.upper()}（运行时次: {rt_fmt}） | 小时预报源: {provider_used} | 3D场源: {SYNOPTIC_PROVIDER}",
     ]
-    if factor_summary:
-        header_lines.append(f"站点因子: {factor_summary}")
 
     # Show timing only when forecast-data acquisition is meaningful (non-trivial fetch cost).
     hf = float(perf_local.get('hourly_fetch', 0.0) or 0.0)
