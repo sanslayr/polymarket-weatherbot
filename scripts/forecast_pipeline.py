@@ -142,6 +142,8 @@ def build_forecast_decision(
         station_lat=station_lat,
         station_lon=station_lon,
         primary_window=primary_window,
+        diag700=diag700,
+        diag925=diag925,
     )
 
     return {

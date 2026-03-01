@@ -1315,6 +1315,18 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         else:
             syn_lines.append("  • 落地影响：目前以背景信号为主，短时改写最高温的概率偏低。")
 
+        conf_map = {"high": "高", "medium": "中", "low": "低"}
+        conf = str(obj.get("confidence") or "")
+        ev = obj.get("evidence") if isinstance(obj.get("evidence"), dict) else {}
+        support = ev.get("support") or []
+        conflict = ev.get("conflict") or []
+        if conf:
+            syn_lines.append(f"  • 3D系统可信度：{conf_map.get(conf, conf)}。")
+        if support:
+            syn_lines.append(f"  • 主要证据：{'；'.join(str(x) for x in support[:2])}。")
+        if conflict:
+            syn_lines.append(f"  • 冲突证据：{'；'.join(str(x) for x in conflict[:2])}。")
+
     else:
         syn_lines.append("- **3D天气系统一句话**：当前没有可直接追踪到站点的“同一套分层系统”。")
         syn_lines.append("  • 解释：稳定多层系统要求同类型扰动在多个高度层可配对且位置接近；当前更像层间不同步或离站偏远。")
