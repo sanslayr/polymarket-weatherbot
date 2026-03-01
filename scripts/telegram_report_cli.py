@@ -70,7 +70,6 @@ CACHE_PRUNE_HOURS = 24
 PERF_LOG_ENABLED = os.getenv("LOOK_PERF_LOG", "0") == "1"
 OPENMETEO_BREAKER_SECONDS = int(os.getenv("OPENMETEO_BREAKER_SECONDS", "900") or "900")
 OPENMETEO_BREAKER_FILE = CACHE_DIR / "openmeteo_breaker.json"
-TERRAIN_TAG_FILE = ROOT / "config" / "station_terrain_tags.json"
 SYNOPTIC_PROVIDER = "gfs-grib2"
 
 
@@ -128,22 +127,24 @@ def _trip_openmeteo_breaker(reason: str = "429", seconds: int | None = None) -> 
         pass
 
 
-_TERRAIN_TAGS: dict[str, Any] | None = None
+_STATION_TERRAIN_MAP: dict[str, str] | None = None
 
 
 def _terrain_tag_for(icao: str) -> str | None:
-    global _TERRAIN_TAGS
+    """Read fixed terrain tags from station_links.csv (single source of station metadata)."""
+    global _STATION_TERRAIN_MAP
     try:
-        if _TERRAIN_TAGS is None:
-            if TERRAIN_TAG_FILE.exists():
-                _TERRAIN_TAGS = json.loads(TERRAIN_TAG_FILE.read_text(encoding="utf-8"))
-            else:
-                _TERRAIN_TAGS = {}
-        node = (_TERRAIN_TAGS or {}).get(str(icao).upper())
-        if isinstance(node, dict):
-            t = str(node.get("tag") or "").strip()
-            return t or None
-        return None
+        if _STATION_TERRAIN_MAP is None:
+            mp: dict[str, str] = {}
+            with STATION_CSV.open(newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    k = str(row.get("icao") or "").upper().strip()
+                    v = str(row.get("terrain_tag") or "").strip()
+                    if k and v:
+                        mp[k] = v
+            _STATION_TERRAIN_MAP = mp
+        t = (_STATION_TERRAIN_MAP or {}).get(str(icao).upper())
+        return t if t else None
     except Exception:
         return None
 
