@@ -2458,15 +2458,22 @@ def choose_section_text(
             consistency_shift = min(consistency_shift, 0.12)
 
     precip_cooling = False
+    precip_residual = False
     if phase_now in {"near_window", "in_window"}:
         if precip_trend in {"new", "intensify"}:
             precip_cooling = True
         elif precip_state in {"moderate", "heavy", "convective"} and precip_trend in {"steady", "none"}:
             precip_cooling = True
+        elif precip_trend == "end" and cloud_code_now in {"BKN", "OVC", "VV"}:
+            # rain just ended but cloud deck remains: cooling impact can linger
+            precip_residual = True
 
     if precip_cooling:
         consistency_shift = min(consistency_shift, 0.10)
         center -= 0.18
+    elif precip_residual:
+        consistency_shift = min(consistency_shift, 0.15)
+        center -= 0.08
 
     consistency_shift = max(-0.75, min(0.75, consistency_shift))
     center += consistency_shift
@@ -2519,6 +2526,10 @@ def choose_section_text(
     except Exception:
         w850_peak = 0.0
 
+    # If latest METAR still reports BKN/OVC, treat cloud constraint as persistent even when model peak-hour low cloud is lower.
+    if cloud_code_now in {"BKN", "OVC", "VV"}:
+        low_cloud_peak = max(low_cloud_peak, 75.0)
+
     thermal_cap_hi = None
     if phase_now in {"near_window", "in_window"}:
         if low_cloud_peak >= 80:
@@ -2528,6 +2539,8 @@ def choose_section_text(
 
         if precip_cooling:
             thermal_cap_hi = min(thermal_cap_hi, float(peak_c) + 1.0) if thermal_cap_hi is not None else (float(peak_c) + 1.0)
+        elif precip_residual:
+            thermal_cap_hi = min(thermal_cap_hi, float(peak_c) + 1.05) if thermal_cap_hi is not None else (float(peak_c) + 1.05)
 
         if thermal_cap_hi is not None:
             if t_cons <= 0.15:
@@ -2574,6 +2587,8 @@ def choose_section_text(
             tail_ext = min(tail_ext, 0.25)
         if precip_cooling:
             tail_ext = min(tail_ext, 0.20)
+        elif precip_residual:
+            tail_ext = min(tail_ext, 0.24)
         tail_hi = _soft_snap(hi + tail_ext)
         disp_hi = tail_hi
         peak_range_block.append(
