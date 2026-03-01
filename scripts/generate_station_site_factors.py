@@ -25,6 +25,16 @@ SECTORS = [
 ]
 
 
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2.0) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlon / 2.0) ** 2
+    return 2.0 * r * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+
+
 def _dest_point(lat: float, lon: float, bearing_deg: float, distance_km: float) -> tuple[float, float]:
     # great-circle destination point
     r = 6371.0
@@ -56,7 +66,7 @@ def _fetch_elev(points: list[tuple[float, float]]) -> list[float]:
     return [float(x) for x in arr]
 
 
-def _city_sector(city: str, st_lat: float, st_lon: float) -> str:
+def _city_sector(city: str, st_lat: float, st_lon: float) -> tuple[str, float | None]:
     # open-meteo geocoding, choose nearest candidate to station
     try:
         url = "https://geocoding-api.open-meteo.com/v1/search"
@@ -64,7 +74,7 @@ def _city_sector(city: str, st_lat: float, st_lon: float) -> str:
         r.raise_for_status()
         arr = (r.json() or {}).get("results") or []
         if not arr:
-            return "未知"
+            return "未知", None
 
         def dist2(x: dict[str, Any]) -> float:
             la = float(x.get("latitude") or 0.0)
@@ -80,9 +90,11 @@ def _city_sector(city: str, st_lat: float, st_lon: float) -> str:
         x = math.cos(math.radians(st_lat)) * math.sin(math.radians(la)) - math.sin(math.radians(st_lat)) * math.cos(math.radians(la)) * math.cos(math.radians(lo - st_lon))
         br = (math.degrees(math.atan2(y, x)) + 360) % 360
         idx = int(((br + 22.5) % 360) // 45)
-        return ["北", "东北", "东", "东南", "南", "西南", "西", "西北"][idx]
+        sec = ["北", "东北", "东", "东南", "南", "西南", "西", "西北"][idx]
+        dkm = _haversine_km(st_lat, st_lon, la, lo)
+        return sec, round(dkm, 1)
     except Exception:
-        return "未知"
+        return "未知", None
 
 
 def _water_factor(tag2: str) -> str:
@@ -103,7 +115,7 @@ def main() -> None:
 
     rows = list(csv.DictReader(STATION_CSV.open("r", encoding="utf-8")))
     fieldnames = list(rows[0].keys()) if rows else []
-    for col in ["terrain_sector", "water_factor", "city_sector", "factor_summary", "site_tag"]:
+    for col in ["terrain_sector", "water_factor", "water_sector", "city_sector", "city_distance_km", "urban_position", "factor_summary", "site_tag"]:
         if col not in fieldnames:
             fieldnames.append(col)
 
@@ -123,14 +135,37 @@ def main() -> None:
             sec = SECTORS[best_i][1]
             terrain_sector = f"{sec}侧高地" if deltas[best_i] >= 80 else "高地方位不显著"
 
+            # water-side proxy: lowest surrounding side likely where nearby water/lowland opens.
+            low_i = min(range(len(SECTORS)), key=lambda i: deltas[i])
+            water_sec = SECTORS[low_i][1]
+
             t2 = str(r.get("terrain_tag2") or "")
             water = _water_factor(t2)
-            csec = _city_sector(city, lat, lon)
+            csec, cdist = _city_sector(city, lat, lon)
+
+            opp = {
+                "北": "南", "南": "北", "东": "西", "西": "东",
+                "东北": "西南", "西南": "东北", "东南": "西北", "西北": "东南",
+            }
+            st_from_city = opp.get(csec, "未知")
+            if cdist is not None and cdist <= 8:
+                urban_pos = "城中"
+            elif cdist is not None and cdist <= 25:
+                urban_pos = f"主城{st_from_city}侧(城郊)"
+            elif cdist is not None and cdist <= 50:
+                urban_pos = f"主城{st_from_city}侧(远郊)"
+            else:
+                urban_pos = f"主城{st_from_city}侧"
+
+            water_sector_txt = f"{water_sec}侧临水" if water != "内陆主导" else "内陆主导"
 
             r["terrain_sector"] = terrain_sector
             r["water_factor"] = water
+            r["water_sector"] = water_sector_txt
             r["city_sector"] = csec
-            r["factor_summary"] = f"{terrain_sector}·{water}·主城在{csec}侧"
+            r["city_distance_km"] = "" if cdist is None else f"{cdist:.1f}"
+            r["urban_position"] = urban_pos
+            r["factor_summary"] = f"{terrain_sector}·{water_sector_txt}·{urban_pos}"
 
             # site_tag is intended as fixed curated station label.
             # only auto-fill when empty.
@@ -150,7 +185,10 @@ def main() -> None:
         except Exception as exc:
             r["terrain_sector"] = "未知"
             r["water_factor"] = "未知"
+            r["water_sector"] = "未知"
             r["city_sector"] = "未知"
+            r["city_distance_km"] = ""
+            r["urban_position"] = "未知"
             r["factor_summary"] = f"未知({exc})"
 
     with STATION_CSV.open("w", encoding="utf-8", newline="") as f:

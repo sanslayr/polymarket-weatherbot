@@ -154,7 +154,10 @@ def _station_meta_for(icao: str) -> dict[str, str]:
                         "factor_summary": str(row.get("factor_summary") or "").strip(),
                         "terrain_sector": str(row.get("terrain_sector") or "").strip(),
                         "water_factor": str(row.get("water_factor") or "").strip(),
+                        "water_sector": str(row.get("water_sector") or "").strip(),
                         "city_sector": str(row.get("city_sector") or "").strip(),
+                        "city_distance_km": str(row.get("city_distance_km") or "").strip(),
+                        "urban_position": str(row.get("urban_position") or "").strip(),
                     }
             _STATION_META_MAP = mp
         return (_STATION_META_MAP or {}).get(str(icao).upper(), {})
@@ -175,6 +178,20 @@ def _site_tag_for(icao: str) -> str | None:
 def _factor_summary_for(icao: str) -> str | None:
     t = _station_meta_for(icao).get("factor_summary")
     return t if t else None
+
+
+def _direction_factor_for(icao: str) -> str | None:
+    m = _station_meta_for(icao)
+    water_sec = str(m.get("water_sector") or "").strip()
+    urban_pos = str(m.get("urban_position") or "").strip()
+    bits = []
+    if water_sec and water_sec not in {"内陆主导", "未知"}:
+        bits.append(water_sec)
+    if urban_pos and urban_pos != "未知":
+        bits.append(urban_pos)
+    if not bits:
+        return None
+    return " | ".join(bits)
 
 
 def station_timezone_name(st: Station) -> str:
@@ -1743,6 +1760,7 @@ def render_report(command_text: str) -> str:
 
     terrain_tag = _terrain_tag_for(st.icao)
     site_tag = _site_tag_for(st.icao)
+    direction_factor = _direction_factor_for(st.icao)
     head_geo = f"{abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}"
     if site_tag:
         head_geo = f"{head_geo} | 站点画像:{site_tag}"
@@ -1754,6 +1772,8 @@ def render_report(command_text: str) -> str:
         f"生成时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC | {now_local.strftime('%H:%M')} Local (UTC{now_local.strftime('%z')[:3]})",
         f"分析基准模型: {analysis_model.upper()}（运行时次: {rt_fmt}） | 小时预报源: {provider_used} | 3D场源: {SYNOPTIC_PROVIDER}",
     ]
+    if direction_factor:
+        header_lines.append(f"方位因子: {direction_factor}")
 
     # Show timing only when forecast-data acquisition is meaningful (non-trivial fetch cost).
     hf = float(perf_local.get('hourly_fetch', 0.0) or 0.0)
