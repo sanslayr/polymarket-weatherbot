@@ -70,7 +70,7 @@ CACHE_PRUNE_HOURS = 24
 PERF_LOG_ENABLED = os.getenv("LOOK_PERF_LOG", "0") == "1"
 OPENMETEO_BREAKER_SECONDS = int(os.getenv("OPENMETEO_BREAKER_SECONDS", "900") or "900")
 OPENMETEO_BREAKER_FILE = CACHE_DIR / "openmeteo_breaker.json"
-SYNOPTIC_PROVIDER = "openmeteo"
+SYNOPTIC_PROVIDER = "gfs-grib2"
 
 
 def _perf_log(stage: str, seconds: float) -> None:
@@ -1620,7 +1620,9 @@ def render_report(command_text: str) -> str:
     _mark("hourly_fetch", time.perf_counter() - t0)
 
     global SYNOPTIC_PROVIDER
-    SYNOPTIC_PROVIDER = provider_used
+    # Strategy: hourly forecast prefers open-meteo; 3D field prefers gfs-grib2 by default.
+    pref_3d = (os.getenv("FORECAST_3D_PROVIDER", "gfs-grib2") or "gfs-grib2").strip().lower()
+    SYNOPTIC_PROVIDER = "gfs-grib2" if pref_3d in {"gfs", "gfs-grib2", "grib2"} else provider_used
 
     tz_name = tz_name_station or om.get("timezone", "UTC")
     hourly_day = slice_hourly_local_day(om["hourly"], target_date)
@@ -1662,10 +1664,11 @@ def render_report(command_text: str) -> str:
     peak_local_dt = datetime.strptime(primary["peak_local"], "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
     peak_utc = peak_local_dt.astimezone(timezone.utc)
 
-    analysis_model = "gfs" if provider_used == "gfs-grib2" else model
+    analysis_model = model
+    link_model = "gfs" if SYNOPTIC_PROVIDER == "gfs-grib2" else analysis_model
     links_payload = BSL.build_links(
         row=BSL.load_station(STATION_CSV, st.icao),
-        model=analysis_model,
+        model=link_model,
         now_utc=datetime.now(timezone.utc),
         target_valid_utc=peak_utc,
         target_date_utc=datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc),
@@ -1706,7 +1709,7 @@ def render_report(command_text: str) -> str:
     header_lines = [
         f"📍 **{st.icao} ({st.city}) | {abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}**",
         f"判断时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC | {now_local.strftime('%Y-%m-%d %H:%M')} Local (UTC{now_local.strftime('%z')[:3]})",
-        f"分析基准模型: {analysis_model.upper()}（运行时次: {rt_fmt}） | 数据源: {provider_used}",
+        f"分析基准模型: {analysis_model.upper()}（运行时次: {rt_fmt}） | 小时预报源: {provider_used} | 3D场源: {SYNOPTIC_PROVIDER}",
         f"🕒 请求接收: {req_start_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC",
         f"⏱️ 总耗时: 取数{perf_local.get('hourly_fetch', 0.0):.2f}s + 实况{perf_local.get('metar_fetch_parse', 0.0):.2f}s + 识别{forecast_elapsed:.2f}s | 端到端{time.perf_counter() - t_e2e:.2f}s",
         f"⏱️ forecast分解: cache读{fc_cache:.2f}s / synoptic构建{fc_syn:.2f}s / 决策{fc_dec:.2f}s / cache写{fc_write:.2f}s" + (" / 回填缓存" if fc_fallback > 0 else ""),
