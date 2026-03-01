@@ -696,16 +696,46 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
     fc_t = tmap.get(hour_key)
     fc_p = pmap.get(hour_key)
 
-    def parse_cloud_layers(raw_ob: str, fallback_cover: str | None) -> str:
+    def parse_cloud_layers(obs: dict[str, Any]) -> str:
         import re
-        if not raw_ob:
+        raw_ob = (obs.get("rawOb") or "")
+        fallback_cover = obs.get("cover")
+        if not raw_ob and not obs.get("clouds"):
             return fallback_cover or "N/A"
         if " CAVOK" in raw_ob:
             return "CAVOK"
         if " CLR" in raw_ob:
             return "CLR"
-        layers = re.findall(r"\b(FEW|SCT|BKN|OVC|VV)(\d{3})\b", raw_ob)
-        if not layers:
+
+        pairs: list[tuple[str, int | None]] = []
+        seen: set[tuple[str, int | None]] = set()
+
+        for code, h in re.findall(r"\b(FEW|SCT|BKN|OVC|VV)(\d{3})\b", raw_ob):
+            ft = int(h) * 100
+            key = (code, ft)
+            if key not in seen:
+                seen.add(key)
+                pairs.append((code, ft))
+
+        clouds = obs.get("clouds") if isinstance(obs.get("clouds"), list) else []
+        for c in clouds:
+            if not isinstance(c, dict):
+                continue
+            code = str(c.get("cover") or "").upper()
+            if code not in {"FEW", "SCT", "BKN", "OVC", "VV"}:
+                continue
+            base = c.get("base")
+            ft = None
+            try:
+                ft = int(float(base)) if base is not None else None
+            except Exception:
+                ft = None
+            key = (code, ft)
+            if key not in seen:
+                seen.add(key)
+                pairs.append((code, ft))
+
+        if not pairs:
             return fallback_cover or "N/A"
 
         code_meaning = {
@@ -716,11 +746,14 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
             "VV": "垂直能见度",
         }
         out = []
-        for code, h in layers:
-            ft = int(h) * 100
-            m = int(round(ft * 0.3048))
+        for code, ft in pairs:
             meaning = code_meaning.get(code, code)
-            out.append(f"{code}{h}({meaning}{ft}ft/{m}m)")
+            if ft is None:
+                out.append(f"{code}({meaning})")
+            else:
+                m = int(round(ft * 0.3048))
+                h = int(round(ft / 100.0))
+                out.append(f"{code}{h:03d}({meaning}{ft}ft/{m}m)")
         return ", ".join(out)
 
     def _wind_dir_text(d: Any) -> str:
@@ -756,7 +789,7 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         local = _metar_obs_time_utc(x).astimezone(tz)
         raw_ob = (x.get("rawOb") or "").strip()
         wx = x.get("wxString") or x.get("wx") or "无降水天气现象"
-        cloud = parse_cloud_layers(raw_ob, x.get("cover"))
+        cloud = parse_cloud_layers(x)
         prev_cloud = None
         dt = dp = dpres = 0.0
         if prev_x:
@@ -766,8 +799,7 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
                 dpres = float(x.get("altim", 0)) - float(prev_x.get("altim", 0))
             except Exception:
                 pass
-            prev_raw = (prev_x.get("rawOb") or "").strip()
-            prev_cloud = parse_cloud_layers(prev_raw, prev_x.get("cover"))
+            prev_cloud = parse_cloud_layers(prev_x)
         cloud_compare = ""
         if prev_x:
             prev_code = _cloud_token(prev_x) or "未知"
@@ -801,10 +833,28 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
             return "CAVOK"
         if " CLR" in raw:
             return "CLR"
-        m = re.search(r"\b(FEW|SCT|BKN|OVC|VV)\d{3}\b", raw)
-        if m:
-            return m.group(1)
-        return str(x.get("cover") or "").upper()
+
+        rank = {"CLR": 0, "CAVOK": 0, "FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4, "VV": 5}
+        codes: list[str] = []
+
+        for c, _h in re.findall(r"\b(FEW|SCT|BKN|OVC|VV)(\d{3})\b", raw):
+            codes.append(c)
+
+        clouds = x.get("clouds") if isinstance(x.get("clouds"), list) else []
+        for c in clouds:
+            if isinstance(c, dict):
+                cv = str(c.get("cover") or "").upper()
+                if cv:
+                    codes.append(cv)
+
+        cover = str(x.get("cover") or "").upper()
+        if cover:
+            codes.append(cover)
+
+        codes = [c for c in codes if c in rank]
+        if not codes:
+            return ""
+        return sorted(codes, key=lambda c: rank.get(c, 0), reverse=True)[0]
 
     def _cloud_token(x: dict[str, Any] | None) -> str:
         if not x:
@@ -814,10 +864,38 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
             return "CAVOK"
         if " CLR" in raw:
             return "CLR"
-        m = re.search(r"\b(FEW|SCT|BKN|OVC|VV)\d{3}\b", raw)
-        if m:
-            return m.group(0)
-        return _cloud_code(x)
+
+        rank = {"CLR": 0, "CAVOK": 0, "FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4, "VV": 5}
+        toks: list[tuple[str, int | None]] = []
+
+        for c, h in re.findall(r"\b(FEW|SCT|BKN|OVC|VV)(\d{3})\b", raw):
+            toks.append((c, int(h) * 100))
+
+        clouds = x.get("clouds") if isinstance(x.get("clouds"), list) else []
+        for c in clouds:
+            if not isinstance(c, dict):
+                continue
+            cv = str(c.get("cover") or "").upper()
+            if cv not in rank:
+                continue
+            base = c.get("base")
+            ft = None
+            try:
+                ft = int(float(base)) if base is not None else None
+            except Exception:
+                ft = None
+            toks.append((cv, ft))
+
+        if not toks:
+            c = _cloud_code(x)
+            return c
+
+        # choose strongest cover; if tie, lower base first (more restrictive)
+        toks = sorted(toks, key=lambda z: (rank.get(z[0], 0), -(z[1] if z[1] is not None else 10**9)), reverse=True)
+        c, ft = toks[0]
+        if ft is None:
+            return c
+        return f"{c}{int(round(ft/100.0)):03d}"
 
     def _cloud_trend(cur: dict[str, Any], prev_x: dict[str, Any] | None) -> str:
         rank = {"CLR": 0, "CAVOK": 0, "FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4, "VV": 5}
@@ -896,13 +974,7 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         if t_trend_smooth is not None and abs(t_trend_smooth) < deadband:
             t_trend_smooth = 0.0
 
-    raw_latest = (latest.get("rawOb") or "")
-    layers = re.findall(r"\b(FEW|SCT|BKN|OVC|VV)\d{3}\b", raw_latest)
-    if layers:
-        rank = {"FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4, "VV": 5}
-        latest_cloud_code = sorted(layers, key=lambda c: rank.get(str(c).upper(), 0), reverse=True)[0]
-    else:
-        latest_cloud_code = latest.get("cover")
+    latest_cloud_code = _cloud_code(latest)
 
     if str(latest_cloud_code or "").upper() in {"CLR", "CAVOK", "FEW", "SCT"}:
         cloud_hint = "云量约束偏弱"
