@@ -1292,106 +1292,46 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     syn_lines = ["🧭 **环流背景**"]
 
     obj = (d.get("object_3d_main") or {}) if isinstance(d, dict) else {}
+
+    def _contains_any(text: str, keys: list[str]) -> bool:
+        s = str(text or "")
+        return any(k in s for k in keys)
+
+    def _infer_regime_and_desc(otype: str, impact: str) -> tuple[str, str]:
+        if ("front" in otype) or ("baroclinic" in otype) or _contains_any(extra + line850, ["锋", "锋生", "斜压"]):
+            return "斜压锋生主导", "锋区重排"
+        if "dry_intrusion" in otype or _contains_any(extra, ["湿层", "低云", "封盖", "压制"]):
+            return "稳定层压制主导", "封盖约束"
+        if _contains_any(line850, ["暖平流"]):
+            return "平流主导", "暖平流抬升"
+        if _contains_any(line850, ["冷平流"]):
+            return "平流主导", "冷平流切入"
+        if _contains_any(line500, ["槽", "抬升", "PVA", "涡度"]):
+            return "动力抬升主导", "槽前触发"
+        if impact == "background_only":
+            return "弱信号背景", "背景噪声"
+        return "混合主导", "混合扰动"
+
     if obj:
-        otype = str(obj.get("type") or "unknown_3d")
-        dist = obj.get("distance_km_min", "-")
-        coh = obj.get("vertical_coherence_score", "-")
-        surf = obj.get("surface_coupling_score", "-")
+        otype = str(obj.get("type") or "").lower()
         impact = str(obj.get("impact_scope") or "background_only")
+        regime, desc = _infer_regime_and_desc(otype, impact)
 
-        def _contains_any(text: str, keys: list[str]) -> bool:
-            s = str(text or "")
-            return any(k in s for k in keys)
+        # 1) 主导系统（一句话）
+        syn_lines.append(f"- **主导系统**：{regime}（{desc}）。")
 
-        def _infer_main_regime() -> str:
-            # Orthogonal main regimes: ADV / DYN / BARO / STAB / MIXED / WEAK
-            otype_l = str(otype).lower()
-            if ("front" in otype_l) or ("baroclinic" in otype_l):
-                return "BARO"
-            if "dry_intrusion" in otype_l:
-                return "STAB"
-            if "shear" in otype_l:
-                return "MIXED"
-            if _contains_any(line850 + extra, ["冷平流", "暖平流", "平流"]):
-                return "ADV"
-            if _contains_any(line500 + extra, ["抬升", "槽前", "PVA", "涡度"]):
-                return "DYN"
-            if _contains_any(extra + line850, ["锋", "锋生", "斜压", "温度梯度"]):
-                return "BARO"
-            if _contains_any(extra + line850, ["湿层", "低云", "压制", "封盖", "逆温"]):
-                return "STAB"
-            if impact == "background_only":
-                return "WEAK"
-            return "MIXED"
-
-        def _infer_descriptor() -> str:
-            # secondary descriptor: synoptic shape/process nuance
-            if otype == "trough_3d" or _contains_any(line500, ["槽", "trough"]):
-                return "槽前触发"
-            if otype == "ridge_3d" or _contains_any(line500, ["脊", "ridge"]):
-                return "脊控下沉"
-            if otype == "frontal_3d" or _contains_any(extra + line850, ["锋", "锋生"]):
-                return "锋区重排"
-            if _contains_any(line850, ["冷平流"]):
-                return "冷平流切入"
-            if _contains_any(line850, ["暖平流"]):
-                return "暖平流抬升"
-            if _contains_any(extra, ["湿层", "低云"]):
-                return "湿层封盖"
-            if _contains_any(extra + line850, ["风切", "风向", "切换"]):
-                return "风场切换敏感"
-            return "混合扰动"
-
-        regime_human = {
-            "ADV": "平流主导型",
-            "DYN": "动力抬升主导型",
-            "BARO": "斜压锋生主导型",
-            "STAB": "稳定层压制主导型",
-            "MIXED": "混合主导型",
-            "WEAK": "弱信号背景型",
-        }
-        r_main = _infer_main_regime()
-        desc = _infer_descriptor()
-        syn_lines.append(f"- **3D天气系统一句话**：{regime_human.get(r_main, '混合主导型')}（{desc}）。")
-
-        def _lvl(v: Any) -> str:
-            try:
-                x = float(v)
-            except Exception:
-                return "不明"
-            if x >= 0.67:
-                return "强"
-            if x >= 0.34:
-                return "中"
-            return "弱"
-
-        coh_lvl = _lvl(coh)
-        surf_lvl = _lvl(surf)
-        syn_lines.append(f"  • 定位：距站约{dist}km；垂直联动{coh_lvl}，落地耦合{surf_lvl}。")
-
-        if impact == "possible_override":
-            syn_lines.append("  • 落地影响：系统在站点外围，若出现风向切换或云层突变，峰值区间有被改写风险。")
-        elif impact == "station_relevant":
-            syn_lines.append("  • 落地影响：系统已贴近站点，接下来1-3小时将由实况触发决定上修或压低峰值。")
+        # 2) 落地影响（一句话）
+        if impact == "station_relevant":
+            impact_line = "系统近站，后续1-3小时上修/压制将主要由实况触发决定。"
+        elif impact == "possible_override":
+            impact_line = "系统在外围，若风向切换或云层突变，峰值区间仍可能被改写。"
         else:
-            syn_lines.append("  • 落地影响：目前以背景信号为主，短时改写最高温的概率偏低。")
-
-        conf_map = {"high": "高", "medium": "中", "low": "低"}
-        conf = str(obj.get("confidence") or "")
-        ev = obj.get("evidence") if isinstance(obj.get("evidence"), dict) else {}
-        support = ev.get("support") or []
-        conflict = ev.get("conflict") or []
-        if conf:
-            syn_lines.append(f"  • 3D系统可信度：{conf_map.get(conf, conf)}。")
-        if support:
-            syn_lines.append(f"  • 主要证据：{'；'.join(str(x) for x in support[:2])}。")
-        if conflict:
-            syn_lines.append(f"  • 冲突证据：{'；'.join(str(x) for x in conflict[:2])}。")
+            impact_line = "当前以背景信号为主，短时改写最高温概率偏低。"
+        syn_lines.append(f"- **落地影响**：{impact_line}")
 
     else:
-        syn_lines.append("- **3D天气系统一句话**：当前没有可直接追踪到站点的“同一套分层系统”。")
-        syn_lines.append("  • 解释：稳定多层系统要求同类型扰动在多个高度层可配对且位置接近；当前更像层间不同步或离站偏远。")
-        syn_lines.append("  • 影响：短时以实况（云量开合/温度斜率/近地风）为主判，3D仅作弱背景参考。")
+        syn_lines.append("- **主导系统**：当前未识别到可稳定追踪的同一套分层系统。")
+        syn_lines.append("- **落地影响**：短时以实况（云量、温度斜率、近地风）为主判。")
 
     # concise evidence line (avoid spreading full layer-by-layer by default)
     evidence_bits = [f"500hPa:{line500}", f"850hPa:{line850}"]
