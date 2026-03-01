@@ -2178,7 +2178,6 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     peak_range_block = [
         "🌡️ **可能最高温区间**",
         f"- **主带 {lo:.1f}~{hi:.1f}°C**（峰值窗 {_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local）",
-        "- 注：主带覆盖大多数情景，不包含极端尾部。",
     ]
 
     if skew >= 0.20:
