@@ -131,7 +131,10 @@ _STATION_TERRAIN_MAP: dict[str, str] | None = None
 
 
 def _terrain_tag_for(icao: str) -> str | None:
-    """Read fixed terrain tags from station_links.csv (single source of station metadata)."""
+    """Read fixed terrain short-summary from station_links.csv.
+
+    Format: <terrain_tag>[·<terrain_tag2>]
+    """
     global _STATION_TERRAIN_MAP
     try:
         if _STATION_TERRAIN_MAP is None:
@@ -139,9 +142,14 @@ def _terrain_tag_for(icao: str) -> str | None:
             with STATION_CSV.open(newline="", encoding="utf-8") as f:
                 for row in csv.DictReader(f):
                     k = str(row.get("icao") or "").upper().strip()
-                    v = str(row.get("terrain_tag") or "").strip()
-                    if k and v:
-                        mp[k] = v
+                    t1 = str(row.get("terrain_tag") or "").strip()
+                    t2 = str(row.get("terrain_tag2") or "").strip()
+                    if not k:
+                        continue
+                    if t1 and t2:
+                        mp[k] = f"{t1}·{t2}"
+                    elif t1:
+                        mp[k] = t1
             _STATION_TERRAIN_MAP = mp
         t = (_STATION_TERRAIN_MAP or {}).get(str(icao).upper())
         return t if t else None
