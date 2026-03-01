@@ -384,7 +384,14 @@ def detect_baroclinic_coupling(
     dtY, dtX = finite_diff(lat, lon, t850)
     g_p = np.sqrt(dpx * dpx + dpy * dpy)
     g_t = np.sqrt(dtX * dtX + dtY * dtY)
-    score = g_p * g_t
+
+    # Normalize to robust quantiles to keep score in interpretable range [0,1]
+    gp_q90 = max(1e-12, float(np.nanpercentile(g_p, 90)))
+    gt_q90 = max(1e-12, float(np.nanpercentile(g_t, 90)))
+    gp_n = np.clip(g_p / gp_q90, 0.0, 2.0)
+    gt_n = np.clip(g_t / gt_q90, 0.0, 2.0)
+    score_raw = np.sqrt(gp_n * gt_n)
+    score = np.clip(score_raw / 1.5, 0.0, 1.0)
 
     cut = np.nanpercentile(score, 85)
     mask = score >= cut
@@ -396,6 +403,8 @@ def detect_baroclinic_coupling(
         dist = haversine_km(station["lat"], station["lon"], c_lat, c_lon)
         geo = build_geo_context(station, c_lat, c_lon, dist)
         sc = float(np.nanmean([score[i, j] for i, j in comp]))
+        gp = float(np.nanmean([gp_n[i, j] for i, j in comp]))
+        gt = float(np.nanmean([gt_n[i, j] for i, j in comp]))
         systems.append(
             {
                 "system_type": "baroclinic_coupling",
@@ -403,7 +412,9 @@ def detect_baroclinic_coupling(
                 "level": "mslp-850",
                 "center_lat": geo["center_lat"],
                 "center_lon": geo["center_lon"],
-                "coupling_score": round(sc, 8),
+                "coupling_score": round(sc, 3),
+                "pressure_gradient_norm": round(gp, 3),
+                "thermal_gradient_norm": round(gt, 3),
                 "area_pixels": len(comp),
                 "distance_to_station_km": geo["distance_km"],
                 "region_name": station_sector_label(station["lat"], station["lon"], c_lat, c_lon, dist),

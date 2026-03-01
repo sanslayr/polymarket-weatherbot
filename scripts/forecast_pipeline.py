@@ -68,8 +68,8 @@ def _write_3d_bundle(bundle: dict[str, Any], *parts: str) -> None:
     p.write_text(json.dumps(bundle, ensure_ascii=False), encoding="utf-8")
 
 
-def _read_recent_synoptic_bundle(*, station_icao: str, target_date: str, model: str, max_age_hours: int = 12) -> dict[str, Any] | None:
-    """Fallback: read most recent 3D bundle for same station/date/model across runtime tags."""
+def _read_recent_synoptic_bundle(*, station_icao: str, target_date: str, model: str, synoptic_provider: str, max_age_hours: int = 12) -> dict[str, Any] | None:
+    """Fallback: read most recent 3D bundle for same station/date/model/provider across runtime tags."""
     patt = str(CACHE_DIR / "forecast_3d_bundle_*.json")
     cands: list[tuple[datetime, dict[str, Any]]] = []
     for p in glob.glob(patt):
@@ -82,6 +82,9 @@ def _read_recent_synoptic_bundle(*, station_icao: str, target_date: str, model: 
         if str(doc.get("date") or "") != target_date:
             continue
         if str(doc.get("model") or "").lower() != model.lower():
+            continue
+        pdoc = str(doc.get("synoptic_provider") or "").lower()
+        if pdoc and pdoc != str(synoptic_provider or "").lower():
             continue
         slices = doc.get("slices")
         if not isinstance(slices, list) or not slices:
@@ -115,6 +118,7 @@ def build_forecast_decision(
     station: Any,
     target_date: str,
     model: str,
+    synoptic_provider: str,
     now_local: datetime,
     station_lat: float,
     station_lon: float,
@@ -190,6 +194,7 @@ def build_forecast_decision(
             "station": str(getattr(station, "icao", "")),
             "date": target_date,
             "model": model,
+            "synoptic_provider": synoptic_provider,
             "runtime": _runtime_tag(model, datetime.now(timezone.utc)),
             "window": {
                 "start_local": str(primary_window.get("start_local") or ""),
@@ -308,6 +313,7 @@ def load_or_build_forecast_decision(
     station: Any,
     target_date: str,
     model: str,
+    synoptic_provider: str,
     now_utc: datetime,
     now_local: datetime,
     station_lat: float,
@@ -322,7 +328,7 @@ def load_or_build_forecast_decision(
             perf_log(stage, time.perf_counter() - start)
 
     runtime = _runtime_tag(model, now_utc)
-    key_parts = (str(getattr(station, "icao", "")), target_date, model.lower(), runtime)
+    key_parts = (str(getattr(station, "icao", "")), target_date, model.lower(), str(synoptic_provider or ""), runtime)
 
     t = time.perf_counter()
     cached = _read_cache(*key_parts)
@@ -382,11 +388,12 @@ def load_or_build_forecast_decision(
                     "station": str(getattr(station, "icao", "")),
                     "date": target_date,
                     "model": model,
+                    "synoptic_provider": synoptic_provider,
                     "runtime": runtime,
                     "anchors_local": anchor_locals,
                     "slices": syn_payloads,
                 },
-                str(getattr(station, "icao", "")), target_date, model.lower(), runtime,
+                str(getattr(station, "icao", "")), target_date, model.lower(), str(synoptic_provider or ""), runtime,
             )
         except Exception:
             pass
@@ -395,6 +402,7 @@ def load_or_build_forecast_decision(
             station_icao=str(getattr(station, "icao", "")),
             target_date=target_date,
             model=model,
+            synoptic_provider=synoptic_provider,
             max_age_hours=int(os.getenv("FORECAST_SYNOPTIC_FALLBACK_HOURS", "12") or "12"),
         )
         if fallback_syn:
@@ -409,6 +417,7 @@ def load_or_build_forecast_decision(
         station=station,
         target_date=target_date,
         model=model,
+        synoptic_provider=synoptic_provider,
         now_local=now_local,
         station_lat=station_lat,
         station_lon=station_lon,

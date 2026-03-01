@@ -151,6 +151,22 @@ def build_3d_objects(
         else:
             conf = "low"
 
+        tgroup = x['group']
+        type_weight = {
+            "baroclinic": 2.6,
+            "frontal": 2.5,
+            "dynamic": 2.2,
+            "advection": 2.0,
+            "shear": 1.9,
+            "dry_intrusion": 1.8,
+            "subsidence": 1.6,
+            "generic": 1.0,
+        }.get(tgroup, 1.0)
+        conf_weight = {"high": 1.2, "medium": 0.7, "low": 0.2}.get(conf, 0.2)
+        impact_weight = {"station_relevant": 1.2, "possible_override": 0.6, "background_only": 0.0}.get(impact, 0.0)
+        dist_penalty = min(1.2, max(0.0, (min_dist - 200.0) / 800.0))
+        rank_score = round(type_weight + conf_weight + impact_weight + 0.5 * coherence + 0.4 * surface_coupling - dist_penalty, 3)
+
         oid += 1
         objects.append({
             "object_id": f"obj3d_{oid}",
@@ -163,13 +179,14 @@ def build_3d_objects(
             "surface_blockers": blockers,
             "evolution": "unknown",
             "confidence": conf,
+            "rank_score": rank_score,
             "evidence": {
                 "support": reasons_pos[:3],
                 "conflict": reasons_neg[:3],
             },
         })
 
-    objects = sorted(objects, key=lambda z: (z["distance_km_min"], -z["vertical_coherence_score"]))
+    objects = sorted(objects, key=lambda z: (-float(z.get("rank_score", 0.0)), z["distance_km_min"], -z["vertical_coherence_score"]))
     main = objects[0] if objects else None
     candidates = objects[:3]
 

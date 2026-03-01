@@ -1666,6 +1666,7 @@ def render_report(command_text: str) -> str:
         station=st,
         target_date=target_date,
         model=model,
+        synoptic_provider=SYNOPTIC_PROVIDER,
         now_utc=now_utc,
         now_local=now_local,
         station_lat=st.lat,
