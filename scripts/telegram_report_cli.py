@@ -1273,6 +1273,19 @@ def _build_polymarket_section(
     target_lo = hint_lo if hint_lo is not None else likely_lo
     target_hi = hint_hi if hint_hi is not None else likely_hi
 
+    try:
+        core_lo = float(hint.get("core_lo")) if hint.get("core_lo") is not None else None
+    except Exception:
+        core_lo = None
+    try:
+        core_hi = float(hint.get("core_hi")) if hint.get("core_hi") is not None else None
+    except Exception:
+        core_hi = None
+    if core_lo is None:
+        core_lo = likely_lo
+    if core_hi is None:
+        core_hi = likely_hi
+
     def _overlap_or_near(row: tuple[float, str, Any, Any, float, float]) -> bool:
         _c, _l, _b, _a, lo, hi = row
         if hi < target_lo - 0.5:
@@ -1406,16 +1419,21 @@ def _build_polymarket_section(
     except Exception:
         pass
 
-    # Only mark "most likely" when lead is clear enough (avoid over-labeling in tight ranges).
+    # Only mark "most likely" when lead is clear enough and market bin is consistent with weather main-band.
     best_label = None
-    if ranked:
+    if focus:
         def _mkt_strength(row: tuple[float, str, Any, Any, float, float]) -> float:
             _c, _l, b, a, _lo, _hi = row
             return max(_px(b), _px(a))
-        s1 = _mkt_strength(ranked[0])
-        s2 = _mkt_strength(ranked[1]) if len(ranked) > 1 else 0.0
-        if (s1 - s2) >= 0.08:
-            best_label = ranked[0][1]
+
+        # Prefer bins that overlap the weather core range; avoid labeling a bin clearly outside main range.
+        core_bins = [r for r in focus if (r[5] >= core_lo and r[4] <= core_hi)]
+        pick_pool = core_bins if core_bins else focus
+        pick_sorted = sorted(pick_pool, key=_mkt_strength, reverse=True)
+        s1 = _mkt_strength(pick_sorted[0])
+        s2 = _mkt_strength(pick_sorted[1]) if len(pick_sorted) > 1 else 0.0
+        if (s1 - s2) >= 0.06:
+            best_label = pick_sorted[0][1]
 
     # Non-settled markets should show at least 2-3 bins (main + adjacent), avoid single-bin squeeze.
     if len(focus) == 1:
