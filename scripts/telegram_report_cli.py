@@ -768,7 +768,7 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
     bias = None if fc_t is None else round(float(latest.get("temp", 0)) - float(fc_t), 2)
     p_bias = None if fc_p is None else round(float(latest.get("altim", 0)) - float(fc_p), 2)
     if bias is not None and p_bias is not None:
-        lines.append(f"同小时模式偏差：Temp {bias:+.2f}C, Pressure {p_bias:+.2f}hPa")
+        lines.append(f"同小时模式偏差：Temp {bias:+.2f}°C, Pressure {p_bias:+.2f}hPa")
 
     t_trend = None
     if prev is not None:
@@ -1471,8 +1471,16 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     # P1 short-term triggers (window-gated)
     try:
         rt_triggers = select_realtime_triggers(primary_window, metar_diag)
+        phase_now = str(gate.get("phase") or "unknown")
         if rt_triggers:
             vars_block = vars_block[:1] + rt_triggers[:3]
+        elif phase_now == "far":
+            vars_block = [
+                vars_block[0],
+                "• 当前远离峰值窗口：先跟踪上午到中午的升温斜率是否连续转正。",
+                "• 临窗前关键观察：云量是否由SCT走向BKN/OVC（压制）或继续开窗（上修）。",
+                "• 进入窗口前1-2小时再重点评估：风向切换与偏差漂移是否触发改判。",
+            ]
         else:
             vars_block = vars_block[:4]
     except Exception:
