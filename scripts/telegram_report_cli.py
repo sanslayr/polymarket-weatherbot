@@ -297,6 +297,16 @@ def norm_text(s: str) -> str:
     return "".join(ch for ch in s.strip().lower() if ch.isalnum())
 
 
+def render_look_help() -> str:
+    return (
+        "📘 /look 用法\n"
+        "- /look <城市或机场代码>\n"
+        "- 示例：/look ank | /look London | /look par\n"
+        "\n支持城市（示例）：ank / lon / par / nyc / chi / dal / mia / atl / sea / tor / sel / ba / wel\n"
+        "提示：统一单条最终报告输出，不发送预告消息。"
+    )
+
+
 def parse_telegram_command(text: str) -> dict[str, str]:
     text = text.strip()
     if not text:
@@ -926,6 +936,49 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
 
     lines.append("")
     lines.append(f"• 最新实况简评：{trend_hint}，{cloud_hint}。")
+
+    # 追加“近两小时节奏”一句：把短样本变化压缩成可执行线索
+    rhythm_line = None
+    try:
+        if prev is not None and prev2 is not None:
+            t0 = float(latest.get("temp", 0.0))
+            t1 = float(prev.get("temp", 0.0))
+            t2 = float(prev2.get("temp", 0.0))
+            dt_now = t0 - t1
+            dt_prev = t1 - t2
+
+            p0 = float(latest.get("altim", 0.0))
+            p2 = float(prev2.get("altim", 0.0))
+            dp2h = p0 - p2
+
+            w0 = latest.get("wdir")
+            w1 = prev.get("wdir")
+            wind_shift_txt = ""
+            if w0 not in (None, "", "VRB") and w1 not in (None, "", "VRB"):
+                a = abs(float(w0) - float(w1)) % 360.0
+                dchg = min(a, 360.0 - a)
+                if dchg >= 35:
+                    wind_shift_txt = "，风向也在变"
+
+            cloud_txt = _cloud_trend(latest, prev)
+            if dt_now >= 0.5 and dt_prev >= 0.5:
+                ttxt = "温度在持续上升"
+            elif dt_now >= 0.5 > dt_prev:
+                ttxt = "温度又开始加速上升"
+            elif dt_now <= -0.5 and dt_prev <= -0.5:
+                ttxt = "温度在持续回落"
+            elif abs(dt_now) < 0.35 and abs(dt_prev) < 0.35:
+                ttxt = "温度基本没动"
+            else:
+                ttxt = "温度在来回波动"
+
+            ptxt = "气压在走低" if dp2h <= -0.8 else ("气压在走高" if dp2h >= 0.8 else "气压基本平稳")
+            rhythm_line = f"• 近两小时：{ttxt}，{ptxt}{wind_shift_txt}；{cloud_txt}。"
+    except Exception:
+        rhythm_line = None
+
+    if rhythm_line:
+        lines.append(rhythm_line)
 
     wind_dir_change = None
     pressure_step = None
