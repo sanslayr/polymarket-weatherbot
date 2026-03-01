@@ -2105,6 +2105,43 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     denom = max(1e-6, up_s + down_s)
     skew = max(-0.8, min(0.8, (up_s - down_s) / denom))
 
+    # Direction-range consistency correction:
+    # when directional evidence is strongly one-sided, interval center should follow with higher weight.
+    try:
+        b_cons = float((metar_diag.get("temp_bias_smooth_c") if metar_diag.get("temp_bias_smooth_c") is not None else metar_diag.get("temp_bias_c")) or 0.0)
+    except Exception:
+        b_cons = 0.0
+    try:
+        t_cons = float((metar_diag.get("temp_trend_smooth_c") if metar_diag.get("temp_trend_smooth_c") is not None else metar_diag.get("temp_trend_1step_c")) or 0.0)
+    except Exception:
+        t_cons = 0.0
+
+    dir_delta = up_s - down_s
+    consistency_shift = 0.0
+    if dir_delta >= 0.8:
+        consistency_shift += 0.22
+        if b_cons >= 1.0:
+            consistency_shift += 0.25
+        elif b_cons >= 0.6:
+            consistency_shift += 0.15
+        if t_cons >= 0.4:
+            consistency_shift += 0.14
+        if phase_now in {"near_window", "in_window"}:
+            consistency_shift += 0.08
+    elif dir_delta <= -0.8:
+        consistency_shift -= 0.22
+        if b_cons <= -1.0:
+            consistency_shift -= 0.25
+        elif b_cons <= -0.6:
+            consistency_shift -= 0.15
+        if t_cons <= -0.4:
+            consistency_shift -= 0.14
+        if phase_now in {"near_window", "in_window"}:
+            consistency_shift -= 0.08
+
+    consistency_shift = max(-0.75, min(0.75, consistency_shift))
+    center += consistency_shift
+
     major_half = min(1.05, max(0.45, half_range * 0.68))
     left_hw = major_half * (1.0 - 0.35 * skew)
     right_hw = major_half * (1.0 + 0.35 * skew)
