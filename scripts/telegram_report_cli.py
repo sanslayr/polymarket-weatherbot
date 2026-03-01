@@ -1349,6 +1349,7 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     h700_summary = str((((fdec.get("features") or {}).get("h700") or {}).get("summary") if isinstance(fdec, dict) else "") or "")
     h925_summary = str((((fdec.get("features") or {}).get("h925") or {}).get("summary") if isinstance(fdec, dict) else "") or "")
     snd_thermo = ((((fdec.get("features") or {}).get("sounding") or {}).get("thermo") if isinstance(fdec, dict) else None) or {})
+    cloud_code_now = str(metar_diag.get("latest_cloud_code") or "").upper()
 
     syn_lines = ["🧭 **环流背景**"]
 
@@ -1779,6 +1780,34 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         syn_lines.append("- **关键证据**：")
         for e in evidence_bits[:3]:
             syn_lines.append(f"  • {e}")
+
+    def _sounding_layer_note() -> str | None:
+        bits: list[str] = []
+
+        if h700_summary:
+            if "干层" in h700_summary:
+                bits.append("中层(600-700hPa)偏干")
+            elif ("湿层" in h700_summary) or ("约束" in h700_summary):
+                bits.append("中层(700hPa)湿层约束")
+
+        if snd_thermo.get("has_profile"):
+            capev = snd_thermo.get("sbcape_jkg") or snd_thermo.get("mlcape_jkg") or snd_thermo.get("mucape_jkg")
+            cinv = snd_thermo.get("sbcin_jkg") if snd_thermo.get("sbcin_jkg") is not None else snd_thermo.get("mlcin_jkg")
+            if isinstance(capev, (int, float)):
+                bits.append(f"对流能量 CAPE≈{float(capev):.0f}J/kg")
+            if isinstance(cinv, (int, float)):
+                bits.append(f"抑制 CIN≈{float(cinv):.0f}J/kg")
+
+        if cloud_code_now in {"BKN", "OVC", "VV"}:
+            bits.append("当前低层云量偏多（地面辐射受限）")
+
+        if not bits:
+            return None
+        return "；".join(bits[:2]) + "。"
+
+    snd_note = _sounding_layer_note()
+    if snd_note:
+        syn_lines.append(f"- **探空层提示**：{snd_note}")
 
     if str(d.get("override_risk") or "low") == "high":
         syn_lines.append("- **改写风险**：中到高，窗口前后需盯实况触发。")
