@@ -3051,7 +3051,16 @@ def render_report(command_text: str) -> str:
     raw_target_date = params.get("date")
     if raw_target_date and len(raw_target_date) == 8 and raw_target_date.isdigit():
         raw_target_date = f"{raw_target_date[0:4]}-{raw_target_date[4:6]}-{raw_target_date[6:8]}"
-    target_date = raw_target_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    now_utc = datetime.now(timezone.utc)
+    if raw_target_date:
+        target_date = raw_target_date
+    else:
+        try:
+            target_date = now_utc.astimezone(ZoneInfo(tz_name_station)).strftime("%Y-%m-%d")
+        except Exception:
+            target_date = now_utc.strftime("%Y-%m-%d")
+
     try:
         datetime.strptime(target_date, "%Y-%m-%d")
     except ValueError as exc:
