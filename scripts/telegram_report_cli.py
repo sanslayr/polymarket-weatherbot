@@ -1863,7 +1863,6 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     r1, s1 = r_sorted[0]
     r2, s2 = r_sorted[1]
     has_primary_regime = s1 >= 0.9
-    route_main, route_aux = _evidence_routes()
 
     if obj:
         otype = str(obj.get("type") or "").lower()
@@ -1875,17 +1874,7 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
             syn_lines.append(f"- **主导系统**：{_regime_label(r1)}（{regime}）。")
         else:
             syn_lines.append(f"- **主导系统**：{regime}（{desc}）。")
-        sys_desc = _system_plain_desc(otype)
-        if sys_desc:
-            syn_lines.append(f"- **系统性质**：{sys_desc}。")
-
-        # 2) 次级系统 / 冲突（仅证据足够时展示）
-        if s2 >= 0.8 and (s1 - s2) <= 0.55:
-            syn_lines.append(f"- **次级系统**：{_regime_label(r2)}。")
-        if {"advection", "stability"}.issubset(cgroups):
-            syn_lines.append("- **冲突项**：升温输送与低层约束并存，临窗可能出现节奏反复。")
-
-        # 3) 落地影响（方向 + 触发 + 交互）
+        # 2) 落地影响（方向 + 触发 + 交互）
         if impact == "station_relevant":
             scope_txt = "系统近站，影响将直接落在峰值窗"
         elif impact == "possible_override":
@@ -1902,22 +1891,11 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     else:
         if has_primary_regime:
             syn_lines.append(f"- **主导系统**：{_regime_label(r1)}（结构未闭合，暂不立3D主系统）。")
-            if s2 >= 0.8 and (s1 - s2) <= 0.55:
-                syn_lines.append(f"- **次级系统**：{_regime_label(r2)}。")
-            if {"advection", "stability"}.issubset(cgroups):
-                syn_lines.append("- **冲突项**：升温输送与低层约束并存，临窗可能出现节奏反复。")
         else:
             syn_lines.append("- **主导系统**：当前未识别到可稳定追踪的同一套分层系统。")
 
         tail = f"。当前组合关系：{inter_note}" if inter_note else ""
         syn_lines.append(f"- **落地影响**：{direction_txt}；短时以实况触发为主。建议：{trigger_txt}{tail}。")
-
-    if route_main.startswith("实况"):
-        syn_lines.append("- **判定重点**：当前以实况触发为主，剖面/系统证据用于约束修正。")
-    elif route_main.startswith("剖面"):
-        syn_lines.append("- **判定重点**：当前以剖面结构为主，实况与系统证据用于确认落地。")
-    else:
-        syn_lines.append("- **判定重点**：当前以系统结构为主，实况与剖面证据用于短临修正。")
 
     # concise evidence line (avoid spreading full layer-by-layer by default)
     def _humanize_850(s: str) -> str:
@@ -1960,9 +1938,7 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         evidence_bits.append(f"约束: {extra}")
 
     if evidence_bits:
-        syn_lines.append("- **关键证据**：")
-        for e in evidence_bits[:3]:
-            syn_lines.append(f"  • {e}")
+        syn_lines.append(f"- **关键证据**：{'；'.join(evidence_bits[:2])}。")
 
     def _sounding_layer_note() -> str | None:
         bits: list[str] = []
@@ -1993,10 +1969,6 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         if not bits:
             return None
         return "；".join(bits[:3]) + "。"
-
-    snd_note = _sounding_layer_note()
-    if snd_note:
-        syn_lines.append(f"- **探空层提示**：{snd_note}")
 
     if str(d.get("override_risk") or "low") == "high":
         syn_lines.append("- **改写风险**：中到高，窗口前后需盯实况触发。")
