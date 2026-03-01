@@ -57,6 +57,7 @@ STATION_TZ = {
     "CYYZ": "America/Toronto",
     "KATL": "America/New_York",
     "KJFK": "America/New_York",
+    "KLGA": "America/New_York",
     "KDFW": "America/Chicago",
     "KORD": "America/Chicago",
     "KSEA": "America/Los_Angeles",
