@@ -53,7 +53,8 @@ def classify_window_phase(primary_window: dict[str, Any], metar_diag: dict[str, 
     anchor_peak = obs_peak if obs_near_window else model_peak
 
     start_fused = min(model_start, (anchor_peak - timedelta(hours=1)) if anchor_peak else model_start)
-    extra_h = 2 if (metar_diag.get("temp_trend_1step_c") or 0.0) >= 0.3 else 1
+    t_ref = metar_diag.get("temp_trend_smooth_c") if metar_diag.get("temp_trend_smooth_c") is not None else metar_diag.get("temp_trend_1step_c")
+    extra_h = 2 if (t_ref or 0.0) >= 0.3 else 1
     end_fused = max(model_end, (anchor_peak + timedelta(hours=extra_h)) if anchor_peak else model_end)
     peak_fused = anchor_peak or model_peak
 
@@ -81,7 +82,8 @@ def classify_window_phase(primary_window: dict[str, Any], metar_diag: dict[str, 
 
 def select_realtime_triggers(primary_window: dict[str, Any], metar_diag: dict[str, Any]) -> list[str]:
     phase = classify_window_phase(primary_window, metar_diag).get("phase", "unknown")
-    t_tr = float(metar_diag.get("temp_trend_1step_c") or 0.0)
+    t_src = metar_diag.get("temp_trend_smooth_c") if metar_diag.get("temp_trend_smooth_c") is not None else metar_diag.get("temp_trend_1step_c")
+    t_tr = float(t_src or 0.0)
     p_tr = float(metar_diag.get("pressure_trend_1step_hpa") or 0.0)
     bias = float(metar_diag.get("temp_bias_c") or 0.0)
     wind_chg = float(metar_diag.get("wind_dir_change_deg") or 0.0)

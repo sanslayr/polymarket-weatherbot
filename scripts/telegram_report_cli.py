@@ -664,6 +664,7 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
     latest = series[-1]
     prev = series[-2] if len(series) > 1 else None
     prev2 = series[-3] if len(series) > 2 else None
+    prev3 = series[-4] if len(series) > 3 else None
 
     tz = ZoneInfo(tz_name)
     latest_dt_local = _metar_obs_time_utc(latest).astimezone(tz)
@@ -844,6 +845,36 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         except Exception:
             t_trend = None
 
+    def _is_intish(v: Any) -> bool:
+        try:
+            return abs(float(v) - round(float(v))) < 0.05
+        except Exception:
+            return False
+
+    # Quantization-aware smoothing: avoid overreacting to single METAR step (often integer-quantized).
+    trend_steps: list[float] = []
+    for a, b in ((latest, prev), (prev, prev2), (prev2, prev3)):
+        if a is None or b is None:
+            continue
+        try:
+            trend_steps.append(float(a.get("temp", 0)) - float(b.get("temp", 0)))
+        except Exception:
+            continue
+
+    t_trend_smooth = None
+    if trend_steps:
+        ws = [0.55, 0.30, 0.15]
+        use_n = min(len(trend_steps), len(ws))
+        num = sum(trend_steps[i] * ws[i] for i in range(use_n))
+        den = sum(ws[:use_n])
+        t_trend_smooth = num / den if den > 0 else None
+
+        # integer METAR deadband
+        int_q = _is_intish(latest.get("temp")) and (prev is None or _is_intish(prev.get("temp")))
+        deadband = 0.55 if int_q else 0.35
+        if t_trend_smooth is not None and abs(t_trend_smooth) < deadband:
+            t_trend_smooth = 0.0
+
     raw_latest = (latest.get("rawOb") or "")
     m_cloud = re.search(r"\b(FEW|SCT|BKN|OVC|VV)\d{3}\b", raw_latest)
     latest_cloud_code = m_cloud.group(1) if m_cloud else latest.get("cover")
@@ -855,10 +886,11 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
     else:
         cloud_hint = "云量约束不确定"
 
-    if isinstance(t_trend, (int, float)):
-        if t_trend >= 0.5:
+    trend_ref = t_trend_smooth if isinstance(t_trend_smooth, (int, float)) else t_trend
+    if isinstance(trend_ref, (int, float)):
+        if trend_ref >= 0.5:
             trend_hint = "短时升温仍在延续"
-        elif t_trend <= -0.5:
+        elif trend_ref <= -0.5:
             trend_hint = "短时升温动能转弱"
         else:
             trend_hint = "短时温度基本横盘"
@@ -888,6 +920,19 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
     b0 = _hour_bias(latest)
     b1 = _hour_bias(prev) if prev else None
     b2 = _hour_bias(prev2) if prev2 else None
+    bvals = [v for v in [b0, b1, b2] if isinstance(v, (int, float))]
+    bias_smooth = None
+    if bvals:
+        ws = [0.55, 0.30, 0.15]
+        num = 0.0
+        den = 0.0
+        for i, v in enumerate([b0, b1, b2]):
+            if isinstance(v, (int, float)):
+                w = ws[i]
+                num += float(v) * w
+                den += w
+        if den > 0:
+            bias_smooth = round(num / den, 2)
     # Bias trajectory line removed by operator preference: keep report concise.
 
     # 5) 高影响触发告警（仅触发时显示）
@@ -942,6 +987,7 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         "latest_report_utc": _metar_obs_time_utc(latest).isoformat().replace('+00:00', 'Z'),
         "latest_report_local": latest_dt_local.isoformat(),
         "temp_bias_c": bias,
+        "temp_bias_smooth_c": bias_smooth,
         "pressure_bias_hpa": p_bias,
         "latest_wdir": latest.get("wdir"),
         "latest_wspd": latest.get("wspd"),
@@ -950,6 +996,8 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         "latest_cloud_code": latest_cloud_code,
         "cloud_trend": cloud_tr,
         "temp_trend_1step_c": t_trend,
+        "temp_trend_smooth_c": t_trend_smooth,
+        "metar_temp_quantized": _is_intish(latest.get("temp")) and (prev is None or _is_intish(prev.get("temp"))),
         "pressure_trend_1step_hpa": pressure_step,
         "wind_dir_change_deg": wind_dir_change,
         "peak_lock_confirmed": peak_lock_confirmed,
@@ -1582,7 +1630,8 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
             up += 0.8
 
         try:
-            b = float(metar_diag.get("temp_bias_c")) if metar_diag.get("temp_bias_c") is not None else 0.0
+            bsrc = metar_diag.get("temp_bias_smooth_c") if metar_diag.get("temp_bias_smooth_c") is not None else metar_diag.get("temp_bias_c")
+            b = float(bsrc) if bsrc is not None else 0.0
         except Exception:
             b = 0.0
         if b >= 0.8:
@@ -1631,11 +1680,13 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         # obs route
         obs_score = 0.0
         try:
-            tb = abs(float(metar_diag.get("temp_bias_c") or 0.0))
+            tb_src = metar_diag.get("temp_bias_smooth_c") if metar_diag.get("temp_bias_smooth_c") is not None else metar_diag.get("temp_bias_c")
+            tb = abs(float(tb_src or 0.0))
         except Exception:
             tb = 0.0
         try:
-            ts = abs(float(metar_diag.get("temp_trend_1step_c") or 0.0))
+            ts_src = metar_diag.get("temp_trend_smooth_c") if metar_diag.get("temp_trend_smooth_c") is not None else metar_diag.get("temp_trend_1step_c")
+            ts = abs(float(ts_src or 0.0))
         except Exception:
             ts = 0.0
         if tb >= 1.5:
@@ -1893,7 +1944,8 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         u += 0.12
 
     try:
-        b = float(metar_diag.get("temp_bias_c") or 0.0)
+        b_src = metar_diag.get("temp_bias_smooth_c") if metar_diag.get("temp_bias_smooth_c") is not None else metar_diag.get("temp_bias_c")
+        b = float(b_src or 0.0)
         babs = abs(b)
     except Exception:
         b = 0.0
@@ -1915,18 +1967,23 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     # center = model baseline + observed deviation (window-weighted) + excess-bias correction
     center = float(peak_c)
     try:
-        tstep = float(metar_diag.get("temp_trend_1step_c") or 0.0)
+        tstep_src = metar_diag.get("temp_trend_smooth_c") if metar_diag.get("temp_trend_smooth_c") is not None else metar_diag.get("temp_trend_1step_c")
+        tstep = float(tstep_src or 0.0)
     except Exception:
         tstep = 0.0
-    if obs_max is not None:
-        obs_proj = float(obs_max) + max(0.0, min(0.9, tstep * 0.35))
-        w_center = {
-            "far": 0.20,
-            "near_window": 0.38,
-            "in_window": 0.58,
-            "post": 0.70,
-        }.get(phase_now, 0.26)
-        center = (1 - w_center) * center + w_center * obs_proj
+
+    # Bias/trend-driven center adjustment (quantization-aware):
+    # avoid using current absolute temp directly, which can understate rapid-rise regimes before peak.
+    b_cap = max(-1.2, min(1.8, b))
+    t_up = max(0.0, min(0.9, tstep))
+    obs_proj = float(peak_c) + 0.55 * b_cap + 0.35 * t_up
+    w_center = {
+        "far": 0.18,
+        "near_window": 0.26,
+        "in_window": 0.35,
+        "post": 0.45,
+    }.get(phase_now, 0.22)
+    center = (1 - w_center) * center + w_center * obs_proj
 
     # avoid double-counting model priced-in move: only use excess bias above tolerance.
     excess_up = max(0.0, b - 0.9)
@@ -2001,7 +2058,7 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     phase_map = {"far": "远离窗口", "near_window": "接近窗口", "in_window": "窗口内", "post": "窗口后", "unknown": "窗口状态未知"}
     vars_block = [f"⚠️ **关注变量**（{phase_map.get(phase_now, '窗口状态未知')}）"]
     cloud_code = str(metar_diag.get("latest_cloud_code") or "").upper()
-    t_bias = metar_diag.get("temp_bias_c")
+    t_bias = metar_diag.get("temp_bias_smooth_c") if metar_diag.get("temp_bias_smooth_c") is not None else metar_diag.get("temp_bias_c")
     if cloud_code in {"BKN", "OVC", "VV"}:
         vars_block.append("• 低云维持/继续增厚 → 最高温上沿下压，峰值可能提前结束。")
     else:
