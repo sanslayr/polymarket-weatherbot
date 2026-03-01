@@ -22,7 +22,7 @@ from vertical_3d import build_3d_objects
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT / "cache" / "runtime"
-SCHEMA_VERSION = "forecast-decision.v2"
+SCHEMA_VERSION = "forecast-decision.v3"
 
 
 def _cache_key(*parts: str) -> str:
