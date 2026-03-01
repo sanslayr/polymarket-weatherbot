@@ -33,6 +33,7 @@ import requests
 from forecast_pipeline import load_or_build_forecast_decision
 from realtime_pipeline import classify_window_phase, select_realtime_triggers
 from cache_envelope import extract_payload, make_cache_doc
+from window_phase_engine import pick_peak_indices
 
 ROOT = Path(__file__).resolve().parent.parent
 STATION_CSV = ROOT / "station_links.csv"
@@ -610,7 +611,6 @@ def _build_window_at_index(hourly: dict[str, Any], idx: int, band_c: float = 0.4
 def detect_tmax_windows(hourly: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
     times = hourly["time"]
     t2m = hourly["temperature_2m"]
-    clow = hourly["cloud_cover_low"]
 
     # Legacy tmax windows (for compatibility)
     tmax = max(t2m)
@@ -631,34 +631,17 @@ def detect_tmax_windows(hourly: dict[str, Any]) -> tuple[list[dict[str, Any]], d
         windows.append(_build_window_at_index(hourly, k, band_c=0.5))
 
     # Full-day continuous scan: peak potential over all hours.
-    tmin, tmax_v = min(t2m), max(t2m)
-    span = max(0.5, tmax_v - tmin)
-    raw_scores: list[tuple[int, float]] = []
-    for i in range(len(t2m)):
-        temp_norm = (t2m[i] - tmin) / span
-        up1 = max(0.0, (t2m[i + 1] - t2m[i]) if i + 1 < len(t2m) else 0.0)
-        up2 = max(0.0, (t2m[i + 2] - t2m[i + 1]) if i + 2 < len(t2m) else 0.0)
-        traj = min(2.0, up1 + up2) / 2.0
-        cloud_term = 1.0 - min(1.0, max(0.0, float(clow[i] or 0.0) / 100.0))
-        score = 0.60 * temp_norm + 0.25 * traj + 0.15 * cloud_term
-        raw_scores.append((i, score))
-
-    raw_scores.sort(key=lambda x: x[1], reverse=True)
-    picked: list[tuple[int, float]] = []
-    for i, s in raw_scores:
-        if any(abs(i - j) <= 2 for j, _ in picked):
-            continue
-        picked.append((i, s))
-        if len(picked) >= 4:
-            break
+    # Window-phase module (prior + offsets + model factors) handles candidate scoring.
+    picked = pick_peak_indices(hourly, limit=4, min_separation_hours=2)
 
     candidates: list[dict[str, Any]] = []
-    for i, s in picked:
+    for i, s, info in picked:
         w = _build_window_at_index(hourly, i, band_c=0.4)
         candidates.append({
             "score": round(float(s), 3),
             "hour_local": times[i],
             "window": w,
+            "factors": info,
         })
 
     primary = candidates[0]["window"] if candidates else (windows[0] if windows else {})
