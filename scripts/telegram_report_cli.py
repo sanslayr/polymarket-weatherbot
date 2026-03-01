@@ -142,7 +142,12 @@ def _station_meta_for(icao: str) -> dict[str, str]:
                         continue
                     t1 = str(row.get("terrain_tag") or "").strip()
                     t2 = str(row.get("terrain_tag2") or "").strip()
-                    terr = f"{t1}·{t2}" if (t1 and t2) else (t1 or "")
+
+                    topo_tokens = ["低地", "高地", "丘陵", "平原", "山地", "高原", "台地"]
+                    redundant = False
+                    if t1 and t2:
+                        redundant = any((tk in t1 and tk in t2) for tk in topo_tokens)
+                    terr = t1 if (t1 and (not t2 or redundant)) else (f"{t1}·{t2}" if (t1 and t2) else (t1 or ""))
                     mp[k] = {
                         "terrain": terr,
                         "factor_summary": str(row.get("factor_summary") or "").strip(),
