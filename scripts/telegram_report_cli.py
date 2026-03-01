@@ -1541,13 +1541,13 @@ def _build_polymarket_section(
         else:
             # 潜在alpha：
             # - 常规: Ask<=0.15
-            # - 扩展: 0.15<Ask<=0.20 且天气一致性高
+            # - 扩展: 0.15<Ask<=0.18 且天气一致性高
             row = (_c, label, bid, ask, _lo, _hi)
             s = score_map.get((label, str(bid), str(ask)), 0.0)
             w = _weather_score(row)
             if ask_v > 0 and ask_v <= 0.15 and s >= 0.22:
                 tag = "😇潜在Alpha"
-            elif ask_v > 0.15 and ask_v <= 0.20 and w >= 0.45 and s >= 0.30:
+            elif ask_v > 0.15 and ask_v <= 0.18 and w >= 0.45 and s >= 0.30:
                 tag = "😇潜在Alpha"
 
         if tag:
