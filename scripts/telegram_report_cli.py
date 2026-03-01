@@ -1635,10 +1635,10 @@ def render_report(command_text: str) -> str:
         if syn_fail and rate_limited:
             if breaker_until is not None:
                 header_lines.append(
-                    f"⚠️ 数据提醒：Open-Meteo 限流（429），synoptic 已降级；breaker截止 {breaker_until.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+                    f"⚠️ 数据提醒：Open-Meteo 请求过多（429），环流层已降级；预计 {breaker_until.strftime('%H:%M:%S')} UTC 后恢复"
                 )
             else:
-                header_lines.append("⚠️ 数据提醒：Open-Meteo 限流（429），synoptic 已降级。")
+                header_lines.append("⚠️ 数据提醒：Open-Meteo 请求过多（429），环流层已降级。")
     except Exception:
         pass
 
