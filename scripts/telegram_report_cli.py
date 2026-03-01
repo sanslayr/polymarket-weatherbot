@@ -1349,7 +1349,7 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
     syn_lines = ["🧭 **环流背景**"]
 
-    obj = (d.get("object_3d_main") or {}) if isinstance(d, dict) else {}
+    raw_obj = (d.get("object_3d_main") or {}) if isinstance(d, dict) else {}
 
     def _contains_any(text: str, keys: list[str]) -> bool:
         s = str(text or "")
@@ -1371,6 +1371,26 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         return "混合主导", "混合扰动"
 
     candidates = (((fdec.get("features") or {}).get("objects_3d") or {}).get("candidates") or []) if isinstance(fdec, dict) else []
+
+    def _conf_ord(x: str) -> int:
+        return {"high": 3, "medium": 2, "low": 1}.get(str(x or "").lower(), 0)
+
+    # If main object is low-confidence, do not force it as dominant.
+    obj = dict(raw_obj) if isinstance(raw_obj, dict) else {}
+    if obj and _conf_ord(obj.get("confidence")) <= 1:
+        alt = None
+        for c in candidates:
+            if not isinstance(c, dict):
+                continue
+            if _conf_ord(c.get("confidence")) >= 2:
+                alt = c
+                break
+        if alt is not None:
+            obj = dict(alt)
+            obj["_promoted_from_candidate"] = True
+        else:
+            # no reliable candidate: fall back to "no clear dominant system"
+            obj = {}
 
     def _candidate_groups() -> set[str]:
         gs: set[str] = set()
