@@ -30,12 +30,12 @@
     "relief_15km_m": 72.0
   },
   "CYYZ": {
-    "tag": "平原缓丘",
+    "tag": "低地缓丘",
     "elevation_m": 172.0,
     "relief_15km_m": 117.0
   },
   "NZWN": {
-    "tag": "低地起伏",
+    "tag": "丘陵起伏",
     "elevation_m": 5.0,
     "relief_15km_m": 340.0
   },
@@ -55,12 +55,12 @@
     "relief_15km_m": 259.0
   },
   "RKSI": {
-    "tag": "低地起伏",
+    "tag": "丘陵起伏",
     "elevation_m": 6.0,
     "relief_15km_m": 363.0
   },
   "SBGR": {
-    "tag": "高地起伏",
+    "tag": "山地起伏",
     "elevation_m": 749.0,
     "relief_15km_m": 260.0
   },

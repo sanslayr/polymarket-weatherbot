@@ -15,26 +15,45 @@ OUT_JSON = ROOT / "config" / "station_terrain_tags.json"
 
 
 def classify_terrain(base_m: float, relief_m: float) -> str:
-    # Keep tags short (1-2 words) and robust across stations.
+    """Return canonical terrain tag from fixed vocabulary.
+
+    Fixed vocabulary (stable for report headers):
+    - 低地平原
+    - 低地缓丘
+    - 丘陵起伏
+    - 内陆高地
+    - 高原起伏
+    - 山地起伏
+    """
+    # very low base elevation
     if base_m <= 60:
-        if relief_m >= 180:
-            return "低地起伏"
-        if relief_m >= 80:
+        if relief_m < 80:
+            return "低地平原"
+        if relief_m < 180:
             return "低地缓丘"
-        return "低地平原"
-
-    if base_m >= 900:
-        return "高原起伏" if relief_m >= 180 else "高原台地"
-    if base_m >= 600:
-        return "高地起伏" if relief_m >= 200 else "高原台地"
-    if base_m >= 250:
-        return "山地起伏" if relief_m >= 220 else "内陆高地"
-
-    # 60~250m low to mid elevation
-    if relief_m >= 220:
         return "丘陵起伏"
-    if relief_m >= 100:
-        return "平原缓丘"
+
+    # high base elevation (plateau/highland)
+    if base_m >= 800:
+        if relief_m >= 260:
+            return "山地起伏"
+        return "高原起伏"
+
+    # mid/high elevation inland
+    if base_m >= 250:
+        if relief_m >= 260:
+            return "山地起伏"
+        if relief_m >= 140:
+            return "丘陵起伏"
+        return "内陆高地"
+
+    # low-to-mid base elevation
+    if relief_m >= 260:
+        return "山地起伏"
+    if relief_m >= 140:
+        return "丘陵起伏"
+    if relief_m >= 80:
+        return "低地缓丘"
     return "低地平原"
 
 
