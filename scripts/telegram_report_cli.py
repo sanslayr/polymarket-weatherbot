@@ -1277,18 +1277,20 @@ def _poly_parse_interval(slug: str) -> tuple[float, float, str] | None:
     s = slug.lower()
 
     # explicit ranged bins first, e.g. "-42-43f" / "-12-13c"
-    m = re.search(r"-(neg\d+|\d+)-(neg\d+|\d+)c$", s)
+    m = re.search(r"-(neg\d+|\d{1,3})-(neg\d+|\d{1,3})c$", s)
     if m:
         n1 = _poly_num(m.group(1))
         n2 = _poly_num(m.group(2))
-        lo, hi = (n1, n2) if n1 <= n2 else (n2, n1)
-        return (lo - 0.5, hi + 0.49, "C")
-    m = re.search(r"-(neg\d+|\d+)-(neg\d+|\d+)f$", s)
+        if abs(n1 - n2) <= 8:
+            lo, hi = (n1, n2) if n1 <= n2 else (n2, n1)
+            return (lo - 0.5, hi + 0.49, "C")
+    m = re.search(r"-(neg\d+|\d{1,3})-(neg\d+|\d{1,3})f$", s)
     if m:
         n1 = _poly_num(m.group(1))
         n2 = _poly_num(m.group(2))
-        lo, hi = (n1, n2) if n1 <= n2 else (n2, n1)
-        return (lo - 0.5, hi + 0.49, "F")
+        if abs(n1 - n2) <= 8:
+            lo, hi = (n1, n2) if n1 <= n2 else (n2, n1)
+            return (lo - 0.5, hi + 0.49, "F")
 
     m = re.search(r"-(neg\d+|\d+)c$", s)
     if m:
@@ -1320,8 +1322,8 @@ def _poly_parse_interval(slug: str) -> tuple[float, float, str] | None:
 def _poly_label(slug: str) -> str:
     s = slug.lower()
     for pat, fmt in [
-        (r"-(neg\d+|\d+)-(neg\d+|\d+)c$", lambda a, b: f"{_poly_num(a)}-{_poly_num(b)}°C"),
-        (r"-(neg\d+|\d+)-(neg\d+|\d+)f$", lambda a, b: f"{_poly_num(a)}-{_poly_num(b)}°F"),
+        (r"-(neg\d+|\d{1,3})-(neg\d+|\d{1,3})c$", lambda a, b: f"{_poly_num(a)}-{_poly_num(b)}°C"),
+        (r"-(neg\d+|\d{1,3})-(neg\d+|\d{1,3})f$", lambda a, b: f"{_poly_num(a)}-{_poly_num(b)}°F"),
         (r"-(neg\d+|\d+)c$", lambda n: f"{_poly_num(n)}°C"),
         (r"-(neg\d+|\d+)corbelow$", lambda n: f"{_poly_num(n)}°C or below"),
         (r"-(neg\d+|\d+)corhigher$", lambda n: f"{_poly_num(n)}°C or higher"),
