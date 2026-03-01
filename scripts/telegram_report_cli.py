@@ -897,8 +897,12 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
             t_trend_smooth = 0.0
 
     raw_latest = (latest.get("rawOb") or "")
-    m_cloud = re.search(r"\b(FEW|SCT|BKN|OVC|VV)\d{3}\b", raw_latest)
-    latest_cloud_code = m_cloud.group(1) if m_cloud else latest.get("cover")
+    layers = re.findall(r"\b(FEW|SCT|BKN|OVC|VV)\d{3}\b", raw_latest)
+    if layers:
+        rank = {"FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4, "VV": 5}
+        latest_cloud_code = sorted(layers, key=lambda c: rank.get(str(c).upper(), 0), reverse=True)[0]
+    else:
+        latest_cloud_code = latest.get("cover")
 
     if str(latest_cloud_code or "").upper() in {"CLR", "CAVOK", "FEW", "SCT"}:
         cloud_hint = "云量约束偏弱"
@@ -2610,6 +2614,36 @@ def choose_section_text(
                 thermal_cap_hi = max(thermal_cap_hi, float(obs_max) + 0.6)
             hi = min(hi, thermal_cap_hi)
             lo = min(lo, hi - 0.2)
+
+    # Far-window cold-advection sanity cap: avoid over-projecting rapid afternoon rebound
+    # when low-level northerly cold feed persists.
+    if phase_now == "far" and "冷平流" in line850:
+        try:
+            wdir_now = float(metar_diag.get("latest_wdir")) if metar_diag.get("latest_wdir") not in (None, "", "VRB") else None
+        except Exception:
+            wdir_now = None
+        northerly = (wdir_now is not None) and ((wdir_now >= 300.0) or (wdir_now <= 60.0))
+        if northerly and b_cons <= 0.3:
+            try:
+                peak_local_txt = str(primary_window.get("peak_local") or "")
+                latest_local_txt = str(metar_diag.get("latest_report_local") or "")
+                if peak_local_txt and latest_local_txt:
+                    hleft = max(0.0, (datetime.fromisoformat(peak_local_txt) - datetime.fromisoformat(latest_local_txt)).total_seconds() / 3600.0)
+                else:
+                    hleft = 2.0
+            except Exception:
+                hleft = 2.0
+            try:
+                t_now = float(metar_diag.get("latest_temp"))
+            except Exception:
+                t_now = None
+            if t_now is not None:
+                rise_cap = min(3.2, 1.6 + 0.45 * hleft)
+                far_cap_hi = t_now + rise_cap
+                if obs_max is not None:
+                    far_cap_hi = max(far_cap_hi, float(obs_max) + 0.3)
+                hi = min(hi, far_cap_hi)
+                lo = min(lo, hi - 0.2)
 
     def _soft_snap(v: float) -> float:
         iv = round(v)
