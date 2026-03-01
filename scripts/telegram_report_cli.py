@@ -2387,6 +2387,35 @@ def choose_section_text(
         hi = max(hi, floor_hi)
         lo = max(lo, min(floor_lo, hi - 0.2))
 
+    # Thermal-balance cap: prevent inertial high overestimation under persistent low-cloud constraint.
+    try:
+        low_cloud_peak = float(primary_window.get("low_cloud_pct") or 0.0)
+    except Exception:
+        low_cloud_peak = 0.0
+    try:
+        w850_peak = float(primary_window.get("w850_kmh") or 0.0)
+    except Exception:
+        w850_peak = 0.0
+
+    thermal_cap_hi = None
+    if phase_now in {"near_window", "in_window"}:
+        if low_cloud_peak >= 80:
+            thermal_cap_hi = float(peak_c) + 0.9
+        elif low_cloud_peak >= 65:
+            thermal_cap_hi = float(peak_c) + 1.2
+
+        if thermal_cap_hi is not None:
+            if t_cons <= 0.15:
+                thermal_cap_hi -= 0.15
+            if w850_peak >= 30:
+                thermal_cap_hi += 0.20  # strong-wind cities can keep mixed layer warmer
+            if "暖平流" in line850 and b_cons >= 1.0:
+                thermal_cap_hi += 0.10
+            if obs_max is not None:
+                thermal_cap_hi = max(thermal_cap_hi, float(obs_max) + 0.7)
+            hi = min(hi, thermal_cap_hi)
+            lo = min(lo, hi - 0.2)
+
     def _soft_snap(v: float) -> float:
         iv = round(v)
         if abs(v - iv) <= 0.12:
@@ -2414,6 +2443,8 @@ def choose_section_text(
         tail_ext = min(0.8, 0.4 + 0.3 * max(0.0, skew))
         if clear_sky_stable and phase_now in {"near_window", "in_window"} and t_cons <= 0.15:
             tail_ext = min(tail_ext, 0.45)
+        if phase_now in {"near_window", "in_window"} and low_cloud_peak >= 70 and t_cons <= 0.20:
+            tail_ext = min(tail_ext, 0.25)
         tail_hi = _soft_snap(hi + tail_ext)
         disp_hi = tail_hi
         peak_range_block.append(
