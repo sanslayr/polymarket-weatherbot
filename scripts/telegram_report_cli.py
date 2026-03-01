@@ -1113,7 +1113,12 @@ def _poly_label(slug: str) -> str:
     return slug
 
 
-def _build_polymarket_section(polymarket_event_url: str, primary_window: dict[str, Any], metar_diag: dict[str, Any] | None = None) -> str:
+def _build_polymarket_section(
+    polymarket_event_url: str,
+    primary_window: dict[str, Any],
+    metar_diag: dict[str, Any] | None = None,
+    range_hint: dict[str, float] | None = None,
+) -> str:
     slug = polymarket_event_url.rstrip('/').split('/')[-1]
     r = requests.get("https://gamma-api.polymarket.com/events", params={"limit": 1, "slug": slug}, timeout=5)
     r.raise_for_status()
@@ -1202,11 +1207,24 @@ def _build_polymarket_section(polymarket_event_url: str, primary_window: dict[st
     likely_lo = peak - 0.8
     likely_hi = peak + 0.8
 
+    hint = range_hint or {}
+    try:
+        hint_lo = float(hint.get("display_lo")) if hint.get("display_lo") is not None else None
+    except Exception:
+        hint_lo = None
+    try:
+        hint_hi = float(hint.get("display_hi")) if hint.get("display_hi") is not None else None
+    except Exception:
+        hint_hi = None
+
+    target_lo = hint_lo if hint_lo is not None else likely_lo
+    target_hi = hint_hi if hint_hi is not None else likely_hi
+
     def _overlap_or_near(row: tuple[float, str, Any, Any, float, float]) -> bool:
         _c, _l, _b, _a, lo, hi = row
-        if hi < likely_lo - 0.6:
+        if hi < target_lo - 0.5:
             return False
-        if lo > likely_hi + 0.6:
+        if lo > target_hi + 0.6:
             return False
         return True
 
@@ -1217,8 +1235,8 @@ def _build_polymarket_section(polymarket_event_url: str, primary_window: dict[st
     else:
         mismatch = True
         # 若主带无直接匹配，向 below/above 边缘档位寻找最近可交易区间
-        below = [r for r in filtered if r[5] <= likely_lo]
-        above = [r for r in filtered if r[4] >= likely_hi]
+        below = [r for r in filtered if r[5] <= target_lo]
+        above = [r for r in filtered if r[4] >= target_hi]
         seed = []
         if below:
             seed.append(sorted(below, key=lambda x: x[5], reverse=True)[0])
@@ -1312,12 +1330,13 @@ def _build_polymarket_section(polymarket_event_url: str, primary_window: dict[st
                             seen.add(r[1])
                     focus = sorted(focus, key=lambda x: x[0])
 
-    # Ensure one upper-edge tail bin is visible when forecast upper bound is close to next discrete market bucket.
-    # Example: likely_hi=13.4 should include 14°C as tail breakout watch.
+    # Ensure one upper-edge tail bin is visible when merged upper bound is close to next discrete market bucket.
+    # Example: merged_hi=13.6 should include 14°C as tail breakout watch.
     try:
         finite_all = sorted([r for r in filtered if not (math.isinf(r[4]) or math.isinf(r[5]))], key=lambda x: x[0])
-        target_center = math.ceil(likely_hi)
-        if likely_hi >= (target_center - 0.6):
+        edge_ref_hi = max(likely_hi, target_hi)
+        target_center = math.ceil(edge_ref_hi)
+        if edge_ref_hi >= (target_center - 0.7):
             cand = [r for r in finite_all if abs(r[0] - target_center) <= 0.26]
             if cand:
                 up = cand[0]
@@ -1367,6 +1386,21 @@ def _build_polymarket_section(polymarket_event_url: str, primary_window: dict[st
                 if edges:
                     expanded.append(edges[0])
             focus = sorted({r[1]: r for r in expanded}.values(), key=lambda x: x[0])
+
+    # Final clipping by merged weather range to avoid displaying bins that are clearly too cold.
+    if focus and hint:
+        min_keep = target_lo - 0.4
+        max_keep = target_hi + 0.9
+        clipped = [r for r in focus if (r[5] >= min_keep and r[4] <= max_keep)]
+        if clipped:
+            focus = sorted(clipped, key=lambda x: x[0])
+            if len(focus) < 3:
+                finite_all = sorted([r for r in filtered if not (math.isinf(r[4]) or math.isinf(r[5]))], key=lambda x: x[0])
+                if finite_all:
+                    mid = 0.5 * (target_lo + target_hi)
+                    nearest = sorted(finite_all, key=lambda x: abs(x[0] - mid))[:3]
+                    merged = {r[1]: r for r in (focus + nearest)}
+                    focus = sorted(merged.values(), key=lambda x: x[0])
 
     score_map = {(lbl, str(bid), str(ask)): _alpha_score((c, lbl, bid, ask, lo, hi)) for c, lbl, bid, ask, lo, hi in focus}
 
@@ -2200,18 +2234,23 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     else:
         tail_up_cond = "若云量继续开窗且升温斜率延续"
 
+    core_lo, core_hi = lo, hi
+    disp_lo, disp_hi = lo, hi
+
     if skew >= 0.20:
         tail_hi = _soft_snap(hi + min(0.8, 0.4 + 0.3 * max(0.0, skew)))
+        disp_hi = tail_hi
         peak_range_block.append(
-            f"- **{lo:.1f}~{tail_hi:.1f}°C**（主看 {lo:.1f}~{hi:.1f}°C；峰值窗 {window_txt}；{tail_up_cond}）"
+            f"- **{disp_lo:.1f}~{disp_hi:.1f}°C**（主看 {core_lo:.1f}~{core_hi:.1f}°C；峰值窗 {window_txt}；{tail_up_cond}）"
         )
     elif skew <= -0.20:
         tail_lo = _soft_snap(max(lo - min(0.8, 0.4 + 0.3 * max(0.0, -skew)), lo - 1.0))
+        disp_lo = tail_lo
         peak_range_block.append(
-            f"- **{tail_lo:.1f}~{hi:.1f}°C**（主看 {lo:.1f}~{hi:.1f}°C；峰值窗 {window_txt}；若云量回补并伴随偏冷来流增强）"
+            f"- **{disp_lo:.1f}~{disp_hi:.1f}°C**（主看 {core_lo:.1f}~{core_hi:.1f}°C；峰值窗 {window_txt}；若云量回补并伴随偏冷来流增强）"
         )
     else:
-        peak_range_block.append(f"- **{lo:.1f}~{hi:.1f}°C**（峰值窗 {window_txt}）")
+        peak_range_block.append(f"- **{disp_lo:.1f}~{disp_hi:.1f}°C**（峰值窗 {window_txt}）")
     if bool(metar_diag.get("obs_correction_applied")):
         peak_range_block.append("- 注：已应用实况纠偏（模型峰值偏低，窗口锚定到当日实况峰值时段）。")
 
@@ -2298,7 +2337,17 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         ]
 
     try:
-        poly_block = _build_polymarket_section(polymarket_event_url, primary_window, metar_diag=metar_diag)
+        poly_block = _build_polymarket_section(
+            polymarket_event_url,
+            primary_window,
+            metar_diag=metar_diag,
+            range_hint={
+                "display_lo": float(disp_lo),
+                "display_hi": float(disp_hi),
+                "core_lo": float(core_lo),
+                "core_hi": float(core_hi),
+            },
+        )
     except Exception:
         poly_block = "📈 **Polymarket 盘口与博弈**\n盘口读取异常，请稍后重试。"
 
