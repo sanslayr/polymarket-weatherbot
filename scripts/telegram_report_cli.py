@@ -389,9 +389,9 @@ def resolve_station(station_hint: str) -> Station:
 
 
 def default_model_for_station(st: Station) -> str:
-    if st.icao.startswith("K") or st.icao == "CYYZ" or st.city.strip().lower() == "toronto":
-        return "gfs"
-    return "ecmwf"
+    # Unified default: align headline model with current 3D strategy unless user overrides.
+    m = (os.getenv("LOOK_DEFAULT_MODEL", "gfs") or "gfs").strip().lower()
+    return m if m in {"gfs", "ecmwf"} else "gfs"
 
 
 def _model_cycle_tag(model: str, now_utc: datetime) -> str:
