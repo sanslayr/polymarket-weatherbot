@@ -1342,12 +1342,24 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         return txt
 
     line850_h = _humanize_850(line850)
-    evidence_bits = [f"500hPa: {line500}", f"850hPa: {line850_h}"]
-    if extra:
+
+    def _is_weak_evidence(s: str) -> bool:
+        t = str(s or "")
+        weak_tokens = ["信号一般", "信号有限", "中性", "背景", "不明", "弱"]
+        return any(k in t for k in weak_tokens)
+
+    evidence_bits: list[str] = []
+    if line500 and not _is_weak_evidence(line500):
+        evidence_bits.append(f"500hPa: {line500}")
+    if line850_h and not _is_weak_evidence(line850_h):
+        evidence_bits.append(f"850hPa: {line850_h}")
+    if extra and not _is_weak_evidence(extra):
         evidence_bits.append(f"约束: {extra}")
-    syn_lines.append("- **关键证据**：")
-    syn_lines.append(f"  • {evidence_bits[0]}")
-    syn_lines.append(f"  • {evidence_bits[1]}")
+
+    if evidence_bits:
+        syn_lines.append("- **关键证据**：")
+        for e in evidence_bits[:2]:
+            syn_lines.append(f"  • {e}")
 
     if str(d.get("override_risk") or "low") == "high":
         syn_lines.append("- **改写风险**：中到高，窗口前后需盯实况触发。")
