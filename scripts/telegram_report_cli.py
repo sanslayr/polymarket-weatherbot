@@ -1242,21 +1242,6 @@ def _build_polymarket_section(
     if not filtered:
         filtered = [(c, l, b, a, c - 0.5, c + 0.49) for c, l, b, a in parsed]
 
-    def _alpha_score(row: tuple[float, str, Any, Any, float, float]) -> float:
-        c, _l, b, a, lo, hi = row
-        ask = _px(a)
-        bid = _px(b)
-        price = max(bid, ask)
-        proximity = max(0.0, 1.0 - abs(c - peak) / 3.0)
-        cheap = max(0.0, 0.25 - ask) * 2.0 if ask > 0 else 0.0
-        tradable = 0.3 if price >= 0.02 else 0.0
-        stale_penalty = 0.0
-        if t_now is not None and hi <= t_now + 0.3:
-            stale_penalty = 1.2  # already near/under current temp, alpha weak for Tmax market
-        return 0.55 * proximity + 0.30 * cheap + tradable - stale_penalty
-
-    ranked = sorted(filtered, key=_alpha_score, reverse=True)
-
     likely_lo = peak - 0.8
     likely_hi = peak + 0.8
 
@@ -1285,6 +1270,58 @@ def _build_polymarket_section(
         core_lo = likely_lo
     if core_hi is None:
         core_hi = likely_hi
+
+    def _ov_len(a0: float, a1: float, b0: float, b1: float) -> float:
+        lo = max(a0, b0)
+        hi = min(a1, b1)
+        return max(0.0, hi - lo)
+
+    def _weather_score(row: tuple[float, str, Any, Any, float, float]) -> float:
+        c, _l, _b, _a, lo, hi = row
+        core_w = max(0.4, float(core_hi - core_lo))
+        disp_w = max(core_w, float(target_hi - target_lo), 0.8)
+        ov_core = _ov_len(lo, hi, core_lo, core_hi) / core_w
+        ov_disp = _ov_len(lo, hi, target_lo, target_hi) / disp_w
+        mid = 0.5 * (core_lo + core_hi)
+        c_term = max(0.0, 1.0 - abs(c - mid) / 2.0)
+        return 0.55 * ov_core + 0.30 * ov_disp + 0.15 * c_term
+
+    def _market_strength(row: tuple[float, str, Any, Any, float, float]) -> float:
+        _c, _l, b, a, _lo, _hi = row
+        bid = _px(b)
+        ask = _px(a)
+        if bid > 0 and ask > 0:
+            mid = 0.5 * (bid + ask)
+            spread = max(0.0, ask - bid)
+        else:
+            mid = max(bid, ask)
+            spread = 0.25
+        liquid = 0.08 if max(bid, ask) >= 0.02 else -0.05
+        return mid - 0.35 * spread + liquid
+
+    def _alpha_score(row: tuple[float, str, Any, Any, float, float]) -> float:
+        _c, _l, b, a, _lo, hi = row
+        bid = _px(b)
+        ask = _px(a)
+        spread = max(0.0, ask - bid)
+        w = _weather_score(row)
+        m = _market_strength(row)
+        mispricing = max(0.0, w - m)
+
+        cheap_bonus = 0.0
+        if ask > 0 and ask <= 0.15:
+            cheap_bonus = 0.14 + 0.10 * (0.15 - ask) / 0.15
+        elif ask > 0.15 and ask <= 0.20 and spread <= 0.06 and w >= 0.45:
+            cheap_bonus = 0.05 + 0.05 * (0.20 - ask) / 0.05
+
+        tradable = 0.05 if max(bid, ask) >= 0.02 else -0.04
+        stale_penalty = 0.0
+        if t_now is not None and hi <= t_now + 0.3:
+            stale_penalty = 0.35
+
+        return 0.85 * mispricing + 0.25 * w + cheap_bonus + tradable - 0.25 * spread - stale_penalty
+
+    ranked = sorted(filtered, key=lambda r: (0.75 * _weather_score(r) + 0.25 * _market_strength(r)), reverse=True)
 
     def _overlap_or_near(row: tuple[float, str, Any, Any, float, float]) -> bool:
         _c, _l, _b, _a, lo, hi = row
@@ -1419,20 +1456,20 @@ def _build_polymarket_section(
     except Exception:
         pass
 
-    # Only mark "most likely" when lead is clear enough and market bin is consistent with weather main-band.
+    # “最有可能”以天气预测一致性为主，市场强度仅作并列裁决。
     best_label = None
     if focus:
-        def _mkt_strength(row: tuple[float, str, Any, Any, float, float]) -> float:
-            _c, _l, b, a, _lo, _hi = row
-            return max(_px(b), _px(a))
-
-        # Prefer bins that overlap the weather core range; avoid labeling a bin clearly outside main range.
         core_bins = [r for r in focus if (r[5] >= core_lo and r[4] <= core_hi)]
         pick_pool = core_bins if core_bins else focus
-        pick_sorted = sorted(pick_pool, key=_mkt_strength, reverse=True)
-        s1 = _mkt_strength(pick_sorted[0])
-        s2 = _mkt_strength(pick_sorted[1]) if len(pick_sorted) > 1 else 0.0
-        if (s1 - s2) >= 0.06:
+
+        def _likely_score(row: tuple[float, str, Any, Any, float, float]) -> float:
+            return 0.82 * _weather_score(row) + 0.18 * _market_strength(row)
+
+        pick_sorted = sorted(pick_pool, key=_likely_score, reverse=True)
+        s1 = _likely_score(pick_sorted[0])
+        s2 = _likely_score(pick_sorted[1]) if len(pick_sorted) > 1 else -999.0
+        # require clear lead to avoid over-tagging in tight distributions
+        if (s1 - s2) >= 0.045 and _weather_score(pick_sorted[0]) >= 0.28:
             best_label = pick_sorted[0][1]
 
     # Non-settled markets should show at least 2-3 bins (main + adjacent), avoid single-bin squeeze.
@@ -1486,15 +1523,23 @@ def _build_polymarket_section(
         lines.append("  • 注：市场档位与气象主带存在错位，已按最近 below/above 边缘区间回退展示。")
     for _c, label, bid, ask, _lo, _hi in focus:
         ask_v = _px(ask)
+        bid_v = _px(bid)
+        spread_v = max(0.0, ask_v - bid_v)
         bid_txt = "None" if bid in (None, "") else str(bid)
         ask_txt = "None" if ask in (None, "") else str(ask)
         tag = ""
         if best_label and label == best_label:
             tag = "👍最有可能"
         else:
-            # 潜在alpha是可选标记：仅在低价且综合评分足够高时显示。
+            # 潜在alpha：
+            # - 常规: Ask<=0.15
+            # - 扩展: 0.15<Ask<=0.20 且 spread小、天气一致性高
+            row = (_c, label, bid, ask, _lo, _hi)
             s = score_map.get((label, str(bid), str(ask)), 0.0)
-            if ask_v > 0 and ask_v <= 0.12 and s >= 1.05:
+            w = _weather_score(row)
+            if ask_v > 0 and ask_v <= 0.15 and s >= 0.22:
+                tag = "😇潜在Alpha"
+            elif ask_v > 0.15 and ask_v <= 0.20 and spread_v <= 0.06 and w >= 0.45 and s >= 0.30:
                 tag = "😇潜在Alpha"
 
         if tag:
