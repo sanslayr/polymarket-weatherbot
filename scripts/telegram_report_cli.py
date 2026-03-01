@@ -1507,6 +1507,12 @@ def _render_metar_only_report(st: Station, model: str, links_payload: dict[str, 
 def render_report(command_text: str) -> str:
     req_start_utc = datetime.now(timezone.utc)
     t_e2e = time.perf_counter()
+    perf_local: dict[str, float] = {}
+
+    def _mark(stage: str, seconds: float) -> None:
+        perf_local[stage] = round(float(seconds), 3)
+        _perf_log(stage, seconds)
+
     _prune_runtime_cache()
     params = parse_telegram_command(command_text)
     if params.get("cmd") == "lookhelp":
@@ -1557,10 +1563,10 @@ def render_report(command_text: str) -> str:
                 target_valid_utc=fallback_valid_utc,
                 target_date_utc=datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc),
             )
-            _perf_log("hourly_fetch", time.perf_counter() - t0)
+            _mark("hourly_fetch", time.perf_counter() - t0)
             return _render_metar_only_report(st, degrade_model, links_payload, reason=f"{provider} provider degraded: {exc}", tz_name=tz_name_station)
         raise
-    _perf_log("hourly_fetch", time.perf_counter() - t0)
+    _mark("hourly_fetch", time.perf_counter() - t0)
 
     global SYNOPTIC_PROVIDER
     SYNOPTIC_PROVIDER = provider_used
@@ -1576,7 +1582,7 @@ def render_report(command_text: str) -> str:
     t0 = time.perf_counter()
     metar24 = fetch_metar_24h(st.icao)
     metar_text, metar_diag = metar_observation_block(metar24, hourly_day, tz_name, target_date=target_date)
-    _perf_log("metar_fetch_parse", time.perf_counter() - t0)
+    _mark("metar_fetch_parse", time.perf_counter() - t0)
 
     # 实况纠偏：当实况显著高于模型峰值时，优先以实况峰值时段重锚窗口。
     try:
@@ -1629,10 +1635,10 @@ def render_report(command_text: str) -> str:
         primary_window=primary,
         tz_name=tz_name,
         run_synoptic_fn=run_synoptic_section,
-        perf_log=_perf_log,
+        perf_log=_mark,
     )
     forecast_elapsed = time.perf_counter() - t0
-    _perf_log("forecast_pipeline", forecast_elapsed)
+    _mark("forecast_pipeline", forecast_elapsed)
     lat_hemi = "N" if st.lat >= 0 else "S"
     lon_hemi = "E" if st.lon >= 0 else "W"
     rt = str(links_payload.get("runtime_utc") or "")
@@ -1640,12 +1646,19 @@ def render_report(command_text: str) -> str:
     if len(rt) == 10 and rt.isdigit():
         rt_fmt = f"{rt[0:4]}/{rt[4:6]}/{rt[6:8]} {rt[8:10]}Z"
 
+    fc_cache = perf_local.get("forecast.cache_read", 0.0)
+    fc_syn = perf_local.get("forecast.synoptic_build", 0.0)
+    fc_dec = perf_local.get("forecast.decision_build", 0.0)
+    fc_write = perf_local.get("forecast.cache_write", 0.0)
+    fc_fallback = perf_local.get("forecast.synoptic_fallback_cache", 0.0)
+
     header_lines = [
         f"📍 **{st.icao} ({st.city}) | {abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}**",
         f"判断时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC | {now_local.strftime('%Y-%m-%d %H:%M')} Local (UTC{now_local.strftime('%z')[:3]})",
         f"分析基准模型: {analysis_model.upper()}（运行时次: {rt_fmt}） | 数据源: {provider_used}",
         f"🕒 请求接收: {req_start_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC",
-        f"⏱️ forecast耗时: {forecast_elapsed:.2f}s | 脚本端到端: {time.perf_counter() - t_e2e:.2f}s",
+        f"⏱️ 总耗时: 取数{perf_local.get('hourly_fetch', 0.0):.2f}s + 实况{perf_local.get('metar_fetch_parse', 0.0):.2f}s + 识别{forecast_elapsed:.2f}s | 端到端{time.perf_counter() - t_e2e:.2f}s",
+        f"⏱️ forecast分解: cache读{fc_cache:.2f}s / synoptic构建{fc_syn:.2f}s / 决策{fc_dec:.2f}s / cache写{fc_write:.2f}s" + (" / 回填缓存" if fc_fallback > 0 else ""),
     ]
 
     try:
@@ -1683,7 +1696,7 @@ def render_report(command_text: str) -> str:
         links_payload["links"]["polymarket_event"],
         forecast_decision=forecast_decision,
     )
-    _perf_log("render_body", time.perf_counter() - t0)
+    _mark("render_body", time.perf_counter() - t0)
 
     links = links_payload["links"]
     footer = (

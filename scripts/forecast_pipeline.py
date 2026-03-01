@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import os
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -64,6 +66,42 @@ def _write_3d_bundle(bundle: dict[str, Any], *parts: str) -> None:
     k = _cache_key(*parts)
     p = CACHE_DIR / f"forecast_3d_bundle_{k}.json"
     p.write_text(json.dumps(bundle, ensure_ascii=False), encoding="utf-8")
+
+
+def _read_recent_synoptic_bundle(*, station_icao: str, target_date: str, model: str, max_age_hours: int = 12) -> dict[str, Any] | None:
+    """Fallback: read most recent 3D bundle for same station/date/model across runtime tags."""
+    patt = str(CACHE_DIR / "forecast_3d_bundle_*.json")
+    cands: list[tuple[datetime, dict[str, Any]]] = []
+    for p in glob.glob(patt):
+        try:
+            doc = json.loads(Path(p).read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(doc.get("station") or "") != station_icao:
+            continue
+        if str(doc.get("date") or "") != target_date:
+            continue
+        if str(doc.get("model") or "").lower() != model.lower():
+            continue
+        slices = doc.get("slices")
+        if not isinstance(slices, list) or not slices:
+            continue
+        try:
+            ts = datetime.fromtimestamp(Path(p).stat().st_mtime, tz=timezone.utc)
+        except Exception:
+            ts = datetime.now(timezone.utc)
+        cands.append((ts, doc))
+
+    if not cands:
+        return None
+    cands.sort(key=lambda x: x[0], reverse=True)
+    ts, best = cands[0]
+    if (datetime.now(timezone.utc) - ts) > timedelta(hours=max_age_hours):
+        return None
+    try:
+        return _merge_synoptic_payloads(best.get("slices") or [])
+    except Exception:
+        return None
 
 
 def _runtime_tag(model: str, now_utc: datetime) -> str:
@@ -302,6 +340,7 @@ def load_or_build_forecast_decision(
 
     t = time.perf_counter()
     syn_payloads: list[dict[str, Any]] = []
+    synoptic_from_fallback = False
     anchor_locals = _full_day_anchor_locals(target_date, tz_name, model)
     # Default to full-day anchors; set FORECAST_ANCHOR_LIMIT>0 to cap for performance tests.
     anchor_limit = int(os.getenv("FORECAST_ANCHOR_LIMIT", "0") or "0")
@@ -311,6 +350,10 @@ def load_or_build_forecast_decision(
     def _pull_anchor(a_local: str) -> tuple[str, dict[str, Any] | None, str | None]:
         t_anchor = time.perf_counter()
         try:
+            # Optional jitter to smooth provider burst limits.
+            jitter_ms = int(os.getenv("FORECAST_ANCHOR_JITTER_MS", "0") or "0")
+            if jitter_ms > 0:
+                time.sleep(random.uniform(0.0, max(0.0, jitter_ms / 1000.0)))
             p = run_synoptic_fn(station, target_date, a_local, tz_name, model, runtime)
             if perf_log:
                 perf_log(f"forecast.anchor.{a_local}", time.perf_counter() - t_anchor)
@@ -320,7 +363,7 @@ def load_or_build_forecast_decision(
                 perf_log(f"forecast.anchor.{a_local}.failed", time.perf_counter() - t_anchor)
             return a_local, None, str(exc)
 
-    max_workers = 2
+    max_workers = max(1, int(os.getenv("FORECAST_MAX_WORKERS", "1") or "1"))
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = [ex.submit(_pull_anchor, a) for a in anchor_locals]
         for fut in as_completed(futs):
@@ -347,6 +390,18 @@ def load_or_build_forecast_decision(
             )
         except Exception:
             pass
+    else:
+        fallback_syn = _read_recent_synoptic_bundle(
+            station_icao=str(getattr(station, "icao", "")),
+            target_date=target_date,
+            model=model,
+            max_age_hours=int(os.getenv("FORECAST_SYNOPTIC_FALLBACK_HOURS", "12") or "12"),
+        )
+        if fallback_syn:
+            synoptic = fallback_syn
+            synoptic_from_fallback = True
+            if perf_log:
+                perf_log("forecast.synoptic_fallback_cache", 0.0)
     _log("forecast.synoptic_build", t)
 
     t = time.perf_counter()
@@ -362,9 +417,11 @@ def load_or_build_forecast_decision(
     )
     _log("forecast.decision_build", t)
 
-    if synoptic_error:
+    if synoptic_error and not synoptic_from_fallback:
         decision.setdefault("quality", {})["source_state"] = "degraded"
         decision.setdefault("quality", {}).setdefault("missing_layers", []).append("synoptic")
+    elif synoptic_from_fallback:
+        decision.setdefault("quality", {})["source_state"] = "fallback-cache"
 
     t = time.perf_counter()
     _write_cache(decision, *key_parts)
