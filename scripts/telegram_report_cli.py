@@ -2475,8 +2475,18 @@ def choose_section_text(
         consistency_shift = min(consistency_shift, 0.15)
         center -= 0.08
 
+    # Persistent low-cloud guard: avoid pushing center too high when BKN/OVC remains and no opening signal.
+    cloud_opening = ("开窗" in str(metar_diag.get("cloud_trend") or "")) or ("减弱" in str(metar_diag.get("cloud_trend") or ""))
+    if phase_now in {"near_window", "in_window"} and cloud_code_now in {"BKN", "OVC", "VV"} and not cloud_opening:
+        consistency_shift = min(consistency_shift, 0.16)
+
     consistency_shift = max(-0.75, min(0.75, consistency_shift))
     center += consistency_shift
+
+    if phase_now in {"near_window", "in_window"} and cloud_code_now in {"BKN", "OVC", "VV"} and not cloud_opening:
+        # cap center by model peak + modest allowance; only slightly relax if slope is clearly positive
+        cap_add = 0.65 + 0.20 * max(0.0, min(0.8, t_cons - 0.35))
+        center = min(center, float(peak_c) + cap_add)
 
     major_half = min(1.05, max(0.45, half_range * 0.68))
     left_hw = major_half * (1.0 - 0.35 * skew)
@@ -2489,6 +2499,18 @@ def choose_section_text(
 
     # anti-collapse guard near peak: avoid over-compressing main band when warm-support evidence is aligned.
     sf_local = _sounding_factor_pack()
+
+    try:
+        low_cloud_peak = float(primary_window.get("low_cloud_pct") or 0.0)
+    except Exception:
+        low_cloud_peak = 0.0
+    try:
+        w850_peak = float(primary_window.get("w850_kmh") or 0.0)
+    except Exception:
+        w850_peak = 0.0
+    if cloud_code_now in {"BKN", "OVC", "VV"}:
+        low_cloud_peak = max(low_cloud_peak, 75.0)
+
     warm_support = 0.0
     if "暖平流" in line850:
         warm_support += 0.6
@@ -2500,7 +2522,15 @@ def choose_section_text(
         warm_support += 0.4
     warm_support += min(0.6, max(0.0, float(sf_local.get("up_adj") or 0.0) - 0.3 * float(sf_local.get("down_adj") or 0.0)))
 
-    if phase_now in {"near_window", "in_window"} and warm_support >= 1.2 and obs_max is not None:
+    if (
+        phase_now in {"near_window", "in_window"}
+        and warm_support >= 1.2
+        and obs_max is not None
+        and low_cloud_peak < 60
+        and cloud_code_now not in {"BKN", "OVC", "VV"}
+        and (not precip_cooling)
+        and (not precip_residual)
+    ):
         try:
             peak_local_txt = str(primary_window.get("peak_local") or "")
             latest_local_txt = str(metar_diag.get("latest_report_local") or "")
@@ -2517,19 +2547,6 @@ def choose_section_text(
         lo = max(lo, min(floor_lo, hi - 0.2))
 
     # Thermal-balance cap: prevent inertial high overestimation under persistent low-cloud constraint.
-    try:
-        low_cloud_peak = float(primary_window.get("low_cloud_pct") or 0.0)
-    except Exception:
-        low_cloud_peak = 0.0
-    try:
-        w850_peak = float(primary_window.get("w850_kmh") or 0.0)
-    except Exception:
-        w850_peak = 0.0
-
-    # If latest METAR still reports BKN/OVC, treat cloud constraint as persistent even when model peak-hour low cloud is lower.
-    if cloud_code_now in {"BKN", "OVC", "VV"}:
-        low_cloud_peak = max(low_cloud_peak, 75.0)
-
     thermal_cap_hi = None
     if phase_now in {"near_window", "in_window"}:
         if low_cloud_peak >= 80:
