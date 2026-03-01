@@ -2157,9 +2157,17 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         f"- **主带 {lo:.1f}~{hi:.1f}°C**（峰值窗 {_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local）",
     ]
 
+    cloud_code = str(metar_diag.get("latest_cloud_code") or "").upper()
+    if cloud_code in {"CLR", "CAVOK"}:
+        tail_up_cond = "若晴空维持且升温斜率延续"
+    elif cloud_code in {"FEW", "SCT"}:
+        tail_up_cond = "若少云继续维持且升温斜率延续"
+    else:
+        tail_up_cond = "若云量继续开窗且升温斜率延续"
+
     if skew >= 0.20:
         tail_hi = _soft_snap(hi + min(0.8, 0.4 + 0.3 * max(0.0, skew)))
-        peak_range_block.append(f"- 尾部上破风险：若云量继续开窗且升温斜率延续，最高温可触及 **{hi:.1f}~{tail_hi:.1f}°C**。")
+        peak_range_block.append(f"- 尾部上破风险：{tail_up_cond}，最高温可触及 **{hi:.1f}~{tail_hi:.1f}°C**。")
     elif skew <= -0.20:
         tail_lo = _soft_snap(max(lo - min(0.8, 0.4 + 0.3 * max(0.0, -skew)), lo - 1.0))
         peak_range_block.append(f"- 尾部下探风险：若云量回补并伴随偏冷来流增强，最高温可能回落到 **{tail_lo:.1f}~{lo:.1f}°C**。")
@@ -2168,12 +2176,13 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
     phase_map = {"far": "远离窗口", "near_window": "接近窗口", "in_window": "窗口内", "post": "窗口后", "unknown": "窗口状态未知"}
     vars_block = [f"⚠️ **关注变量**（{phase_map.get(phase_now, '窗口状态未知')}）"]
-    cloud_code = str(metar_diag.get("latest_cloud_code") or "").upper()
     t_bias = metar_diag.get("temp_bias_smooth_c") if metar_diag.get("temp_bias_smooth_c") is not None else metar_diag.get("temp_bias_c")
     if cloud_code in {"BKN", "OVC", "VV"}:
         vars_block.append("• 低云维持/继续增厚 → 最高温上沿下压，峰值可能提前结束。")
+    elif cloud_code in {"CLR", "CAVOK"}:
+        vars_block.append("• 晴空维持 → 地面增温效率较高，最高温上沿仍有上修空间。")
     else:
-        vars_block.append("• 云量继续开窗 → 地面增温效率抬升，最高温上沿有上修空间。")
+        vars_block.append("• 少云继续维持/进一步转疏 → 地面增温效率抬升，最高温上沿有上修空间。")
 
     try:
         wdir = metar_diag.get("latest_wdir")
@@ -2216,7 +2225,7 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
             vars_block = [
                 vars_block[0],
                 "• 当前远离峰值窗口：先跟踪上午到中午的升温斜率是否连续转正。",
-                "• 临窗前关键观察：云量是否由SCT走向BKN/OVC（压制）或继续开窗（上修）。",
+                "• 临窗前关键观察：云量是否回补到BKN/OVC（压制）或维持少云/晴空（上修）。",
                 "• 进入窗口前1-2小时再重点评估：风向切换与偏差漂移是否触发改判。",
             ]
         else:
