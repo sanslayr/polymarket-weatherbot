@@ -2189,11 +2189,9 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     lo = _soft_snap(lo)
     hi = _soft_snap(max(hi, lo + 0.2))
 
-    peak_range_block = [
-        "🌡️ **可能最高温区间**",
-        f"- **主带 {lo:.1f}~{hi:.1f}°C**（峰值窗 {_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local）",
-    ]
+    peak_range_block = ["🌡️ **可能最高温区间**"]
 
+    window_txt = f"{_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local"
     cloud_code = str(metar_diag.get("latest_cloud_code") or "").upper()
     if cloud_code in {"CLR", "CAVOK"}:
         tail_up_cond = "若晴空维持且升温斜率延续"
@@ -2204,10 +2202,16 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
     if skew >= 0.20:
         tail_hi = _soft_snap(hi + min(0.8, 0.4 + 0.3 * max(0.0, skew)))
-        peak_range_block.append(f"- 尾部上破风险：{tail_up_cond}，最高温可触及 **{hi:.1f}~{tail_hi:.1f}°C**。")
+        peak_range_block.append(
+            f"- **{lo:.1f}~{tail_hi:.1f}°C**（主看 {lo:.1f}~{hi:.1f}°C；峰值窗 {window_txt}；{tail_up_cond}）"
+        )
     elif skew <= -0.20:
         tail_lo = _soft_snap(max(lo - min(0.8, 0.4 + 0.3 * max(0.0, -skew)), lo - 1.0))
-        peak_range_block.append(f"- 尾部下探风险：若云量回补并伴随偏冷来流增强，最高温可能回落到 **{tail_lo:.1f}~{lo:.1f}°C**。")
+        peak_range_block.append(
+            f"- **{tail_lo:.1f}~{hi:.1f}°C**（主看 {lo:.1f}~{hi:.1f}°C；峰值窗 {window_txt}；若云量回补并伴随偏冷来流增强）"
+        )
+    else:
+        peak_range_block.append(f"- **{lo:.1f}~{hi:.1f}°C**（峰值窗 {window_txt}）")
     if bool(metar_diag.get("obs_correction_applied")):
         peak_range_block.append("- 注：已应用实况纠偏（模型峰值偏低，窗口锚定到当日实况峰值时段）。")
 
