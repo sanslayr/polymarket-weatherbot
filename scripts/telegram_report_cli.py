@@ -1325,10 +1325,29 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         syn_lines.append("- **落地影响**：短时以实况（云量、温度斜率、近地风）为主判。")
 
     # concise evidence line (avoid spreading full layer-by-layer by default)
-    evidence_bits = [f"500hPa:{line500}", f"850hPa:{line850}"]
+    def _humanize_850(s: str) -> str:
+        txt = str(s or "")
+        m = re.search(r"(暖平流|冷平流)([^（]*)（([0-9.]+)，([^）]+)）", txt)
+        if m:
+            kind = m.group(1)
+            conf_raw = float(m.group(3))
+            if conf_raw >= 0.67:
+                conf = "高"
+            elif conf_raw >= 0.34:
+                conf = "中"
+            else:
+                conf = "低"
+            eta = m.group(4)
+            return f"{kind}（置信度{conf}，可能影响时间{eta}）"
+        return txt
+
+    line850_h = _humanize_850(line850)
+    evidence_bits = [f"500hPa: {line500}", f"850hPa: {line850_h}"]
     if extra:
-        evidence_bits.append(f"约束:{extra}")
-    syn_lines.append(f"- **关键证据**：{'；'.join(evidence_bits[:2])}。")
+        evidence_bits.append(f"约束: {extra}")
+    syn_lines.append("- **关键证据**：")
+    syn_lines.append(f"  • {evidence_bits[0]}")
+    syn_lines.append(f"  • {evidence_bits[1]}")
 
     if str(d.get("override_risk") or "low") == "high":
         syn_lines.append("- **改写风险**：中到高，窗口前后需盯实况触发。")
