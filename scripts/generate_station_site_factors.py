@@ -132,18 +132,21 @@ def main() -> None:
             r["city_sector"] = csec
             r["factor_summary"] = f"{terrain_sector}·{water}·主城在{csec}侧"
 
-            # compact two-token site tag (fixed and reusable): terrain + hydro/inland hint
-            water_short = {
-                "沿海影响": "沿海",
-                "河口影响": "河口",
-                "近水体影响": "近水",
-                "内陆主导": "内陆",
-            }.get(water, "内陆")
-            t1 = str(r.get("terrain_tag") or "").strip()
-            if t1 and water_short and (water_short not in t1):
-                r["site_tag"] = f"{t1}·{water_short}"
-            else:
-                r["site_tag"] = t1 or water_short
+            # site_tag is intended as fixed curated station label.
+            # only auto-fill when empty.
+            cur_site = str(r.get("site_tag") or "").strip()
+            if not cur_site:
+                water_short = {
+                    "沿海影响": "沿海",
+                    "河口影响": "河口",
+                    "近水体影响": "近水",
+                    "内陆主导": "内陆",
+                }.get(water, "内陆")
+                t1 = str(r.get("terrain_tag") or "").strip()
+                if t1 and water_short and (water_short not in t1):
+                    r["site_tag"] = f"{t1}·{water_short}"
+                else:
+                    r["site_tag"] = t1 or water_short
         except Exception as exc:
             r["terrain_sector"] = "未知"
             r["water_factor"] = "未知"
