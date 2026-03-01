@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from forecast_pipeline import load_or_build_forecast_decision
+from realtime_pipeline import classify_window_phase, select_realtime_triggers
 
 ROOT = Path(__file__).resolve().parent.parent
 STATION_CSV = ROOT / "station_links.csv"
@@ -800,6 +801,22 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
     lines.append("")
     lines.append(f"• 最新实况简评：{trend_hint}，{cloud_hint}。")
 
+    wind_dir_change = None
+    pressure_step = None
+    if prev is not None:
+        try:
+            d1 = latest.get("wdir")
+            d0 = prev.get("wdir")
+            if d1 not in (None, "", "VRB") and d0 not in (None, "", "VRB"):
+                a = abs(float(d1) - float(d0)) % 360.0
+                wind_dir_change = min(a, 360.0 - a)
+        except Exception:
+            wind_dir_change = None
+        try:
+            pressure_step = float(latest.get("altim", 0)) - float(prev.get("altim", 0))
+        except Exception:
+            pressure_step = None
+
     # 3) 同小时模式偏差轨迹（最近2-3报）
     b0 = _hour_bias(latest)
     b1 = _hour_bias(prev) if prev else None
@@ -853,6 +870,16 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         if cands:
             obs_max_time_local = max(cands)
 
+    cloud_tr = _cloud_trend(latest, prev) if prev else ""
+    peak_lock_confirmed = False
+    try:
+        if prev is not None and prev2 is not None:
+            t1 = float(latest.get("temp", 0)) - float(prev.get("temp", 0))
+            t0 = float(prev.get("temp", 0)) - float(prev2.get("temp", 0))
+            peak_lock_confirmed = (t1 <= -0.2 and t0 <= -0.2)
+    except Exception:
+        peak_lock_confirmed = False
+
     return "\n".join(lines), {
         "latest_report_utc": _metar_obs_time_utc(latest).isoformat().replace('+00:00', 'Z'),
         "latest_report_local": latest_dt_local.isoformat(),
@@ -863,6 +890,11 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         "latest_temp": latest.get("temp"),
         "latest_dewpoint": latest.get("dewp"),
         "latest_cloud_code": latest_cloud_code,
+        "cloud_trend": cloud_tr,
+        "temp_trend_1step_c": t_trend,
+        "pressure_trend_1step_hpa": pressure_step,
+        "wind_dir_change_deg": wind_dir_change,
+        "peak_lock_confirmed": peak_lock_confirmed,
         "observed_max_temp_c": obs_max_temp,
         "observed_max_time_local": obs_max_time_local.isoformat() if obs_max_time_local else None,
     }
@@ -1394,7 +1426,9 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     if bool(metar_diag.get("obs_correction_applied")):
         peak_range_block.append("- 注：已应用实况纠偏（模型峰值偏低，窗口锚定到当日实况峰值时段）。")
 
-    vars_block = ["⚠️ **关注变量**"]
+    gate = classify_window_phase(primary_window, metar_diag)
+    phase_map = {"far": "远离窗口", "near_window": "接近窗口", "in_window": "窗口内", "post": "窗口后", "unknown": "窗口状态未知"}
+    vars_block = [f"⚠️ **关注变量**（{phase_map.get(str(gate.get('phase') or 'unknown'), '窗口状态未知')}）"]
     cloud_code = str(metar_diag.get("latest_cloud_code") or "").upper()
     t_bias = metar_diag.get("temp_bias_c")
     snd_thermo = (((fdec.get("features") or {}).get("sounding") or {}).get("thermo") if isinstance(fdec, dict) else None) or {}
@@ -1433,6 +1467,16 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
                 vars_block.append("• 探空抑制偏强（CIN较大） → 云对流触发受限，升温路径更看近地风云条件。")
     except Exception:
         pass
+
+    # P1 short-term triggers (window-gated)
+    try:
+        rt_triggers = select_realtime_triggers(primary_window, metar_diag)
+        if rt_triggers:
+            vars_block = vars_block[:1] + rt_triggers[:3]
+        else:
+            vars_block = vars_block[:4]
+    except Exception:
+        vars_block = vars_block[:4]
 
     try:
         poly_block = _build_polymarket_section(polymarket_event_url, primary_window, metar_diag=metar_diag)
