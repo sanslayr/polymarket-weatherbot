@@ -2147,9 +2147,41 @@ def choose_section_text(
             short_cue = "冷平流对上沿有抑制"
         elif "干层" in h700_summary:
             short_cue = "中层偏干有利白天增温"
+
+        # expose thermal-balance/window-prior constraints in human wording
+        thermal_txt = ""
+        try:
+            ph = int(str(primary_window.get("peak_local") or "")[11:13])
+        except Exception:
+            ph = -1
+        try:
+            lowc = float(primary_window.get("low_cloud_pct") or 0.0)
+        except Exception:
+            lowc = 0.0
+        try:
+            w850 = float(primary_window.get("w850_kmh") or 0.0)
+        except Exception:
+            w850 = 0.0
+
+        if 13 <= ph <= 15:
+            thermal_txt = "热力节律仍指向午后峰值"
+        elif ph >= 16:
+            thermal_txt = "峰值相位偏后，需看风场/云量是否继续支撑"
+        elif 0 <= ph <= 11:
+            thermal_txt = "峰值相位偏早，需警惕平流主导改写"
+
+        if lowc >= 75:
+            thermal_txt = (thermal_txt + "，低云压制仍在") if thermal_txt else "低云压制仍在"
+        elif lowc <= 25 and thermal_txt:
+            thermal_txt = thermal_txt + "，辐射效率相对较高"
+
+        if w850 >= 38 and thermal_txt:
+            thermal_txt = thermal_txt + "，强风混合使节奏更易重排"
+
+        tail = f"；{thermal_txt}" if thermal_txt else ""
         syn_lines = [
             "🧭 **今日最高温影响（一句话）**",
-            f"- {direction_txt}；{short_cue}，{trigger_txt}。",
+            f"- {direction_txt}；{short_cue}，{trigger_txt}{tail}。",
         ]
 
     metar_prefix = []
