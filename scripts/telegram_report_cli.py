@@ -32,6 +32,7 @@ import requests
 
 from forecast_pipeline import load_or_build_forecast_decision
 from realtime_pipeline import classify_window_phase, select_realtime_triggers
+from cache_envelope import extract_payload, make_cache_doc
 
 ROOT = Path(__file__).resolve().parent.parent
 STATION_CSV = ROOT / "station_links.csv"
@@ -220,10 +221,14 @@ def _read_cache(kind: str, *parts: str, ttl_hours: int = CACHE_TTL_HOURS, allow_
         return None
     try:
         doc = json.loads(p.read_text(encoding="utf-8"))
-        ts = datetime.fromisoformat(doc.get("updated_at", "").replace("Z", "+00:00"))
-        if not allow_stale and datetime.now(timezone.utc) - ts > timedelta(hours=ttl_hours):
+        payload, updated_at, _env = extract_payload(doc)
+        if payload is None:
             return None
-        return doc.get("payload")
+        if (not allow_stale) and updated_at:
+            ts = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) - ts > timedelta(hours=ttl_hours):
+                return None
+        return payload
     except Exception:
         return None
 
@@ -231,10 +236,12 @@ def _read_cache(kind: str, *parts: str, ttl_hours: int = CACHE_TTL_HOURS, allow_
 def _write_cache(kind: str, payload: dict[str, Any], *parts: str) -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     p = _cache_path(kind, *parts)
-    doc = {
-        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "payload": payload,
-    }
+    doc = make_cache_doc(
+        payload,
+        source_state="fresh",
+        payload_schema_version=str(payload.get("schema_version")) if isinstance(payload, dict) else None,
+        meta={"kind": kind},
+    )
     p.write_text(json.dumps(doc, ensure_ascii=True), encoding="utf-8")
 
 

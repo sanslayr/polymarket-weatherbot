@@ -57,6 +57,11 @@
 - 重写 `FORECAST_3D_STORAGE.md`（provider-aware key）
 - 重写 `ARCHITECTURE.md`（现状分层与链路）
 
+### E. 缓存 envelope 与遥测（代码）
+- 新增 `scripts/cache_envelope.py`，统一 `runtime-cache.v1` envelope
+- hourly / synoptic / forecast_decision 均支持 envelope + 兼容旧格式读取
+- 锚点级 telemetry 已回写到 `forecast_decision.quality`
+
 ---
 
 ## Current architecture (concise)
@@ -74,8 +79,13 @@
 ### O1 (high)
 统一 runtime cache envelope（hourly/synoptic/decision）为同一 metadata schema，减少工具链分支处理。
 
-### O2 (high)
-anchor/stage 级错误遥测结构化（429/404/timeout/provider），用于精确降级说明与回归统计。
+### O2 (high) — 已完成第一阶段
+anchor/stage 级错误遥测结构化已落地：
+- synoptic runner 记录 pass 级事件（build/detect, status, error_type, elapsed）
+- forecast quality 写入：
+  - `synoptic_anchor_events`
+  - `synoptic_anchor_error_counts`
+后续可继续把该遥测接入用户侧降级提示文案。
 
 ### O3 (medium)
 逐步减少 synoptic subprocess 编排，改为内存链路调用（降低 IO/进程开销）。

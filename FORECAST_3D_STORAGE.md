@@ -18,7 +18,8 @@
 
 ## 3) Synoptic 锚点缓存（runner 内部）
 - 文件：`cache/runtime/synoptic_<key>.json`
-- wrapper schema：`synoptic-cache.v2`
+- envelope：`runtime-cache.v1`
+- `payload_schema_version`：`synoptic-cache.v2`
 - 关键点：
   - key 已纳入 `provider`
   - payload 为标准 `scale_summary.synoptic.systems`

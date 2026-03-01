@@ -12,6 +12,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from contracts import SYNOPTIC_CACHE_SCHEMA_VERSION
+from cache_envelope import extract_payload, make_cache_doc
 
 
 def _cache_key(*parts: str) -> str:
@@ -29,12 +30,16 @@ def _read_cache(cache_dir: Path, kind: str, *parts: str) -> dict[str, Any] | Non
         return None
     try:
         doc = json.loads(p.read_text(encoding="utf-8"))
-        # v2 wrapped cache
-        if isinstance(doc, dict) and doc.get("schema_version") == SYNOPTIC_CACHE_SCHEMA_VERSION and isinstance(doc.get("payload"), dict):
-            return doc.get("payload")
-        # legacy payload-only cache
+        payload, _updated_at, env = extract_payload(doc)
+        if isinstance(payload, dict) and isinstance(payload.get("scale_summary"), dict):
+            return payload
+        # ultra-legacy fallback
         if isinstance(doc, dict) and isinstance(doc.get("scale_summary"), dict):
             return doc
+        # legacy wrapper using schema_version on top-level
+        if isinstance(doc, dict) and doc.get("schema_version") == SYNOPTIC_CACHE_SCHEMA_VERSION and isinstance(doc.get("payload"), dict):
+            return doc.get("payload")
+        _ = env  # keep unpacked for forward-compatible extension
     except Exception:
         return None
     return None
@@ -43,11 +48,12 @@ def _read_cache(cache_dir: Path, kind: str, *parts: str) -> dict[str, Any] | Non
 def _write_cache(cache_dir: Path, kind: str, payload: dict[str, Any], *parts: str) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     p = _cache_path(cache_dir, kind, *parts)
-    doc = {
-        "schema_version": SYNOPTIC_CACHE_SCHEMA_VERSION,
-        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "payload": payload,
-    }
+    doc = make_cache_doc(
+        payload,
+        source_state="fresh",
+        payload_schema_version=SYNOPTIC_CACHE_SCHEMA_VERSION,
+        meta={"kind": kind},
+    )
     p.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
 
 
@@ -59,6 +65,27 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     if stderr and ("429" in str(stderr) or "Too Many Requests" in str(stderr)):
         return True
     return False
+
+
+def _classify_error_type(msg: str) -> str:
+    s = str(msg or "").lower()
+    if "429" in s or "too many requests" in s or "rate_limit" in s:
+        return "rate_limit_429"
+    if "404" in s or "not found" in s:
+        return "not_found_404"
+    if "timed out" in s or "timeout" in s:
+        return "timeout"
+    if "connection" in s or "ssl" in s or "dns" in s:
+        return "network"
+    if "subprocess" in s or "parse failed" in s:
+        return "subprocess"
+    return "unknown"
+
+
+def _short_err(exc: Exception | str, n: int = 280) -> str:
+    t = str(exc)
+    t = " ".join(t.split())
+    return t[:n]
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -109,16 +136,24 @@ def run_synoptic_section(
         ]
         last_err: Exception | None = None
         collected: list[dict[str, Any]] = []
+        pass_events: list[dict[str, Any]] = []
 
         for i, cfg in enumerate(passes, start=1):
             pass_t0 = time.perf_counter()
+            ev: dict[str, Any] = {
+                "pass": str(cfg.get("name") or i),
+                "provider": str(provider or ""),
+                "status": "running",
+            }
             in_json = Path(td) / f"in_{i}.json"
             out_json = Path(td) / f"out_{i}.json"
 
             start_date = min(prev_local_dt.date(), peak_local_dt.date()).isoformat()
             end_date = max(prev_local_dt.date(), peak_local_dt.date()).isoformat()
+
+            # build stage
+            t_build = time.perf_counter()
             try:
-                t_build = time.perf_counter()
                 if provider == "gfs-grib2":
                     from gfs_grib_provider import build_2d_grid_payload_gfs
                     payload = build_2d_grid_payload_gfs(
@@ -155,9 +190,27 @@ def run_synoptic_section(
                         "--output", str(in_json),
                     ]
                     subprocess.run(cmd_build, check=True, capture_output=True, text=True, timeout=35)
+                ev["build_s"] = round(time.perf_counter() - t_build, 3)
                 if perf_log:
-                    perf_log(f"synoptic.{cfg['name']}.build", time.perf_counter() - t_build)
+                    perf_log(f"synoptic.{cfg['name']}.build", float(ev["build_s"]))
+            except Exception as exc:
+                last_err = exc
+                ev.update({
+                    "status": "failed",
+                    "stage": "build",
+                    "error_type": _classify_error_type(str(exc)),
+                    "error": _short_err(exc),
+                    "elapsed_s": round(time.perf_counter() - pass_t0, 3),
+                })
+                pass_events.append(ev)
+                if perf_log:
+                    perf_log(f"synoptic.{cfg['name']}.failed", time.perf_counter() - pass_t0)
+                if _is_rate_limit_error(exc):
+                    break
+                continue
 
+            # detect stage
+            try:
                 cmd_syn = [
                     "python3", str(scripts_dir / "synoptic_2d_detector.py"),
                     "--input", str(in_json),
@@ -165,25 +218,42 @@ def run_synoptic_section(
                 ]
                 t_detect = time.perf_counter()
                 subprocess.run(cmd_syn, check=True, capture_output=True, text=True, timeout=25)
+                ev["detect_s"] = round(time.perf_counter() - t_detect, 3)
                 if perf_log:
-                    perf_log(f"synoptic.{cfg['name']}.detect", time.perf_counter() - t_detect)
+                    perf_log(f"synoptic.{cfg['name']}.detect", float(ev["detect_s"]))
                 data = json.loads(out_json.read_text(encoding="utf-8"))
-
-                if cfg.get("name") == "outer500":
-                    cur = ((data.get("scale_summary") or {}).get("synoptic") or {}).get("systems", [])
-                    cur = [s for s in cur if str(s.get("level") or "") == "500"]
-                    data.setdefault("scale_summary", {}).setdefault("synoptic", {})["systems"] = cur
-
-                if perf_log:
-                    perf_log(f"synoptic.{cfg['name']}.total", time.perf_counter() - pass_t0)
-                collected.append(data)
             except Exception as exc:
                 last_err = exc
+                ev.update({
+                    "status": "failed",
+                    "stage": "detect",
+                    "error_type": _classify_error_type(str(exc)),
+                    "error": _short_err(exc),
+                    "elapsed_s": round(time.perf_counter() - pass_t0, 3),
+                })
+                pass_events.append(ev)
                 if perf_log:
                     perf_log(f"synoptic.{cfg['name']}.failed", time.perf_counter() - pass_t0)
                 if _is_rate_limit_error(exc):
                     break
                 continue
+
+            if cfg.get("name") == "outer500":
+                cur = ((data.get("scale_summary") or {}).get("synoptic") or {}).get("systems", [])
+                cur = [s for s in cur if str(s.get("level") or "") == "500"]
+                data.setdefault("scale_summary", {}).setdefault("synoptic", {})["systems"] = cur
+
+            systems_cnt = len(((data.get("scale_summary") or {}).get("synoptic") or {}).get("systems") or [])
+            ev.update({
+                "status": "ok",
+                "stage": "done",
+                "systems": int(systems_cnt),
+                "elapsed_s": round(time.perf_counter() - pass_t0, 3),
+            })
+            pass_events.append(ev)
+            if perf_log:
+                perf_log(f"synoptic.{cfg['name']}.total", time.perf_counter() - pass_t0)
+            collected.append(data)
 
         if collected:
             merged = {"scale_summary": {"synoptic": {"systems": []}}}
@@ -202,10 +272,24 @@ def run_synoptic_section(
                         continue
                     seen.add(k)
                     out.append(s)
+
+            merged["_telemetry"] = {
+                "provider": str(provider or ""),
+                "passes": pass_events,
+                "degraded": any(str(e.get("status")) == "failed" for e in pass_events),
+            }
             _write_cache(cache_dir, "synoptic", merged, *cache_parts)
             return merged
 
         stale = _read_cache(cache_dir, "synoptic", *cache_parts)
         if stale:
+            stale.setdefault("_telemetry", {
+                "provider": str(provider or ""),
+                "passes": pass_events,
+                "degraded": True,
+                "from_cache": True,
+            })
             return stale
-        raise RuntimeError(f"synoptic section failed: {last_err}")
+
+        err_txt = _short_err(last_err or "synoptic_unknown_error")
+        raise RuntimeError(f"synoptic section failed: {err_txt}")

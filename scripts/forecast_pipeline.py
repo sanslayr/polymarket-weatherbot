@@ -6,6 +6,7 @@ import json
 import os
 import random
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -23,6 +24,7 @@ from contracts import (
     FORECAST_DECISION_SCHEMA_VERSION,
     FORECAST_3D_BUNDLE_SCHEMA_VERSION,
 )
+from cache_envelope import extract_payload, make_cache_doc
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT / "cache" / "runtime"
@@ -44,11 +46,14 @@ def _read_cache(*parts: str, ttl_hours: int = 6) -> dict[str, Any] | None:
         return None
     try:
         doc = json.loads(p.read_text(encoding="utf-8"))
-        ts = datetime.fromisoformat(str(doc.get("updated_at", "")).replace("Z", "+00:00"))
-        if datetime.now(timezone.utc) - ts > timedelta(hours=ttl_hours):
+        payload, updated_at, _env = extract_payload(doc)
+        if not isinstance(payload, dict):
             return None
-        payload = doc.get("payload")
-        if isinstance(payload, dict) and payload.get("schema_version") == SCHEMA_VERSION:
+        if updated_at:
+            ts = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) - ts > timedelta(hours=ttl_hours):
+                return None
+        if payload.get("schema_version") == SCHEMA_VERSION:
             return payload
     except Exception:
         return None
@@ -58,10 +63,12 @@ def _read_cache(*parts: str, ttl_hours: int = 6) -> dict[str, Any] | None:
 def _write_cache(payload: dict[str, Any], *parts: str) -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     p = _cache_path(*parts)
-    doc = {
-        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "payload": payload,
-    }
+    doc = make_cache_doc(
+        payload,
+        source_state="fresh",
+        payload_schema_version=str(payload.get("schema_version")) if isinstance(payload, dict) else None,
+        meta={"kind": "forecast_decision"},
+    )
     p.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
 
 
@@ -115,6 +122,21 @@ def _runtime_tag(model: str, now_utc: datetime) -> str:
     cycle = 6
     hh = (now_utc.hour // cycle) * cycle
     return f"{now_utc.strftime('%Y%m%d')}{hh:02d}Z"
+
+
+def _classify_anchor_error(msg: str) -> str:
+    s = str(msg or "").lower()
+    if "429" in s or "too many requests" in s:
+        return "rate_limit_429"
+    if "404" in s or "not found" in s:
+        return "not_found_404"
+    if "timeout" in s or "timed out" in s:
+        return "timeout"
+    if "connection" in s or "ssl" in s or "dns" in s:
+        return "network"
+    if "parse" in s or "subprocess" in s:
+        return "subprocess"
+    return "unknown"
 
 
 def build_forecast_decision(
@@ -357,12 +379,13 @@ def load_or_build_forecast_decision(
     syn_payloads: list[dict[str, Any]] = []
     synoptic_from_fallback = False
     anchor_locals = _full_day_anchor_locals(target_date, tz_name, model)
+    anchor_telemetry: list[dict[str, Any]] = []
     # Default to full-day anchors; set FORECAST_ANCHOR_LIMIT>0 to cap for performance tests.
     anchor_limit = int(os.getenv("FORECAST_ANCHOR_LIMIT", "0") or "0")
     if anchor_limit > 0:
         anchor_locals = anchor_locals[:anchor_limit]
 
-    def _pull_anchor(a_local: str) -> tuple[str, dict[str, Any] | None, str | None]:
+    def _pull_anchor(a_local: str) -> tuple[str, dict[str, Any] | None, str | None, list[dict[str, Any]]]:
         t_anchor = time.perf_counter()
         try:
             # Optional jitter to smooth provider burst limits.
@@ -370,23 +393,41 @@ def load_or_build_forecast_decision(
             if jitter_ms > 0:
                 time.sleep(random.uniform(0.0, max(0.0, jitter_ms / 1000.0)))
             p = run_synoptic_fn(station, target_date, a_local, tz_name, model, runtime)
+            tele: list[dict[str, Any]] = []
+            tnode = p.get("_telemetry") if isinstance(p, dict) else None
+            if isinstance(tnode, dict):
+                for ev in (tnode.get("passes") or []):
+                    if not isinstance(ev, dict):
+                        continue
+                    row = dict(ev)
+                    row.setdefault("anchor_local", a_local)
+                    tele.append(row)
             if perf_log:
                 perf_log(f"forecast.anchor.{a_local}", time.perf_counter() - t_anchor)
-            return a_local, p, None
+            return a_local, p, None, tele
         except Exception as exc:
             if perf_log:
                 perf_log(f"forecast.anchor.{a_local}.failed", time.perf_counter() - t_anchor)
-            return a_local, None, str(exc)
+            return a_local, None, str(exc), []
 
     max_workers = max(1, int(os.getenv("FORECAST_MAX_WORKERS", "1") or "1"))
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = [ex.submit(_pull_anchor, a) for a in anchor_locals]
         for fut in as_completed(futs):
-            _a, payload, err = fut.result()
+            _a, payload, err, tele = fut.result()
+            if tele:
+                anchor_telemetry.extend(tele)
             if payload is not None:
                 syn_payloads.append(payload)
             elif err:
                 synoptic_error = err
+                anchor_telemetry.append({
+                    "anchor_local": _a,
+                    "status": "failed",
+                    "stage": "runner",
+                    "error_type": _classify_anchor_error(err),
+                    "error": str(err)[:300],
+                })
 
     if syn_payloads:
         synoptic = _merge_synoptic_payloads(syn_payloads)
@@ -442,6 +483,18 @@ def load_or_build_forecast_decision(
     q["synoptic_anchors_total"] = total_anchors
     q["synoptic_anchors_ok"] = ok_anchors
     q["synoptic_coverage"] = round(coverage, 3)
+
+    if anchor_telemetry:
+        q["synoptic_anchor_events"] = anchor_telemetry
+        err_counter: Counter[str] = Counter()
+        for ev in anchor_telemetry:
+            if str(ev.get("status") or "") != "failed":
+                continue
+            stage = str(ev.get("stage") or "unknown")
+            etype = str(ev.get("error_type") or "unknown")
+            err_counter[f"{stage}:{etype}"] += 1
+        if err_counter:
+            q["synoptic_anchor_error_counts"] = dict(sorted(err_counter.items()))
 
     if synoptic_error and not synoptic_from_fallback:
         q["source_state"] = "degraded"

@@ -72,7 +72,14 @@
 - `cache/runtime/hourly_gfs_*.json`
 - `cache/runtime/forecast_decision_*.json`（v4）
 - `cache/runtime/forecast_3d_bundle_*.json`（v1）
-- `cache/runtime/synoptic_*.json`（`synoptic-cache.v2` wrapper）
+- `cache/runtime/synoptic_*.json`
+
+> 统一 envelope：`runtime-cache.v1`
+> - `cache_schema_version`
+> - `updated_at`
+> - `source_state`
+> - `payload_schema_version`
+> - `payload`
 
 ### Binary 缓存
 - `cache/runtime/gfs_grib/*.grib2`
