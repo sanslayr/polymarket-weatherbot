@@ -569,9 +569,15 @@ def _build_window_at_index(hourly: dict[str, Any], idx: int, band_c: float = 0.4
     clow = hourly["cloud_cover_low"]
     pmsl = hourly["pressure_msl"]
 
-    base = t2m[idx]
-    s = idx
-    e = idx
+    # Re-center candidate around nearby local peak first, then build band window.
+    # This avoids early-hour candidates creating unrealistically long windows.
+    left = max(0, idx - 3)
+    right = min(len(t2m) - 1, idx + 3)
+    k0 = max(range(left, right + 1), key=lambda x: t2m[x])
+
+    base = t2m[k0]
+    s = k0
+    e = k0
     while s - 1 >= 0 and t2m[s - 1] >= base - band_c:
         s -= 1
     while e + 1 < len(t2m) and t2m[e + 1] >= base - band_c:
