@@ -426,11 +426,27 @@ def load_or_build_forecast_decision(
     )
     _log("forecast.decision_build", t)
 
+    q = decision.setdefault("quality", {})
+    total_anchors = max(1, len(anchor_locals))
+    ok_anchors = len(syn_payloads)
+    coverage = ok_anchors / total_anchors
+    q["synoptic_anchors_total"] = total_anchors
+    q["synoptic_anchors_ok"] = ok_anchors
+    q["synoptic_coverage"] = round(coverage, 3)
+
     if synoptic_error and not synoptic_from_fallback:
-        decision.setdefault("quality", {})["source_state"] = "degraded"
-        decision.setdefault("quality", {}).setdefault("missing_layers", []).append("synoptic")
+        q["source_state"] = "degraded"
+        q.setdefault("missing_layers", []).append("synoptic")
     elif synoptic_from_fallback:
-        decision.setdefault("quality", {})["source_state"] = "fallback-cache"
+        q["source_state"] = "fallback-cache"
+
+    # Coverage gate: partial slices are usable but should be flagged when too sparse.
+    if coverage < float(os.getenv("FORECAST_SYNOPTIC_MIN_COVERAGE", "0.5") or "0.5"):
+        q["source_state"] = "degraded"
+        q.setdefault("missing_layers", []).append("synoptic")
+
+    if isinstance(q.get("missing_layers"), list):
+        q["missing_layers"] = sorted(set(str(x) for x in q.get("missing_layers") if x))
 
     t = time.perf_counter()
     _write_cache(decision, *key_parts)

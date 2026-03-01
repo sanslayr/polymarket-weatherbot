@@ -1375,9 +1375,17 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     def _conf_ord(x: str) -> int:
         return {"high": 3, "medium": 2, "low": 1}.get(str(x or "").lower(), 0)
 
+    cov = None
+    try:
+        cov = float((quality or {}).get("synoptic_coverage")) if (quality or {}).get("synoptic_coverage") is not None else None
+    except Exception:
+        cov = None
+
     # If main object is low-confidence, do not force it as dominant.
     obj = dict(raw_obj) if isinstance(raw_obj, dict) else {}
-    if obj and _conf_ord(obj.get("confidence")) <= 1:
+    if cov is not None and cov < 0.5:
+        obj = {}
+    elif obj and _conf_ord(obj.get("confidence")) <= 1:
         alt = None
         for c in candidates:
             if not isinstance(c, dict):
@@ -1609,7 +1617,13 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         syn_lines.append("- **改写风险**：中到高，窗口前后需盯实况触发。")
 
     if str(quality.get("source_state") or "") == "degraded":
-        syn_lines.append("- **数据状态**：环流链路降级（结论偏保守）。")
+        cov_txt = ""
+        try:
+            if quality.get("synoptic_coverage") is not None:
+                cov_txt = f"；coverage={float(quality.get('synoptic_coverage')):.2f}"
+        except Exception:
+            cov_txt = ""
+        syn_lines.append(f"- **数据状态**：环流链路降级（结论偏保守{cov_txt}）。")
 
     syn_lines.append(
         f"- **峰值窗口**：{_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local。"
