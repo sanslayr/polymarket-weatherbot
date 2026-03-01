@@ -1553,19 +1553,68 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     phase_now = str(gate.get('phase') or 'unknown')
 
     # Quantization-aware dynamic range (METAR usually integer-rounded; avoid overfitting tiny jumps)
-    lo_model = peak_c - 0.8
-    hi_model = peak_c + 0.8
+    # Base ±0.8°C now acts as midpoint; actual half-width adapts with uncertainty.
+    u = 0.0
+    q_state = str((quality or {}).get("source_state") or "")
+    if q_state in {"degraded", "fallback-cache"}:
+        u += 0.35
+
+    if phase_now == "far":
+        u += 0.25
+    elif phase_now == "near_window":
+        u += 0.10
+    elif phase_now == "in_window":
+        u -= 0.05
+    elif phase_now == "post":
+        u += 0.05
+
+    conf = str((obj or {}).get("confidence") or "")
+    if conf == "high":
+        u -= 0.15
+    elif conf == "low":
+        u += 0.20
+    elif not conf:
+        u += 0.15
+
+    imp = str((obj or {}).get("impact_scope") or "")
+    if imp == "station_relevant":
+        u -= 0.10
+    elif imp == "possible_override":
+        u += 0.08
+    elif imp == "background_only":
+        u += 0.18
+
+    try:
+        babs = abs(float(metar_diag.get("temp_bias_c") or 0.0))
+    except Exception:
+        babs = 0.0
+    if babs >= 2.0:
+        u += 0.22
+    elif babs >= 1.0:
+        u += 0.12
+
+    try:
+        wchg = float(metar_diag.get("wind_dir_change_deg") or 0.0)
+    except Exception:
+        wchg = 0.0
+    if wchg >= 45:
+        u += 0.10
+
+    half_range = min(1.6, max(0.6, 0.8 + u))
+
+    lo_model = peak_c - half_range
+    hi_model = peak_c + half_range
     lo, hi = lo_model, hi_model
     if obs_max is not None:
         # Treat observed integer as bin center, not exact decimal truth.
         obs_lo = obs_max - 0.4
         obs_hi = obs_max + 0.4
         w_obs = {
-            "far": 0.15,
-            "near_window": 0.35,
-            "in_window": 0.55,
-            "post": 0.75,
-        }.get(phase_now, 0.25)
+            "far": 0.12,
+            "near_window": 0.30,
+            "in_window": 0.50,
+            "post": 0.70,
+        }.get(phase_now, 0.22)
         lo = max(lo_model, (1 - w_obs) * lo_model + w_obs * (obs_lo - 0.2))
         hi = max(hi_model, (1 - w_obs) * hi_model + w_obs * (obs_hi + 0.2))
 
@@ -1579,10 +1628,18 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     hi = _soft_snap(max(hi, lo + 0.2))
 
     core_bucket = int(round((lo + hi) / 2.0))
+    if half_range <= 0.75:
+        u_label = "低"
+    elif half_range <= 1.05:
+        u_label = "中"
+    else:
+        u_label = "高"
+
     peak_range_block = [
         "🌡️ **可能最高温区间**",
         f"- **{lo:.1f}~{hi:.1f}°C**（峰值窗 {_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local）",
         f"- 主值更接近 **{core_bucket}°C** 档（已按实况整度特性做平滑）。",
+        f"- 不确定性：{u_label}（区间半宽约 ±{half_range:.1f}°C）。",
     ]
     if bool(metar_diag.get("obs_correction_applied")):
         peak_range_block.append("- 注：已应用实况纠偏（模型峰值偏低，窗口锚定到当日实况峰值时段）。")
