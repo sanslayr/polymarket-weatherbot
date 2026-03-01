@@ -24,8 +24,32 @@ def classify_window_phase(primary_window: dict[str, Any], metar_diag: dict[str, 
     if not (model_start and model_end and model_peak and latest):
         return {"phase": "unknown"}
 
-    # only trust observed max as peak anchor when it is close to model window; avoid early-day false locking
-    obs_near_window = bool(obs_peak and (obs_peak >= (model_start - timedelta(hours=2))))
+    # only trust observed max as peak anchor when it is close to model window AND thermally plausible.
+    # This avoids early-day false anchoring that can collapse near/in-window logic.
+    lock_confirmed = bool(metar_diag.get("peak_lock_confirmed"))
+    try:
+        obs_t = float(metar_diag.get("observed_max_temp_c")) if metar_diag.get("observed_max_temp_c") is not None else None
+    except Exception:
+        obs_t = None
+    try:
+        model_peak_t = float(primary_window.get("peak_temp_c")) if primary_window.get("peak_temp_c") is not None else None
+    except Exception:
+        model_peak_t = None
+
+    obs_time_ok = bool(
+        obs_peak
+        and (obs_peak >= (model_start - timedelta(hours=2)))
+        and (obs_peak <= (model_end + timedelta(hours=1)))
+    )
+    obs_temp_ok = bool(
+        (obs_t is not None)
+        and (
+            (model_peak_t is None)
+            or (obs_t >= (model_peak_t - 1.2))
+            or lock_confirmed
+        )
+    )
+    obs_near_window = bool(obs_time_ok and obs_temp_ok)
     anchor_peak = obs_peak if obs_near_window else model_peak
 
     start_fused = min(model_start, (anchor_peak - timedelta(hours=1)) if anchor_peak else model_start)
@@ -34,7 +58,6 @@ def classify_window_phase(primary_window: dict[str, Any], metar_diag: dict[str, 
     peak_fused = anchor_peak or model_peak
 
     # hard rule: two-step peak lock confirmation can collapse to post-window
-    lock_confirmed = bool(metar_diag.get("peak_lock_confirmed"))
     if lock_confirmed and latest > peak_fused:
         phase = "post"
     else:

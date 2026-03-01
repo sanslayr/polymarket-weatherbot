@@ -1734,7 +1734,12 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         tail = f"。当前组合关系：{inter_note}" if inter_note else ""
         syn_lines.append(f"- **落地影响**：{direction_txt}；短时以实况触发为主。建议：{trigger_txt}{tail}。")
 
-    syn_lines.append(f"- **证据路由**：主判 {route_main}；辅助 {route_aux}。")
+    if route_main.startswith("实况"):
+        syn_lines.append("- **判定重点**：当前以实况触发为主，剖面/系统证据用于约束修正。")
+    elif route_main.startswith("剖面"):
+        syn_lines.append("- **判定重点**：当前以剖面结构为主，实况与系统证据用于确认落地。")
+    else:
+        syn_lines.append("- **判定重点**：当前以系统结构为主，实况与剖面证据用于短临修正。")
 
     # concise evidence line (avoid spreading full layer-by-layer by default)
     def _humanize_850(s: str) -> str:
@@ -1941,6 +1946,33 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     hi = center + right_hw
     if obs_max is not None:
         lo = max(lo, float(obs_max) - 0.25)
+
+    # anti-collapse guard near peak: avoid over-compressing main band when warm-support evidence is aligned.
+    warm_support = 0.0
+    if "暖平流" in line850:
+        warm_support += 0.6
+    if "干层" in h700_summary:
+        warm_support += 0.4
+    if cloud_code_now not in {"BKN", "OVC", "VV"}:
+        warm_support += 0.5
+    if isinstance(metar_diag.get("temp_bias_c"), (int, float)) and float(metar_diag.get("temp_bias_c") or 0.0) >= 0.5:
+        warm_support += 0.4
+
+    if phase_now in {"near_window", "in_window"} and warm_support >= 1.2 and obs_max is not None:
+        try:
+            peak_local_txt = str(primary_window.get("peak_local") or "")
+            latest_local_txt = str(metar_diag.get("latest_time_local") or "")
+            if peak_local_txt and latest_local_txt:
+                hleft = max(0.0, (datetime.fromisoformat(peak_local_txt) - datetime.fromisoformat(latest_local_txt)).total_seconds() / 3600.0)
+            else:
+                hleft = 0.0
+        except Exception:
+            hleft = 0.0
+
+        floor_hi = float(obs_max) + min(4.2, 1.5 + 0.55 * hleft)
+        floor_lo = float(obs_max) + min(2.8, 0.9 + 0.35 * hleft)
+        hi = max(hi, floor_hi)
+        lo = max(lo, min(floor_lo, hi - 0.2))
 
     def _soft_snap(v: float) -> float:
         iv = round(v)
