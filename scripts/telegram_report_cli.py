@@ -70,6 +70,7 @@ CACHE_PRUNE_HOURS = 24
 PERF_LOG_ENABLED = os.getenv("LOOK_PERF_LOG", "0") == "1"
 OPENMETEO_BREAKER_SECONDS = int(os.getenv("OPENMETEO_BREAKER_SECONDS", "900") or "900")
 OPENMETEO_BREAKER_FILE = CACHE_DIR / "openmeteo_breaker.json"
+TERRAIN_TAG_FILE = ROOT / "config" / "station_terrain_tags.json"
 SYNOPTIC_PROVIDER = "gfs-grib2"
 
 
@@ -125,6 +126,26 @@ def _trip_openmeteo_breaker(reason: str = "429", seconds: int | None = None) -> 
         OPENMETEO_BREAKER_FILE.write_text(json.dumps({"until": until, "reason": reason}, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
+
+
+_TERRAIN_TAGS: dict[str, Any] | None = None
+
+
+def _terrain_tag_for(icao: str) -> str | None:
+    global _TERRAIN_TAGS
+    try:
+        if _TERRAIN_TAGS is None:
+            if TERRAIN_TAG_FILE.exists():
+                _TERRAIN_TAGS = json.loads(TERRAIN_TAG_FILE.read_text(encoding="utf-8"))
+            else:
+                _TERRAIN_TAGS = {}
+        node = (_TERRAIN_TAGS or {}).get(str(icao).upper())
+        if isinstance(node, dict):
+            t = str(node.get("tag") or "").strip()
+            return t or None
+        return None
+    except Exception:
+        return None
 
 
 def station_timezone_name(st: Station) -> str:
@@ -1691,8 +1712,13 @@ def render_report(command_text: str) -> str:
     fc_write = perf_local.get("forecast.cache_write", 0.0)
     fc_fallback = perf_local.get("forecast.synoptic_fallback_cache", 0.0)
 
+    terrain_tag = _terrain_tag_for(st.icao)
+    head_geo = f"{abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}"
+    if terrain_tag:
+        head_geo = f"{head_geo} | 地形:{terrain_tag}"
+
     header_lines = [
-        f"📍 **{st.icao} ({st.city}) | {abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}**",
+        f"📍 **{st.icao} ({st.city}) | {head_geo}**",
         f"生成时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC | {now_local.strftime('%H:%M')} Local (UTC{now_local.strftime('%z')[:3]})",
         f"分析基准模型: {analysis_model.upper()}（运行时次: {rt_fmt}） | 小时预报源: {provider_used} | 3D场源: {SYNOPTIC_PROVIDER}",
     ]

@@ -1,0 +1,72 @@
+{
+  "KMIA": {
+    "tag": "低地平原",
+    "elevation_m": 2.0,
+    "relief_15km_m": 5.0
+  },
+  "KATL": {
+    "tag": "内陆高地",
+    "elevation_m": 302.0,
+    "relief_15km_m": 54.0
+  },
+  "KLGA": {
+    "tag": "低地平原",
+    "elevation_m": 1.0,
+    "relief_15km_m": 56.0
+  },
+  "KDAL": {
+    "tag": "低地平原",
+    "elevation_m": 144.0,
+    "relief_15km_m": 58.0
+  },
+  "KORD": {
+    "tag": "低地平原",
+    "elevation_m": 199.0,
+    "relief_15km_m": 45.0
+  },
+  "KSEA": {
+    "tag": "低地平原",
+    "elevation_m": 121.0,
+    "relief_15km_m": 72.0
+  },
+  "CYYZ": {
+    "tag": "平原缓丘",
+    "elevation_m": 172.0,
+    "relief_15km_m": 117.0
+  },
+  "NZWN": {
+    "tag": "低地起伏",
+    "elevation_m": 5.0,
+    "relief_15km_m": 340.0
+  },
+  "SAEZ": {
+    "tag": "低地平原",
+    "elevation_m": 18.0,
+    "relief_15km_m": 11.0
+  },
+  "EGLC": {
+    "tag": "低地缓丘",
+    "elevation_m": 4.0,
+    "relief_15km_m": 131.0
+  },
+  "LTAC": {
+    "tag": "高原起伏",
+    "elevation_m": 948.0,
+    "relief_15km_m": 259.0
+  },
+  "RKSI": {
+    "tag": "低地起伏",
+    "elevation_m": 6.0,
+    "relief_15km_m": 363.0
+  },
+  "SBGR": {
+    "tag": "高地起伏",
+    "elevation_m": 749.0,
+    "relief_15km_m": 260.0
+  },
+  "LFPG": {
+    "tag": "低地平原",
+    "elevation_m": 107.0,
+    "relief_15km_m": 62.0
+  }
+}
