@@ -2317,6 +2317,20 @@ def choose_section_text(
         if phase_now in {"near_window", "in_window"}:
             consistency_shift -= 0.08
 
+    # Clear-sky solar guard: under stable clear/less-cloud states, once slope stops accelerating
+    # near peak window, avoid inertial warm over-shift.
+    cloud_trend_txt = str(metar_diag.get("cloud_trend") or "")
+    clear_sky_stable = (
+        cloud_code_now in {"CLR", "CAVOK", "FEW", "SCT"}
+        and ("回补" not in cloud_trend_txt)
+        and ("增加" not in cloud_trend_txt)
+    )
+    if clear_sky_stable and phase_now in {"near_window", "in_window"}:
+        if t_cons <= 0.15:
+            consistency_shift *= 0.62
+        if b_cons > 0.0 and t_cons <= 0.05:
+            consistency_shift = min(consistency_shift, 0.12)
+
     consistency_shift = max(-0.75, min(0.75, consistency_shift))
     center += consistency_shift
 
@@ -2382,7 +2396,10 @@ def choose_section_text(
     disp_lo, disp_hi = lo, hi
 
     if skew >= 0.20:
-        tail_hi = _soft_snap(hi + min(0.8, 0.4 + 0.3 * max(0.0, skew)))
+        tail_ext = min(0.8, 0.4 + 0.3 * max(0.0, skew))
+        if clear_sky_stable and phase_now in {"near_window", "in_window"} and t_cons <= 0.15:
+            tail_ext = min(tail_ext, 0.45)
+        tail_hi = _soft_snap(hi + tail_ext)
         disp_hi = tail_hi
         peak_range_block.append(
             f"- **{disp_lo:.1f}~{disp_hi:.1f}°C**（主看 {core_lo:.1f}~{core_hi:.1f}°C；峰值窗 {window_txt}；{tail_up_cond}）"
