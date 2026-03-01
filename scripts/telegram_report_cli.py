@@ -1661,11 +1661,9 @@ def render_report(command_text: str) -> str:
 
     header_lines = [
         f"📍 **{st.icao} ({st.city}) | {abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}**",
-        f"判断时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC | {now_local.strftime('%Y-%m-%d %H:%M')} Local (UTC{now_local.strftime('%z')[:3]})",
+        f"生成时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC | {now_local.strftime('%H:%M')} Local (UTC{now_local.strftime('%z')[:3]})",
         f"分析基准模型: {analysis_model.upper()}（运行时次: {rt_fmt}） | 小时预报源: {provider_used} | 3D场源: {SYNOPTIC_PROVIDER}",
-        f"🕒 请求接收: {req_start_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC",
-        f"⏱️ 总耗时: 取数{perf_local.get('hourly_fetch', 0.0):.2f}s + 实况{perf_local.get('metar_fetch_parse', 0.0):.2f}s + 识别{forecast_elapsed:.2f}s | 端到端{time.perf_counter() - t_e2e:.2f}s",
-        f"⏱️ forecast分解: cache读{fc_cache:.2f}s / synoptic构建{fc_syn:.2f}s / 决策{fc_dec:.2f}s / cache写{fc_write:.2f}s" + (" / 回填缓存" if fc_fallback > 0 else ""),
+        f"⏱️ 耗时: 取数{perf_local.get('hourly_fetch', 0.0):.2f}s + 实况{perf_local.get('metar_fetch_parse', 0.0):.2f}s + 识别{forecast_elapsed:.2f}s | 端到端{time.perf_counter() - t_e2e:.2f}s",
     ]
 
     try:
