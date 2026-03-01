@@ -1433,26 +1433,34 @@ def _build_polymarket_section(
                             seen.add(r[1])
                     focus = sorted(focus, key=lambda x: x[0])
 
-    # Ensure one upper-edge tail bin is visible when merged upper bound is close to next discrete market bucket.
-    # Example: merged_hi=13.6 should include 14°C as tail breakout watch.
+    # Ensure one upper-tail bin is visible when merged upper bound approaches market upper buckets.
+    # Handles both finite next-step bins and "X°C or higher" style edge bins.
     try:
         finite_all = sorted([r for r in filtered if not (math.isinf(r[4]) or math.isinf(r[5]))], key=lambda x: x[0])
         edge_ref_hi = max(likely_hi, target_hi)
-        target_center = math.ceil(edge_ref_hi)
-        if edge_ref_hi >= (target_center - 0.7):
-            cand = [r for r in finite_all if abs(r[0] - target_center) <= 0.26]
-            if cand:
-                up = cand[0]
+
+        # 1) Prefer finite next-step bucket if close enough.
+        target_center = round(edge_ref_hi)
+        cand = [r for r in finite_all if abs(r[0] - target_center) <= 0.26 and r[0] >= (core_hi - 0.2)]
+        if cand:
+            up = sorted(cand, key=lambda x: abs(x[0] - edge_ref_hi))[0]
+            if all(up[1] != r[1] for r in focus):
+                focus.append(up)
+
+        # 2) Add nearest upper-edge bucket when display upper range reaches it.
+        upper_edges = sorted(
+            [r for r in filtered if (not math.isinf(r[4]) and math.isinf(r[5]))],
+            key=lambda x: x[4],
+        )
+        if upper_edges:
+            # include first edge whose lower bound is not far above merged upper range
+            edge_cands = [r for r in upper_edges if r[4] <= (target_hi + 0.4)]
+            if edge_cands:
+                up = edge_cands[0]
                 if all(up[1] != r[1] for r in focus):
                     focus.append(up)
-            else:
-                # fallback: include nearest upper-edge bucket (e.g. "14°C or higher")
-                upper_bins = [r for r in filtered if (not math.isinf(r[4]) and math.isinf(r[5]) and r[4] <= (target_center + 0.5))]
-                if upper_bins:
-                    up = sorted(upper_bins, key=lambda x: x[4])[0]
-                    if all(up[1] != r[1] for r in focus):
-                        focus.append(up)
-            focus = sorted(focus, key=lambda x: x[0])
+
+        focus = sorted(focus, key=lambda x: x[0])
     except Exception:
         pass
 
