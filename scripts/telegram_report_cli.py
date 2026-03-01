@@ -1390,6 +1390,7 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     vars_block = ["⚠️ **关注变量**"]
     cloud_code = str(metar_diag.get("latest_cloud_code") or "").upper()
     t_bias = metar_diag.get("temp_bias_c")
+    snd_thermo = (((fdec.get("features") or {}).get("sounding") or {}).get("thermo") if isinstance(fdec, dict) else None) or {}
     if cloud_code in {"BKN", "OVC", "VV"}:
         vars_block.append("• 低云维持/继续增厚 → 最高温上沿下压，峰值可能提前结束。")
     else:
@@ -1414,6 +1415,17 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
             vars_block.append("• 未来30-60分钟温度斜率若重新转正并放大 → 仍可小幅上修最高温。")
     else:
         vars_block.append("• 未来30-60分钟温度斜率若持续为正 → 仍有上修空间。")
+
+    try:
+        if snd_thermo.get("has_profile"):
+            capev = snd_thermo.get("sbcape_jkg") or snd_thermo.get("mlcape_jkg") or snd_thermo.get("mucape_jkg")
+            cinv = snd_thermo.get("sbcin_jkg") if snd_thermo.get("sbcin_jkg") is not None else snd_thermo.get("mlcin_jkg")
+            if isinstance(capev, (int, float)) and capev >= 300 and (not isinstance(cinv, (int, float)) or cinv > -75):
+                vars_block.append("• 探空显示可用对流能量且抑制偏弱 → 午后云量/阵性扰动上升，峰值波动风险增加。")
+            elif isinstance(cinv, (int, float)) and cinv <= -125:
+                vars_block.append("• 探空抑制偏强（CIN较大） → 云对流触发受限，升温路径更看近地风云条件。")
+    except Exception:
+        pass
 
     try:
         poly_block = _build_polymarket_section(polymarket_event_url, primary_window, metar_diag=metar_diag)

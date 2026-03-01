@@ -180,6 +180,7 @@ def build_forecast_decision(
             },
             "sounding": {
                 "path_bias": str(snd.get("path_bias") or ""),
+                "thermo": snd.get("thermo") if isinstance(snd, dict) else None,
             },
         },
         "decision": {
