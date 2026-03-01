@@ -917,8 +917,26 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
     else:
         trend_hint = "短时温度节奏待确认"
 
+    wx_now = str(latest.get("wxString") or latest.get("wx") or "").upper()
+    wx_hint = ""
+    if wx_now:
+        if "TS" in wx_now:
+            wx_hint = "对流降水干扰在场"
+        elif any(k in wx_now for k in ["RA", "DZ"]):
+            if "-RA" in wx_now or "-DZ" in wx_now:
+                wx_hint = "弱降雨干扰在场"
+            elif "+RA" in wx_now or "+DZ" in wx_now:
+                wx_hint = "较强降雨干扰在场"
+            else:
+                wx_hint = "降雨干扰在场"
+        elif any(k in wx_now for k in ["SN", "PL", "GR", "GS"]):
+            wx_hint = "降水相态干扰在场"
+
     lines.append("")
-    lines.append(f"• 最新实况简评：{trend_hint}，{cloud_hint}。")
+    summary_bits = [trend_hint, cloud_hint]
+    if wx_hint:
+        summary_bits.append(wx_hint)
+    lines.append(f"• 最新实况简评：{'，'.join(summary_bits)}。")
 
     # 追加“近两小时节奏”一句：把短样本变化压缩成可执行线索
     rhythm_line = None
