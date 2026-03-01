@@ -1663,8 +1663,12 @@ def render_report(command_text: str) -> str:
         f"📍 **{st.icao} ({st.city}) | {abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}**",
         f"生成时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC | {now_local.strftime('%H:%M')} Local (UTC{now_local.strftime('%z')[:3]})",
         f"分析基准模型: {analysis_model.upper()}（运行时次: {rt_fmt}） | 小时预报源: {provider_used} | 3D场源: {SYNOPTIC_PROVIDER}",
-        f"⏱️ 耗时: 取数{perf_local.get('hourly_fetch', 0.0):.2f}s + 实况{perf_local.get('metar_fetch_parse', 0.0):.2f}s + 识别{forecast_elapsed:.2f}s | 端到端{time.perf_counter() - t_e2e:.2f}s",
     ]
+
+    # Show timing only when forecast-data acquisition is meaningful (non-trivial fetch cost).
+    hf = float(perf_local.get('hourly_fetch', 0.0) or 0.0)
+    if hf >= 1.0:
+        header_lines.append(f"⏱️ forecast取数耗时: {hf:.2f}s")
 
     try:
         quality = (forecast_decision.get("quality") or {}) if isinstance(forecast_decision, dict) else {}
