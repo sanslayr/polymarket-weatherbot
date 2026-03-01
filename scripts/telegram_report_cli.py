@@ -1430,18 +1430,18 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
         phase = str(classify_window_phase(primary_window, metar_diag).get("phase") or "unknown")
         if abs(up - down) < 0.55:
-            direction = "暂无单边方向（条件依赖）"
+            direction = "暂时看不出明显偏高或偏低"
         elif up > down:
-            direction = "方向偏上修（上沿抬高）"
+            direction = "更可能比原先预报略高"
         else:
-            direction = "方向偏压制（上沿下压）"
+            direction = "更可能比原先预报略低"
 
         if phase in {"near_window", "in_window"}:
-            trigger = "临窗优先看云量开合与风向切换"
+            trigger = "临窗重点看云量开合和风向变化"
         elif phase == "far":
-            trigger = "临窗前先看升温斜率能否连续转正"
+            trigger = "先看升温是否能连续走强"
         else:
-            trigger = "优先看温度斜率与云量相变"
+            trigger = "重点看温度斜率与云量是否突变"
 
         return direction, trigger
 
@@ -1466,14 +1466,14 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
         impact_line = f"{direction_txt}；{scope_txt}"
         if inter_note:
-            impact_line += f"；{inter_note}"
-        impact_line += f"。触发点：{trigger_txt}。"
+            impact_line += f"。当前组合关系：{inter_note}"
+        impact_line += f"。建议：{trigger_txt}。"
         syn_lines.append(f"- **落地影响**：{impact_line}")
 
     else:
         syn_lines.append("- **主导系统**：当前未识别到可稳定追踪的同一套分层系统。")
-        tail = f"；{inter_note}" if inter_note else ""
-        syn_lines.append(f"- **落地影响**：{direction_txt}；短时以实况触发为主（{trigger_txt}）{tail}。")
+        tail = f"。当前组合关系：{inter_note}" if inter_note else ""
+        syn_lines.append(f"- **落地影响**：{direction_txt}；短时以实况触发为主。建议：{trigger_txt}{tail}。")
 
     # concise evidence line (avoid spreading full layer-by-layer by default)
     def _humanize_850(s: str) -> str:
@@ -1548,21 +1548,47 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         obs_max = float(metar_diag.get('observed_max_temp_c')) if metar_diag.get('observed_max_temp_c') is not None else None
     except Exception:
         obs_max = None
-    lo = peak_c - 0.8
-    hi = peak_c + 0.8
+
+    gate = classify_window_phase(primary_window, metar_diag)
+    phase_now = str(gate.get('phase') or 'unknown')
+
+    # Quantization-aware dynamic range (METAR usually integer-rounded; avoid overfitting tiny jumps)
+    lo_model = peak_c - 0.8
+    hi_model = peak_c + 0.8
+    lo, hi = lo_model, hi_model
     if obs_max is not None:
-        lo = max(lo, obs_max - 0.5)
-        hi = max(hi, obs_max + 0.1)
+        # Treat observed integer as bin center, not exact decimal truth.
+        obs_lo = obs_max - 0.4
+        obs_hi = obs_max + 0.4
+        w_obs = {
+            "far": 0.15,
+            "near_window": 0.35,
+            "in_window": 0.55,
+            "post": 0.75,
+        }.get(phase_now, 0.25)
+        lo = max(lo_model, (1 - w_obs) * lo_model + w_obs * (obs_lo - 0.2))
+        hi = max(hi_model, (1 - w_obs) * hi_model + w_obs * (obs_hi + 0.2))
+
+    def _soft_snap(v: float) -> float:
+        iv = round(v)
+        if abs(v - iv) <= 0.12:
+            return float(iv)
+        return round(v, 1)
+
+    lo = _soft_snap(lo)
+    hi = _soft_snap(max(hi, lo + 0.2))
+
+    core_bucket = int(round((lo + hi) / 2.0))
     peak_range_block = [
         "🌡️ **可能最高温区间**",
         f"- **{lo:.1f}~{hi:.1f}°C**（峰值窗 {_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local）",
+        f"- 主值更接近 **{core_bucket}°C** 档（已按实况整度特性做平滑）。",
     ]
     if bool(metar_diag.get("obs_correction_applied")):
         peak_range_block.append("- 注：已应用实况纠偏（模型峰值偏低，窗口锚定到当日实况峰值时段）。")
 
-    gate = classify_window_phase(primary_window, metar_diag)
     phase_map = {"far": "远离窗口", "near_window": "接近窗口", "in_window": "窗口内", "post": "窗口后", "unknown": "窗口状态未知"}
-    vars_block = [f"⚠️ **关注变量**（{phase_map.get(str(gate.get('phase') or 'unknown'), '窗口状态未知')}）"]
+    vars_block = [f"⚠️ **关注变量**（{phase_map.get(phase_now, '窗口状态未知')}）"]
     cloud_code = str(metar_diag.get("latest_cloud_code") or "").upper()
     t_bias = metar_diag.get("temp_bias_c")
     snd_thermo = (((fdec.get("features") or {}).get("sounding") or {}).get("thermo") if isinstance(fdec, dict) else None) or {}
