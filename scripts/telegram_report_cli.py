@@ -1346,6 +1346,9 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     line500 = str(bg.get("line_500") or "高空背景信号有限。")
     line850 = str(bg.get("line_850") or "低层输送信号一般。")
     extra = str(bg.get("extra") or "")
+    h700_summary = str((((fdec.get("features") or {}).get("h700") or {}).get("summary") if isinstance(fdec, dict) else "") or "")
+    h925_summary = str((((fdec.get("features") or {}).get("h925") or {}).get("summary") if isinstance(fdec, dict) else "") or "")
+    snd_thermo = ((((fdec.get("features") or {}).get("sounding") or {}).get("thermo") if isinstance(fdec, dict) else None) or {})
 
     syn_lines = ["🧭 **环流背景**"]
 
@@ -1595,6 +1598,64 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         phase = str(classify_window_phase(primary_window, metar_diag).get("phase") or "unknown")
         return up, down, phase
 
+    def _evidence_routes() -> tuple[str, str]:
+        # system route
+        sys_score = 0.0
+        if obj:
+            sys_score += {"high": 1.1, "medium": 0.8, "low": 0.35}.get(str(obj.get("confidence") or ""), 0.2)
+            sys_score += {"station_relevant": 0.8, "possible_override": 0.45, "background_only": 0.2}.get(str(obj.get("impact_scope") or ""), 0.2)
+        else:
+            try:
+                rmax = max(_regime_scores().values())
+            except Exception:
+                rmax = 0.0
+            if rmax >= 0.9:
+                sys_score += 0.45
+
+        # profile route
+        profile_score = 0.0
+        if h700_summary:
+            profile_score += 0.7
+            if "近站" in h700_summary:
+                profile_score += 0.45
+            elif "外围" in h700_summary:
+                profile_score += 0.2
+        if h925_summary:
+            profile_score += 0.35
+            if "偏弱" in h925_summary:
+                profile_score -= 0.15
+        if snd_thermo.get("has_profile"):
+            profile_score += 0.35
+
+        # obs route
+        obs_score = 0.0
+        try:
+            tb = abs(float(metar_diag.get("temp_bias_c") or 0.0))
+        except Exception:
+            tb = 0.0
+        try:
+            ts = abs(float(metar_diag.get("temp_trend_1step_c") or 0.0))
+        except Exception:
+            ts = 0.0
+        if tb >= 1.5:
+            obs_score += 0.9
+        elif tb >= 0.8:
+            obs_score += 0.5
+        if ts >= 0.8:
+            obs_score += 0.55
+        elif ts >= 0.4:
+            obs_score += 0.3
+
+        routes = [
+            ("系统路由", "system", sys_score),
+            ("剖面路由", "profile", profile_score),
+            ("实况路由", "obs", obs_score),
+        ]
+        routes.sort(key=lambda x: x[2], reverse=True)
+        main = f"{routes[0][0]}({routes[0][1]})"
+        aux = f"{routes[1][0]}({routes[1][1]})" if routes[1][2] >= 0.45 else "无明显次级路由"
+        return main, aux
+
     def _impact_direction_and_trigger() -> tuple[str, str]:
         up, down, phase = _signal_scores()
 
@@ -1623,6 +1684,7 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     r1, s1 = r_sorted[0]
     r2, s2 = r_sorted[1]
     has_primary_regime = s1 >= 0.9
+    route_main, route_aux = _evidence_routes()
 
     if obj:
         otype = str(obj.get("type") or "").lower()
@@ -1671,6 +1733,8 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         tail = f"。当前组合关系：{inter_note}" if inter_note else ""
         syn_lines.append(f"- **落地影响**：{direction_txt}；短时以实况触发为主。建议：{trigger_txt}{tail}。")
 
+    syn_lines.append(f"- **证据路由**：主判 {route_main}；辅助 {route_aux}。")
+
     # concise evidence line (avoid spreading full layer-by-layer by default)
     def _humanize_850(s: str) -> str:
         txt = str(s or "")
@@ -1696,16 +1760,24 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         return any(k in t for k in weak_tokens)
 
     evidence_bits: list[str] = []
-    if line500 and not _is_weak_evidence(line500):
-        evidence_bits.append(f"500hPa: {line500}")
     if line850_h and not _is_weak_evidence(line850_h):
         evidence_bits.append(f"850hPa: {line850_h}")
+
+    if h700_summary and not _is_weak_evidence(h700_summary):
+        evidence_bits.append(f"700hPa: {h700_summary}")
+
+    if line500 and not _is_weak_evidence(line500):
+        evidence_bits.append(f"500hPa: {line500}")
+
+    if h925_summary and not _is_weak_evidence(h925_summary):
+        evidence_bits.append(f"925hPa: {h925_summary}")
+
     if extra and not _is_weak_evidence(extra):
         evidence_bits.append(f"约束: {extra}")
 
     if evidence_bits:
         syn_lines.append("- **关键证据**：")
-        for e in evidence_bits[:2]:
+        for e in evidence_bits[:3]:
             syn_lines.append(f"  • {e}")
 
     if str(d.get("override_risk") or "low") == "high":
@@ -1869,7 +1941,6 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
     vars_block = [f"⚠️ **关注变量**（{phase_map.get(phase_now, '窗口状态未知')}）"]
     cloud_code = str(metar_diag.get("latest_cloud_code") or "").upper()
     t_bias = metar_diag.get("temp_bias_c")
-    snd_thermo = (((fdec.get("features") or {}).get("sounding") or {}).get("thermo") if isinstance(fdec, dict) else None) or {}
     if cloud_code in {"BKN", "OVC", "VV"}:
         vars_block.append("• 低云维持/继续增厚 → 最高温上沿下压，峰值可能提前结束。")
     else:

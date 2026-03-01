@@ -22,7 +22,7 @@ from vertical_3d import build_3d_objects
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT / "cache" / "runtime"
-SCHEMA_VERSION = "forecast-decision.v3"
+SCHEMA_VERSION = "forecast-decision.v4"
 
 
 def _cache_key(*parts: str) -> str:
@@ -126,7 +126,12 @@ def build_forecast_decision(
     synoptic: dict[str, Any],
 ) -> dict[str, Any]:
     diag500 = diagnose_500hpa(synoptic) or {}
-    diag700 = diagnose_700(primary_window) or {}
+    diag700 = diagnose_700(
+        primary_window,
+        synoptic=synoptic,
+        station_lat=station_lat,
+        station_lon=station_lon,
+    ) or {}
     diag925 = diagnose_925(primary_window, None) or {}
     snd = diagnose_sounding(primary_window, {}) or {}
 
