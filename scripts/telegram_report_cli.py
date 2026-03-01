@@ -2689,6 +2689,39 @@ def choose_section_text(
             hi = min(hi, thermal_cap_hi)
             lo = min(lo, hi - 0.2)
 
+    # Afternoon solar-decay + plateau gate:
+    # if already in/near window with weak temp slope, avoid optimistic late-window rebound tails.
+    if phase_now in {"near_window", "in_window"} and clear_sky_stable and (not precip_cooling) and (not precip_residual):
+        try:
+            latest_local_txt = str(metar_diag.get("latest_report_local") or "")
+            peak_local_txt = str(primary_window.get("peak_local") or "")
+            latest_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
+            peak_dt = datetime.fromisoformat(peak_local_txt) if peak_local_txt else None
+            hour_local = (latest_dt.hour + latest_dt.minute / 60.0) if latest_dt else None
+            hleft = max(0.0, (peak_dt - latest_dt).total_seconds() / 3600.0) if (latest_dt and peak_dt) else None
+        except Exception:
+            hour_local = None
+            hleft = None
+        try:
+            t_now = float(metar_diag.get("latest_temp"))
+        except Exception:
+            t_now = None
+
+        if t_now is not None and t_cons <= 0.12:
+            late_enough = (hour_local is None) or (hour_local >= 14.0)
+            close_to_peak = (hleft is None) or (hleft <= 1.6)
+            if late_enough and close_to_peak:
+                add = 1.05
+                if hour_local is not None and hour_local >= 15.0:
+                    add = 0.85
+                if "暖平流" in line850 and b_cons >= 0.6 and t_cons > 0.05:
+                    add += 0.15
+                solar_plateau_cap = t_now + add
+                if obs_max is not None:
+                    solar_plateau_cap = max(solar_plateau_cap, float(obs_max) + 0.35)
+                hi = min(hi, solar_plateau_cap)
+                lo = min(lo, hi - 0.2)
+
     # Far-window cold-advection sanity cap: avoid over-projecting rapid afternoon rebound
     # when low-level northerly cold feed persists.
     if phase_now == "far" and "冷平流" in line850:
