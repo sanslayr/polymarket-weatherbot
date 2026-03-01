@@ -1438,6 +1438,37 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
         return f"{nature}；{move}"
 
+    def _system_plain_desc(otype: str) -> str | None:
+        fd = _front_plain_desc(otype)
+        if fd:
+            return fd
+
+        txt850 = str(line850)
+        txtx = str(extra)
+
+        if ("advection" in otype) or ("暖平流" in txt850) or ("冷平流" in txt850):
+            if "暖平流" in txt850 and "冷平流" not in txt850:
+                return "暖空气输送为主，云量若放开，升温会更顺"
+            if "冷平流" in txt850 and "暖平流" not in txt850:
+                return "冷空气输送偏强，对升温有压制"
+            return "冷暖输送并存，短时更容易出现重排"
+
+        if ("dry_intrusion" in otype) or _contains_any(txtx, ["封盖", "湿层", "低云", "压制", "干层"]):
+            if _contains_any(txtx, ["干层", "日照", "升温加速"]):
+                return "高层偏干，若日照打开，升温会突然加速"
+            return "低层受封盖约束，短时升温不容易放大"
+
+        if ("dynamic" in otype) or _contains_any(str(line500), ["槽", "抬升", "涡度", "PVA"]):
+            return "高空有触发信号，但是否落地还要看近地风云配合"
+
+        if ("shear" in otype):
+            return "风场切换型系统，节奏变化快，峰值时段易前后摆动"
+
+        if ("subsidence" in otype):
+            return "下沉背景偏强，整体更偏稳态"
+
+        return None
+
     def _impact_direction_and_trigger() -> tuple[str, str]:
         up = 0.0
         down = 0.0
@@ -1494,9 +1525,9 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
         # 1) 主导系统（一句话）
         syn_lines.append(f"- **主导系统**：{regime}（{desc}）。")
-        front_desc = _front_plain_desc(otype)
-        if front_desc:
-            syn_lines.append(f"- **锋面性质**：{front_desc}。")
+        sys_desc = _system_plain_desc(otype)
+        if sys_desc:
+            syn_lines.append(f"- **系统性质**：{sys_desc}。")
 
         # 2) 落地影响（方向 + 触发 + 交互）
         if impact == "station_relevant":
