@@ -1528,7 +1528,8 @@ def _build_polymarket_section(
             row = (_c, label, bid, ask, _lo, _hi)
             s = score_map.get((label, str(bid), str(ask)), 0.0)
             w = _weather_score(row)
-            if ask_v > 0 and ask_v <= 0.15 and s >= 0.22:
+            # 常规alpha也必须满足最低天气一致性，避免“很便宜但偏离天气区间太远”的误标。
+            if ask_v > 0 and ask_v <= 0.15 and w >= 0.12 and s >= 0.22:
                 tag = "😇潜在Alpha"
             elif ask_v > 0.15 and ask_v <= 0.18 and w >= 0.45 and s >= 0.30:
                 tag = "😇潜在Alpha"
