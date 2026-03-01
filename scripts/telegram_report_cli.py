@@ -242,6 +242,8 @@ def _prune_runtime_cache(max_age_hours: int = CACHE_PRUNE_HOURS) -> None:
     if not CACHE_DIR.exists():
         return
     now = datetime.now(timezone.utc)
+
+    # JSON runtime cache
     for p in CACHE_DIR.glob("*.json"):
         try:
             mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
@@ -249,6 +251,18 @@ def _prune_runtime_cache(max_age_hours: int = CACHE_PRUNE_HOURS) -> None:
                 p.unlink(missing_ok=True)
         except Exception:
             continue
+
+    # Binary GRIB cache (separate retention; defaults slightly longer)
+    grib_keep_h = int(os.getenv("GFS_GRIB_CACHE_HOURS", "36") or "36")
+    gdir = CACHE_DIR / "gfs_grib"
+    if gdir.exists() and gdir.is_dir():
+        for p in gdir.glob("*.grib2"):
+            try:
+                mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+                if (now - mtime) > timedelta(hours=grib_keep_h):
+                    p.unlink(missing_ok=True)
+            except Exception:
+                continue
 
 
 def load_build_station_links_module() -> Any:

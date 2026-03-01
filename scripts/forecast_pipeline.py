@@ -19,10 +19,14 @@ from diagnostics_925 import diagnose_925
 from diagnostics_sounding import diagnose_sounding
 from synoptic_regime import advection_reach_score, classify_large_scale_regime
 from vertical_3d import build_3d_objects
+from contracts import (
+    FORECAST_DECISION_SCHEMA_VERSION,
+    FORECAST_3D_BUNDLE_SCHEMA_VERSION,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT / "cache" / "runtime"
-SCHEMA_VERSION = "forecast-decision.v4"
+SCHEMA_VERSION = FORECAST_DECISION_SCHEMA_VERSION
 
 
 def _cache_key(*parts: str) -> str:
@@ -389,7 +393,7 @@ def load_or_build_forecast_decision(
         try:
             _write_3d_bundle(
                 {
-                    "schema_version": "forecast-3d-bundle.v1",
+                    "schema_version": FORECAST_3D_BUNDLE_SCHEMA_VERSION,
                     "station": str(getattr(station, "icao", "")),
                     "date": target_date,
                     "model": model,

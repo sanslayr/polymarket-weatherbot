@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from contracts import OBJECTS_3D_SCHEMA_VERSION
+
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     r = 6371.0
@@ -191,7 +193,7 @@ def build_3d_objects(
     candidates = objects[:3]
 
     return {
-        "schema_version": "objects-3d.v1",
+        "schema_version": OBJECTS_3D_SCHEMA_VERSION,
         "main_object": main,
         "candidates": candidates,
         "count": len(objects),
