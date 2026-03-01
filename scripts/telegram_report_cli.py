@@ -1357,9 +1357,9 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
     def _infer_regime_and_desc(otype: str, impact: str) -> tuple[str, str]:
         if ("front" in otype) or ("baroclinic" in otype) or _contains_any(extra + line850, ["锋", "锋生", "斜压"]):
-            return "斜压锋生主导", "锋区重排"
+            return "锋面活动主导", "锋区调整"
         if "dry_intrusion" in otype or _contains_any(extra, ["湿层", "低云", "封盖", "压制"]):
-            return "稳定层压制主导", "封盖约束"
+            return "稳定层约束主导", "低层受限"
         if _contains_any(line850, ["暖平流"]):
             return "平流主导", "暖平流抬升"
         if _contains_any(line850, ["冷平流"]):
@@ -1398,6 +1398,45 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
         if {"baroclinic", "shear"}.issubset(gs):
             return "斜压与风切并行，局地变化节奏可能加快"
         return None
+
+    def _dir_cn_from_deg(deg: float) -> str:
+        dirs = ["北", "东北", "东", "东南", "南", "西南", "西", "西北"]
+        idx = int(((deg % 360) + 22.5) // 45) % 8
+        return dirs[idx]
+
+    def _front_plain_desc(otype: str) -> str | None:
+        is_front = ("front" in otype) or ("baroclinic" in otype) or ("锋" in str(line850)) or ("锋" in str(extra))
+        if not is_front:
+            return None
+
+        warm = "暖平流" in str(line850)
+        cold = "冷平流" in str(line850)
+        if warm and not cold:
+            nature = "偏暖锋"
+        elif cold and not warm:
+            nature = "偏冷锋"
+        elif warm and cold:
+            nature = "冷暖交汇（近静止锋）"
+        else:
+            nature = "锋性过渡"
+
+        wdir = metar_diag.get("latest_wdir")
+        wspd = metar_diag.get("latest_wspd")
+        try:
+            wspd_v = float(wspd)
+        except Exception:
+            wspd_v = None
+
+        if wdir in (None, "", "VRB") or wspd_v is None or wspd_v <= 4:
+            move = "移动偏慢，接近准静止"
+        else:
+            try:
+                to_deg = (float(wdir) + 180.0) % 360.0
+                move = f"可能向{_dir_cn_from_deg(to_deg)}方向缓慢推进（低置信）"
+            except Exception:
+                move = "移动方向暂不稳定"
+
+        return f"{nature}；{move}"
 
     def _impact_direction_and_trigger() -> tuple[str, str]:
         up = 0.0
@@ -1455,6 +1494,9 @@ def choose_section_text(primary_window: dict[str, Any], metar_text: str, metar_d
 
         # 1) 主导系统（一句话）
         syn_lines.append(f"- **主导系统**：{regime}（{desc}）。")
+        front_desc = _front_plain_desc(otype)
+        if front_desc:
+            syn_lines.append(f"- **锋面性质**：{front_desc}。")
 
         # 2) 落地影响（方向 + 触发 + 交互）
         if impact == "station_relevant":
