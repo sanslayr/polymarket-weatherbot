@@ -1178,6 +1178,28 @@ def _build_polymarket_section(polymarket_event_url: str, primary_window: dict[st
                             seen.add(r[1])
                     focus = sorted(focus, key=lambda x: x[0])
 
+    # Ensure one upper-edge tail bin is visible when forecast upper bound is close to next discrete market bucket.
+    # Example: likely_hi=13.4 should include 14°C as tail breakout watch.
+    try:
+        finite_all = sorted([r for r in filtered if not (math.isinf(r[4]) or math.isinf(r[5]))], key=lambda x: x[0])
+        target_center = math.ceil(likely_hi)
+        if likely_hi >= (target_center - 0.6):
+            cand = [r for r in finite_all if abs(r[0] - target_center) <= 0.26]
+            if cand:
+                up = cand[0]
+                if all(up[1] != r[1] for r in focus):
+                    focus.append(up)
+            else:
+                # fallback: include nearest upper-edge bucket (e.g. "14°C or higher")
+                upper_bins = [r for r in filtered if (not math.isinf(r[4]) and math.isinf(r[5]) and r[4] <= (target_center + 0.5))]
+                if upper_bins:
+                    up = sorted(upper_bins, key=lambda x: x[4])[0]
+                    if all(up[1] != r[1] for r in focus):
+                        focus.append(up)
+            focus = sorted(focus, key=lambda x: x[0])
+    except Exception:
+        pass
+
     # Only mark "most likely" when lead is clear enough (avoid over-labeling in tight ranges).
     best_label = None
     if ranked:
