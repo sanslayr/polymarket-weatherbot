@@ -2640,11 +2640,11 @@ def choose_section_text(
 
     # precipitation evolution: prioritize change signal
     if precip_trend in {"new", "intensify"}:
-        focus.append((1.08, "• 降水出现/增强 → 蒸发冷却与云厚效应上升，最高温上沿需下修。"))
+        focus.append((1.08, "• 降水出现/增强 → 上沿偏下修，且短时不确定性增大（对降水强度/相态变化敏感）。"))
     elif precip_trend in {"weaken", "end"}:
         focus.append((0.82, "• 降水减弱/结束 → 压温约束减轻，若云层不回补上沿可恢复。"))
     elif precip_state in {"moderate", "heavy", "convective"}:
-        focus.append((0.9, "• 降水仍在持续 → 白天增温效率受抑，峰值更易提前锁定。"))
+        focus.append((0.9, "• 降水持续 → 白天增温效率受抑，最高温更偏下沿；短时波动可能放大。"))
 
     try:
         if snd_thermo.get("has_profile"):
