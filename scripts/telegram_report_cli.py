@@ -775,7 +775,13 @@ def _metar_obs_time_utc(metar: dict[str, Any]) -> datetime:
     return datetime.fromisoformat(metar["reportTime"].replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
-def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[str, Any], tz_name: str, target_date: str | None = None) -> tuple[str, dict[str, Any]]:
+def metar_observation_block(
+    metar24: list[dict[str, Any]],
+    hourly_local: dict[str, Any],
+    tz_name: str,
+    target_date: str | None = None,
+    temp_unit: str = "C",
+) -> tuple[str, dict[str, Any]]:
     if not metar24:
         return "无可用METAR数据。", {}
 
@@ -916,10 +922,27 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
 
     time_label = "UTC" if str(tz_name).upper() == "UTC" else "Local"
 
-    def _delta_text(v: float, unit: str) -> str:
+    unit = "F" if str(temp_unit).upper() == "F" else "C"
+
+    def _to_temp_unit(v_c: float) -> float:
+        return (v_c * 9.0 / 5.0 + 32.0) if unit == "F" else v_c
+
+    def _fmt_temp_value(v_c: Any) -> str:
+        try:
+            v = _to_temp_unit(float(v_c))
+            if abs(v - round(v)) < 0.05:
+                return f"{int(round(v))}°{unit}"
+            return f"{v:.1f}°{unit}"
+        except Exception:
+            return f"{v_c}°{unit}"
+
+    def _delta_text(v: float, unit_txt: str) -> str:
         if abs(v) < 0.05:
             return "较上一报持平"
-        return f"较上一报 {v:+.1f}{unit}"
+        return f"较上一报 {v:+.1f}{unit_txt}"
+
+    def _delta_temp_text(v_c: float) -> str:
+        return _delta_text(_to_temp_unit(float(v_c)) - _to_temp_unit(0.0), f"°{unit}")
 
     def _wx_human_desc(wx_raw: Any) -> str:
         t = str(wx_raw or "").upper().strip().replace(" ", "")
@@ -1150,8 +1173,8 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
 
         lines = [
             latest_hdr,
-            f"• **🌡️ 气温**：{x.get('temp')}°C（{_delta_text(dt, '°C')}）",
-            f"• **💧 露点**：{x.get('dewp')}°C（{_delta_text(dp, '°C')}）",
+            f"• **🌡️ 气温**：{_fmt_temp_value(x.get('temp'))}（{_delta_temp_text(dt)}）",
+            f"• **💧 露点**：{_fmt_temp_value(x.get('dewp'))}（{_delta_temp_text(dp)}）",
             f"• **📊 气压**：{x.get('altim')} hPa（{_delta_text(dpres, ' hPa')}）",
             f"• **💨 风**：{wind_line}",
             f"• **☁️ 云层**：{cloud_line}",
@@ -1269,7 +1292,8 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
     bias = None if fc_t is None else round(float(latest.get("temp", 0)) - float(fc_t), 2)
     p_bias = None if fc_p is None else round(float(latest.get("altim", 0)) - float(fc_p), 2)
     if bias is not None and p_bias is not None:
-        lines.append(f"同小时模式偏差：温度 {bias:+.1f}°C；气压 {p_bias:+.1f}hPa")
+        b_disp = (_to_temp_unit(float(bias)) - _to_temp_unit(0.0))
+        lines.append(f"同小时模式偏差：温度 {b_disp:+.1f}°{unit}；气压 {p_bias:+.1f}hPa")
 
     t_trend = None
     if prev is not None:
@@ -1610,23 +1634,23 @@ def _poly_parse_interval(slug: str) -> tuple[float, float, str] | None:
         n2 = _poly_num(m.group(2))
         if abs(n1 - n2) <= 8:
             lo, hi = (n1, n2) if n1 <= n2 else (n2, n1)
-            return (lo - 0.5, hi + 0.49, "C")
+            return (lo - 0.5, hi + 0.5, "C")
     m = re.search(r"-(neg\d+|\d{1,3})-(neg\d+|\d{1,3})f$", s)
     if m:
         n1 = _poly_num(m.group(1))
         n2 = _poly_num(m.group(2))
         if abs(n1 - n2) <= 8:
             lo, hi = (n1, n2) if n1 <= n2 else (n2, n1)
-            return (lo - 0.5, hi + 0.49, "F")
+            return (lo - 0.5, hi + 0.5, "F")
 
     m = re.search(r"-(neg\d+|\d+)c$", s)
     if m:
         n = _poly_num(m.group(1))
-        return (n - 0.5, n + 0.49, "C")
+        return (n - 0.5, n + 0.5, "C")
     m = re.search(r"-(neg\d+|\d+)corbelow$", s)
     if m:
         n = _poly_num(m.group(1))
-        return (-math.inf, n + 0.49, "C")
+        return (-math.inf, n + 0.5, "C")
     m = re.search(r"-(neg\d+|\d+)corhigher$", s)
     if m:
         n = _poly_num(m.group(1))
@@ -1634,11 +1658,11 @@ def _poly_parse_interval(slug: str) -> tuple[float, float, str] | None:
     m = re.search(r"-(neg\d+|\d+)f$", s)
     if m:
         n = _poly_num(m.group(1))
-        return (n - 0.5, n + 0.49, "F")
+        return (n - 0.5, n + 0.5, "F")
     m = re.search(r"-(neg\d+|\d+)forbelow$", s)
     if m:
         n = _poly_num(m.group(1))
-        return (-math.inf, n + 0.49, "F")
+        return (-math.inf, n + 0.5, "F")
     m = re.search(r"-(neg\d+|\d+)forhigher$", s)
     if m:
         n = _poly_num(m.group(1))
@@ -1732,7 +1756,7 @@ def _build_polymarket_section(
                 iv = _poly_parse_interval(str(m.get("slug", "")))
                 break
         lo = iv[0] if iv else center - 0.5
-        hi = iv[1] if iv else center + 0.49
+        hi = iv[1] if iv else center + 0.5
         if iv and len(iv) >= 3 and str(iv[2]).upper() == "F":
             lo = (lo - 32) * 5 / 9 if lo != -math.inf else -math.inf
             hi = (hi - 32) * 5 / 9 if hi != math.inf else math.inf
@@ -1743,7 +1767,7 @@ def _build_polymarket_section(
         filtered.append((center, label, bid, ask, lo, hi))
 
     if not filtered:
-        filtered = [(c, l, b, a, c - 0.5, c + 0.49) for c, l, b, a in parsed]
+        filtered = [(c, l, b, a, c - 0.5, c + 0.5) for c, l, b, a in parsed]
 
     likely_lo = peak - 0.8
     likely_hi = peak + 0.8
@@ -2626,7 +2650,7 @@ def choose_section_text(
             if t_now is not None and -1.5 <= t_now <= 2.0:
                 down_adj += 0.25
                 profile_score += 0.2
-                tags.append("近0°C相变/潜热冷却风险")
+                tags.append("近冰点相变/潜热冷却风险")
 
         # 4) moisture structure (mid-dry / upper moist hints)
         mid_dry = "干层" in h700_summary
@@ -3038,7 +3062,7 @@ def choose_section_text(
     try:
         if metar_diag and metar_diag.get("observed_max_temp_c") is not None:
             mx = float(metar_diag.get('observed_max_temp_c'))
-            mx_txt = f"{int(mx)}" if float(mx).is_integer() else f"{mx:.1f}"
+            mx_txt = _fmt_temp(mx)
             tmax_local = str(metar_diag.get("observed_max_time_local") or "")
             tmax_txt = ""
             if tmax_local:
@@ -3047,9 +3071,9 @@ def choose_section_text(
                 except Exception:
                     tmax_txt = ""
             if tmax_txt:
-                metar_prefix.append(f"• 今日已观测最高温：{mx_txt}°C（{tmax_txt}）")
+                metar_prefix.append(f"• 今日已观测最高温：{mx_txt}（{tmax_txt}）")
             else:
-                metar_prefix.append(f"• 今日已观测最高温：{mx_txt}°C")
+                metar_prefix.append(f"• 今日已观测最高温：{mx_txt}")
     except Exception:
         pass
     metar_block = "📡 **最新实况分析（METAR）**\n" + ("\n".join(metar_prefix + [metar_text]) if metar_prefix else metar_text)
@@ -3774,11 +3798,13 @@ def _is_openmeteo_rate_limited_error(exc: Exception) -> bool:
 
 
 def _render_metar_only_report(st: Station, model: str, links_payload: dict[str, Any], reason: str, tz_name: str) -> str:
+    unit_pref = "F" if str(st.icao).upper().startswith("K") else "C"
     metar24 = fetch_metar_24h(st.icao)
     metar_text, _metar_diag = metar_observation_block(
         metar24,
         {"time": [], "temperature_2m": [], "pressure_msl": []},
         tz_name,
+        temp_unit=unit_pref,
     )
 
     lat_hemi = "N" if st.lat >= 0 else "S"
@@ -3916,10 +3942,17 @@ def render_report(command_text: str) -> str:
         raise RuntimeError("No Tmax window detected from forecast hourly data")
 
     tz = ZoneInfo(tz_name)
+    unit_pref = "F" if str(st.icao).upper().startswith("K") else "C"
 
     t0 = time.perf_counter()
     metar24 = fetch_metar_24h(st.icao)
-    metar_text, metar_diag = metar_observation_block(metar24, hourly_day, tz_name, target_date=target_date)
+    metar_text, metar_diag = metar_observation_block(
+        metar24,
+        hourly_day,
+        tz_name,
+        target_date=target_date,
+        temp_unit=unit_pref,
+    )
     try:
         metar_diag["station_lat"] = float(st.lat)
         metar_diag["station_lon"] = float(st.lon)
@@ -4085,7 +4118,6 @@ def render_report(command_text: str) -> str:
     header = "\n".join(header_lines)
 
     t0 = time.perf_counter()
-    unit_pref = "F" if str(st.icao).upper().startswith("K") else "C"
     body = choose_section_text(
         primary,
         metar_text,
