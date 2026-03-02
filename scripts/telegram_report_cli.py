@@ -1069,10 +1069,10 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
             except Exception:
                 pass
 
-        latest_hdr = f"**最新报（{local.strftime('%H:%M')} {time_label}）**"
+        latest_hdr = f"**最新报：{local.strftime('%H:%M')} {time_label}**"
         if prev_x:
             prev_local = _metar_obs_time_utc(prev_x).astimezone(tz)
-            latest_hdr = f"**最新报（{local.strftime('%H:%M')} {time_label}）（上一报 {prev_local.strftime('%H:%M')} {time_label}）**"
+            latest_hdr = f"**最新报：{local.strftime('%H:%M')} {time_label}**（上一报 {prev_local.strftime('%H:%M')}）"
 
         wind_line = fmt_wind(x)
         wind_cmp = _wind_change_text(x, prev_x)
