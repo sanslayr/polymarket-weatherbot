@@ -1783,6 +1783,50 @@ def metar_observation_block(
     except Exception:
         peak_lock_confirmed = False
 
+    # Predictive SPECI likelihood (before an actual SPECI arrives):
+    # detect abnormal short-term changes that often trigger denser updates.
+    speci_likely_score = 0.0
+    try:
+        if prev is not None:
+            dt1 = float(latest.get("temp", 0)) - float(prev.get("temp", 0))
+            if abs(dt1) >= 1.2:
+                speci_likely_score += 0.90
+            if abs(dt1) >= 2.0:
+                speci_likely_score += 0.50
+
+            if dewpoint_step is not None and abs(float(dewpoint_step)) >= 1.5:
+                speci_likely_score += 0.35
+            if wind_speed_step is not None and abs(float(wind_speed_step)) >= 6.0:
+                speci_likely_score += 0.60
+            if wind_dir_change is not None and float(wind_dir_change) >= 50.0:
+                speci_likely_score += 0.45
+            if pressure_step is not None and abs(float(pressure_step)) >= 1.2:
+                speci_likely_score += 0.25
+
+        if wx_trend in {"new", "intensify"}:
+            speci_likely_score += 1.00
+        elif wx_trend in {"weaken", "end"}:
+            speci_likely_score += 0.20
+        if wx_state_now in {"heavy", "convective"}:
+            speci_likely_score += 0.90
+
+        if "快速回补" in cloud_tr or "明显开窗" in cloud_tr:
+            speci_likely_score += 0.45
+
+        if routine_cadence_min is not None:
+            if routine_cadence_min >= 50:
+                speci_likely_score += 0.25
+            elif routine_cadence_min <= 25:
+                speci_likely_score -= 0.15
+
+        if recent_interval_min is not None and routine_cadence_min is not None and recent_interval_min < 0.75 * routine_cadence_min:
+            # already denser than routine cadence, likely in active weather mode
+            speci_likely_score += 0.35
+    except Exception:
+        speci_likely_score = 0.0
+
+    speci_likely = bool((not speci_active) and (speci_likely_score >= 1.35))
+
     return "\n".join(lines), {
         "latest_report_utc": _metar_obs_time_utc(latest).isoformat().replace('+00:00', 'Z'),
         "latest_report_local": latest_dt_local.isoformat(),
@@ -1816,6 +1860,8 @@ def metar_observation_block(
         "metar_routine_cadence_min": routine_cadence_min,
         "metar_recent_interval_min": recent_interval_min,
         "metar_speci_active": speci_active,
+        "metar_speci_likely": speci_likely,
+        "metar_speci_likely_score": round(speci_likely_score, 2),
         "peak_lock_confirmed": peak_lock_confirmed,
         "observed_max_temp_c": obs_max_temp,
         "observed_max_interval_lo_c": obs_max_interval_lo,
@@ -4449,6 +4495,7 @@ def choose_section_text(
         and (t_acc is None or t_acc <= 0.05)
         and (not bool(metar_diag.get("nocturnal_reheat_signal")))
         and (not warm_reheat_hint)
+        and (not bool(metar_diag.get("metar_speci_likely")))
         and precip_state not in {"moderate", "heavy", "convective"}
     ):
         compact_settled_mode = True
@@ -4542,6 +4589,7 @@ def choose_section_text(
         except Exception:
             recent = None
         speci = bool(metar_diag.get("metar_speci_active"))
+        speci_likely = bool(metar_diag.get("metar_speci_likely"))
 
         base = None
         if recent is not None and 8.0 <= recent <= 90.0:
@@ -4554,6 +4602,9 @@ def choose_section_text(
         if speci:
             lo = max(10, int(round(max(10.0, base * 0.45) / 5.0) * 5))
             hi = max(lo + 10, int(round(min(45.0, base * 1.10) / 5.0) * 5))
+        elif speci_likely:
+            lo = max(15, int(round(max(15.0, base * 0.55) / 5.0) * 5))
+            hi = max(lo + 10, int(round(min(55.0, base * 1.20) / 5.0) * 5))
         elif base <= 35.0:
             lo, hi = 20, 40
         elif base <= 50.0:
@@ -4575,6 +4626,9 @@ def choose_section_text(
             focus.append((0.55, "• 先盯温度斜率是否重新放大，这是临窗改判的最快信号。"))
     except Exception:
         focus.append((0.45, "• 先盯温度斜率是否重新放大，这是临窗改判的最快信号。"))
+
+    if bool(metar_diag.get("metar_speci_likely")):
+        focus.append((0.88, "• 异常信号增多，下一报可能转为加密更新（SPECI）→ 建议等下一报再确认上沿。"))
 
     # 偏差驱动
     if isinstance(t_bias, (int, float)):
