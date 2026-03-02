@@ -3704,6 +3704,22 @@ def choose_section_text(
     moist_adv_signal = bool(dp_step is not None and dp_step >= rt_night_dp_rise)
     pressure_fall_signal = bool(p_step is not None and p_step <= rt_night_pres_fall)
 
+    # Precipitation-related night penalties:
+    # - ongoing/new precip usually adds evaporative/wet-ground cooling,
+    # - even after precip ends, low-cloud residual can delay re-warm.
+    precip_hard_block = bool(
+        precip_state in {"moderate", "heavy", "convective"}
+        or (precip_trend in {"new", "intensify"} and precip_state in {"light", "moderate", "heavy", "convective"})
+    )
+    precip_light_drag = bool(
+        precip_state == "light"
+        and precip_trend in {"steady", "none", "weaken", "end"}
+    )
+    precip_residual_drag = bool(
+        precip_trend in {"end", "weaken"}
+        and cloud_code_now in {"BKN", "OVC", "VV"}
+    )
+
     nocturnal_score = 0.0
     if warm_adv_signal:
         nocturnal_score += 0.95
@@ -3716,12 +3732,19 @@ def choose_section_text(
     if pressure_fall_signal:
         nocturnal_score += 0.45
 
+    if precip_hard_block:
+        nocturnal_score -= 1.05
+    elif precip_residual_drag:
+        nocturnal_score -= 0.40
+    elif precip_light_drag:
+        nocturnal_score -= 0.25
+
     nocturnal_gate = warm_adv_signal or (mix_signal and moist_adv_signal and pressure_fall_signal)
     nocturnal_reheat_signal = bool(
         nighttime_active
         and nocturnal_gate
         and nocturnal_score >= rt_night_score_min
-        and precip_state not in {"moderate", "heavy", "convective"}
+        and (not precip_hard_block)
     )
 
     if nocturnal_reheat_signal:
@@ -3739,6 +3762,8 @@ def choose_section_text(
         metar_diag["nocturnal_reheat_reasons"] = "、".join(rs[:3])
     metar_diag["nocturnal_reheat_signal"] = nocturnal_reheat_signal
     metar_diag["nocturnal_reheat_score"] = round(nocturnal_score, 2)
+    metar_diag["nocturnal_precip_hard_block"] = precip_hard_block
+    metar_diag["nocturnal_precip_residual_drag"] = precip_residual_drag
 
     dir_delta = up_s - down_s
     consistency_shift = 0.0
