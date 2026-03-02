@@ -930,7 +930,10 @@ def metar_observation_block(
     def _fmt_temp_value(v_c: Any) -> str:
         try:
             if unit == "C":
-                return f"{int(round(float(v_c)))}°C"
+                v = float(v_c)
+                if abs(v - round(v)) < 0.05:
+                    return f"{int(round(v))}°C"
+                return f"{v:.1f}°C"
             v = _to_temp_unit(float(v_c))
             if abs(v - round(v)) < 0.05:
                 return f"{int(round(v))}°{unit}"
@@ -945,10 +948,12 @@ def metar_observation_block(
 
     def _delta_temp_text(v_c: float) -> str:
         if unit == "C":
-            dv = int(round(float(v_c)))
-            if dv == 0:
+            dv = float(v_c)
+            if abs(dv) < 0.05:
                 return "较上一报持平"
-            return f"较上一报 {dv:+d}°C"
+            if abs(dv - round(dv)) < 0.05:
+                return f"较上一报 {int(round(dv)):+d}°C"
+            return f"较上一报 {dv:+.1f}°C"
         return _delta_text(_to_temp_unit(float(v_c)) - _to_temp_unit(0.0), f"°{unit}")
 
     def _wx_human_desc(wx_raw: Any) -> str:
@@ -1300,10 +1305,7 @@ def metar_observation_block(
     p_bias = None if fc_p is None else round(float(latest.get("altim", 0)) - float(fc_p), 2)
     if bias is not None and p_bias is not None:
         b_disp = (_to_temp_unit(float(bias)) - _to_temp_unit(0.0))
-        if unit == "C":
-            b_txt = f"{int(round(b_disp)):+d}°C"
-        else:
-            b_txt = f"{b_disp:+.1f}°{unit}"
+        b_txt = f"{b_disp:+.1f}°{unit}"
         lines.append(f"同小时模式偏差：温度 {b_txt}；气压 {p_bias:+.1f}hPa")
 
     t_trend = None
@@ -3114,7 +3116,7 @@ def choose_section_text(
         if metar_diag and metar_diag.get("observed_max_temp_c") is not None:
             mx = float(metar_diag.get('observed_max_temp_c'))
             if unit == "C":
-                mx_txt = f"{int(round(mx))}°C"
+                mx_txt = f"{int(round(mx))}°C" if abs(mx - round(mx)) < 0.05 else f"{mx:.1f}°C"
             else:
                 mx_txt = _fmt_temp(mx)
             tmax_local = str(metar_diag.get("observed_max_time_local") or "")
