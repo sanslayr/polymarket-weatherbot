@@ -1018,16 +1018,21 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
 
         return f"较上一报{prev_wind_txt}，{dir_msg}，{spd_msg}"
 
-    def _cloud_change_text(cur: dict[str, Any], prev_x: dict[str, Any] | None) -> str:
+    def _cloud_change_parts(cur: dict[str, Any], prev_x: dict[str, Any] | None) -> dict[str, str]:
         if not prev_x:
-            return ""
+            return {}
         prev_compact = _cloud_compact(prev_x)
         cur_tokens = _cloud_tokens(cur)
         prev_tokens = _cloud_tokens(prev_x)
         tr = _cloud_trend(cur, prev_x)
 
         if cur_tokens == prev_tokens:
-            return f"（上一报{prev_compact}，云层稳定无变化）"
+            tr_txt = "云层稳定无变化"
+            return {
+                "prev": prev_compact,
+                "trend": tr_txt,
+                "inline": f"（上一报{prev_compact}，{tr_txt}）",
+            }
 
         cur_set = set(cur_tokens)
         prev_set = set(prev_tokens)
@@ -1043,7 +1048,11 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         else:
             tr_txt = tr if tr else "云层结构有调整"
 
-        return f"（上一报{prev_compact}，{tr_txt}）"
+        return {
+            "prev": prev_compact,
+            "trend": tr_txt,
+            "inline": f"（上一报{prev_compact}，{tr_txt}）",
+        }
 
     def fmt_latest_obs(x: dict[str, Any], prev_x: dict[str, Any] | None) -> list[str]:
         local = _metar_obs_time_utc(x).astimezone(tz)
@@ -1071,9 +1080,19 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
             wind_line = f"{wind_line}（{wind_cmp}）"
 
         cloud_line = cloud
-        cloud_cmp = _cloud_change_text(x, prev_x)
+        cloud_cmp = _cloud_change_parts(x, prev_x)
         if cloud_cmp:
-            cloud_line = f"{cloud}{cloud_cmp}"
+            cur_tokens_n = len(_cloud_tokens(x))
+            prev_tokens_n = len(_cloud_tokens(prev_x)) if prev_x else 0
+            multiline_cmp = (cur_tokens_n >= 3) or (prev_tokens_n >= 3) or (cloud.count(",") >= 2)
+            if multiline_cmp:
+                cloud_line = (
+                    f"{cloud}\n"
+                    f"  ↳ 上一报：{cloud_cmp.get('prev', '')}\n"
+                    f"  ↳ 变化：{cloud_cmp.get('trend', '')}"
+                )
+            else:
+                cloud_line = f"{cloud}{cloud_cmp.get('inline', '')}"
 
         lines = [
             latest_hdr,
