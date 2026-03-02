@@ -2061,14 +2061,29 @@ def _build_polymarket_section(
 
     filtered = []
     for center, label, bid, ask, lo, hi in parsed:
-        # User policy: ignore bins whose label-center is below observed daily max.
-        if market_floor is not None and center < float(market_floor):
-            continue
+        # User policy: ignore bins that are fully below observed daily max.
+        # For ranged buckets (e.g. 82-83F => 81.5~83.5F), keep if upper edge can still contain realized max.
+        if market_floor is not None:
+            try:
+                hi_f = float(hi)
+            except Exception:
+                hi_f = None
+            if hi_f is not None and math.isfinite(hi_f) and hi_f < float(market_floor):
+                continue
         filtered.append((center, label, bid, ask, lo, hi))
 
     if not filtered:
         if market_floor is not None:
-            filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed if c >= float(market_floor)]
+            tmp = []
+            for c, l, b, a, lo_i, hi_i in parsed:
+                try:
+                    hi_f = float(hi_i)
+                except Exception:
+                    hi_f = None
+                if hi_f is not None and math.isfinite(hi_f) and hi_f < float(market_floor):
+                    continue
+                tmp.append((c, l, b, a, lo_i, hi_i))
+            filtered = tmp
         else:
             filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed]
     if not filtered:
