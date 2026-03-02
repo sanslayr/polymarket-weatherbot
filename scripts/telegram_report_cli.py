@@ -2897,10 +2897,11 @@ def choose_section_text(
         if (h_to_peak is not None and h_to_peak >= 5.0 and babs >= 1.5) or (h_to_peak is not None and h_to_peak >= 8.0):
             low_conf_far = True
     if low_conf_far:
-        spread_boost = 0.28 + min(0.22, max(0.0, babs - 1.5) * 0.08)
+        # widen, but moderately (avoid over-dispersion)
+        spread_boost = 0.16 + min(0.14, max(0.0, babs - 1.5) * 0.05)
         if q_state in {"degraded", "fallback-cache"}:
-            spread_boost += 0.08
-        half_range = min(1.8, half_range + spread_boost)
+            spread_boost += 0.05
+        half_range = min(1.55, half_range + spread_boost)
 
     # center = model baseline + observed deviation (window-weighted) + excess-bias correction
     center = float(peak_c)
