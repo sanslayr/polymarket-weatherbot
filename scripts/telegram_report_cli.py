@@ -2055,6 +2055,64 @@ def _build_polymarket_section(
     if mismatch:
         lines.append("  • 注：市场档位与气象主带存在错位，已按最近 below/above 边缘区间回退展示。")
 
+    # Market-vs-forecast distribution divergence cue.
+    try:
+        unit_votes = ["F" if "°F" in str(r[1]) else ("C" if "°C" in str(r[1]) else "") for r in focus]
+        use_unit = "F" if unit_votes.count("F") > unit_votes.count("C") else "C"
+
+        def _to_unit(v_c: float) -> float:
+            return (v_c * 9.0 / 5.0 + 32.0) if use_unit == "F" else v_c
+
+        sym = "°F" if use_unit == "F" else "°C"
+
+        pts: list[tuple[float, float]] = []
+        for c, _lbl, b, a, _lo, _hi in focus:
+            bidv = _px(b)
+            askv = _px(a)
+            if bidv > 0 and askv > 0:
+                p = 0.5 * (bidv + askv)
+            else:
+                p = max(bidv, askv)
+            if p > 0:
+                pts.append((float(c), float(p)))
+
+        if len(pts) >= 2:
+            tot = sum(p for _c, p in pts)
+            if tot > 0:
+                wpts = sorted([(c, p / tot) for c, p in pts], key=lambda z: z[0])
+                m_center = sum(c * p for c, p in wpts)
+
+                def _wq(q: float) -> float:
+                    acc = 0.0
+                    for c, p in wpts:
+                        acc += p
+                        if acc >= q:
+                            return c
+                    return wpts[-1][0]
+
+                q25 = _wq(0.25)
+                q75 = _wq(0.75)
+                fc_lo = float(core_lo)
+                fc_hi = float(core_hi)
+                fc_center = 0.5 * (fc_lo + fc_hi)
+                gap = m_center - fc_center
+
+                ov = max(0.0, min(q75, fc_hi) - max(q25, fc_lo))
+                base = max(0.3, q75 - q25)
+                ov_ratio = ov / base
+
+                if abs(gap) >= 1.0 or ov_ratio < 0.25:
+                    m_u = _to_unit(m_center)
+                    fc_u = _to_unit(fc_center)
+                    q25_u = _to_unit(q25)
+                    q75_u = _to_unit(q75)
+                    lines.append(
+                        f"  • 提示：市场定价重心约 {m_u:.1f}{sym}（主带 {q25_u:.1f}~{q75_u:.1f}{sym}），"
+                        f"与气象主看中心 {fc_u:.1f}{sym} 偏离较大。"
+                    )
+    except Exception:
+        pass
+
     for _c, label, bid, ask, _lo, _hi in focus:
         bid_txt = "None" if bid in (None, "") else str(bid)
         ask_txt = "None" if ask in (None, "") else str(ask)
