@@ -2167,8 +2167,8 @@ def _build_polymarket_section(
                     return wpts[-1][0]
 
                 emp_mu = sum(c * p for c, _l, p, _lo, _hi, _e in wpts)
-                emp_q25 = _wq(0.25)
-                emp_q75 = _wq(0.75)
+                emp_qlo = _wq(0.075)
+                emp_qhi = _wq(0.925)
                 edge_share = sum(p for _c, _l, p, _lo, _hi, e in wpts if e)
 
                 # Normal-fit expectation/range (helps when higher/lower edge bins carry non-trivial mass).
@@ -2220,15 +2220,17 @@ def _build_polymarket_section(
                     fit_ok = False
 
                 if fit_ok:
+                    # ~85% central coverage for normal assumption
+                    z85 = 1.44
                     mu_u = _to_unit(fit_mu)
-                    lo_u = _to_unit(fit_mu - fit_sigma)
-                    hi_u = _to_unit(fit_mu + fit_sigma)
-                    lines.append(f"  • 市场定价期望：{mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（68%置信区间，正态拟合）。")
+                    lo_u = _to_unit(fit_mu - z85 * fit_sigma)
+                    hi_u = _to_unit(fit_mu + z85 * fit_sigma)
+                    lines.append(f"  • 市场定价期望：{mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（约85%覆盖区间）。")
                 else:
                     mu_u = _to_unit(emp_mu)
-                    lo_u = _to_unit(emp_q25)
-                    hi_u = _to_unit(emp_q75)
-                    lines.append(f"  • 市场定价期望：{mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（50%概率区间）。")
+                    lo_u = _to_unit(emp_qlo)
+                    hi_u = _to_unit(emp_qhi)
+                    lines.append(f"  • 市场定价期望：{mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（约80-90%覆盖区间）。")
 
                 if edge_share > 0.55:
                     lines.append(f"  • 注：边缘档位占比较高（约 {edge_share*100:.0f}%），上述期望参考性偏弱。")
