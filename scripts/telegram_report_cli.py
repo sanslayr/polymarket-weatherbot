@@ -3927,6 +3927,58 @@ def choose_section_text(
             lo = min(lo, hi - 0.2)
             strict_late_cap = True
 
+    # Window-end inertia cap:
+    # even if phase classifier still near/in, once clock passes window end and slope is flat/decelerating,
+    # suppress inertial warm tails unless there is explicit re-heating evidence.
+    if phase_now in {"near_window", "in_window", "post"}:
+        try:
+            latest_local_txt = str(metar_diag.get("latest_report_local") or "")
+            end_local_txt = str(primary_window.get("end_local") or "")
+            latest_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
+            end_dt = datetime.fromisoformat(end_local_txt) if end_local_txt else None
+            if latest_dt is not None and end_dt is not None:
+                if latest_dt.tzinfo is not None and end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=latest_dt.tzinfo)
+                elif latest_dt.tzinfo is None and end_dt.tzinfo is not None:
+                    latest_dt = latest_dt.replace(tzinfo=end_dt.tzinfo)
+            h_after_end = ((latest_dt - end_dt).total_seconds() / 3600.0) if (latest_dt and end_dt) else None
+        except Exception:
+            h_after_end = None
+
+        try:
+            t_now_end = float(metar_diag.get("latest_temp"))
+        except Exception:
+            t_now_end = None
+
+        decel_or_flat = (t_cons <= rt_weak) and (t_acc is None or t_acc <= 0.0)
+        rad_reheat = bool(
+            (rad_eff is not None and rad_eff >= rt_rad_recover)
+            and (rad_eff_tr is not None and rad_eff_tr >= max(0.02, rt_rad_recover_tr * 0.8))
+        )
+        dyn_reheat = bool(("暖平流" in line850) and (b_cons >= 0.8) and (t_cons >= 0.40))
+
+        if (
+            t_now_end is not None
+            and h_after_end is not None
+            and h_after_end >= 0.5
+            and decel_or_flat
+            and (not rad_reheat)
+            and (not dyn_reheat)
+        ):
+            end_add = 0.35
+            if "暖平流" in line850 and b_cons >= 0.6:
+                end_add += 0.10
+            if rad_eff is not None and rad_eff <= rt_rad_low:
+                end_add -= 0.05
+            end_add = max(0.20, min(0.60, end_add))
+            end_cap = t_now_end + end_add
+            if obs_max is not None:
+                end_cap = max(end_cap, float(obs_max) + 0.15)
+            hi = min(hi, end_cap)
+            lo = min(lo, hi - 0.2)
+            strict_late_cap = True
+            metar_diag["late_end_cap_applied"] = True
+
     # Post-window realized-peak guard:
     # once peak window is over, avoid optimistic "new high" tails unless there is clear rebound evidence.
     if phase_now == "post" and obs_max is not None:
@@ -4117,6 +4169,10 @@ def choose_section_text(
     # 晴空辐射日圆弧顶信号（防惯性高估）
     if bool(metar_diag.get("rounded_top_cap_applied")):
         focus.append((1.02, "• 实况斜率已走平/转弱（圆弧顶特征）→ 上沿再上修空间有限，优先防高估。"))
+
+    # 窗口已过后的惯性上冲抑制信号
+    if bool(metar_diag.get("late_end_cap_applied")):
+        focus.append((1.01, "• 峰值窗已过且斜率未再放大 → 继续大幅上冲概率偏低，优先防惯性高估。"))
 
     # 基于METAR多层云量 + 天气现象的有效辐射因子（0~1）
     if phase_now in {"near_window", "in_window"}:
