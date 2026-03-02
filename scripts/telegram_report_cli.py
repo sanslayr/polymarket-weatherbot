@@ -2267,13 +2267,13 @@ def _build_polymarket_section(
                     lo_u = _to_unit(fit_mu - z85 * fit_sigma)
                     hi_u = _to_unit(fit_mu + z85 * fit_sigma)
                     lines.append("  • 市场定价期望：")
-                    lines.append(f"    {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（约85%覆盖区间）。")
+                    lines.append(f"    {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（85%范围）。")
                 else:
                     mu_u = _to_unit(emp_mu)
                     lo_u = _to_unit(emp_qlo)
                     hi_u = _to_unit(emp_qhi)
                     lines.append("  • 市场定价期望：")
-                    lines.append(f"    {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（约80-90%覆盖区间）。")
+                    lines.append(f"    {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（85%范围）。")
 
                 if edge_share > 0.55:
                     edge_bins = sorted([(str(lbl), float(p)) for _c, lbl, p, _lo, _hi, e in wpts if e], key=lambda x: x[1], reverse=True)
