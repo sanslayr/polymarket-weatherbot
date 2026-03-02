@@ -2357,8 +2357,6 @@ def _build_polymarket_section(
     except Exception:
         display_rows = sorted(list(focus), key=lambda x: x[0])
 
-    show_lobster_reminder = any(_row_tag(r) for r in display_rows)
-
     expectation_lines: list[str] = []
     range_notes: list[str] = []
 
@@ -2541,10 +2539,6 @@ def _build_polymarket_section(
             lines.append(f"  • **{label}（{tag}）：Bid {bid_txt} | Ask {ask_txt}**")
         else:
             lines.append(f"  • {label}：Bid {bid_txt} | Ask {ask_txt}")
-
-    if show_lobster_reminder:
-        lines.append("")
-        lines.append("**🦞 龙虾我不能带单——真要准到离谱，这报告你也看不到🦞**")
 
     return "\n".join(lines)
 
