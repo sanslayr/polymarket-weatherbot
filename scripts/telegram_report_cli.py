@@ -1739,9 +1739,7 @@ def _build_polymarket_section(
         # 硬性剔除：已低于实况录得最高温的区间，不再可能结算命中。
         if obs_max is not None and hi < obs_max:
             continue
-        # 软剔除：明显低于当前温度太多的旧档位。
-        if t_now is not None and hi < t_now - 1.0:
-            continue
+        # keep all still-feasible bins based on observed daily max (no extra trim by latest instant temp)
         filtered.append((center, label, bid, ask, lo, hi))
 
     if not filtered:
@@ -2042,12 +2040,23 @@ def _build_polymarket_section(
             return "😇潜在Alpha"
         return ""
 
-    show_lobster_reminder = any(_row_tag(r) for r in focus)
+    display_rows = list(focus)
+    if obs_max is not None:
+        # User policy: display all market bins that are still thermally feasible
+        # relative to current observed daily max.
+        full_tail = [
+            r for r in filtered
+            if (r[5] >= float(obs_max)) and (not math.isinf(r[4]))
+        ]
+        if full_tail:
+            display_rows = sorted(full_tail, key=lambda x: x[0])
+
+    show_lobster_reminder = any(_row_tag(r) for r in display_rows)
 
     lines.append("**博弈区间**")
 
-    if len(focus) == 1:
-        only = focus[0]
+    if len(display_rows) == 1:
+        only = display_rows[0]
         bid_only = _px(only[2])
         ask_only = _px(only[3])
         if bid_only >= 0.98 or ask_only >= 0.98:
@@ -2132,7 +2141,7 @@ def _build_polymarket_section(
     except Exception:
         pass
 
-    for _c, label, bid, ask, _lo, _hi in focus:
+    for _c, label, bid, ask, _lo, _hi in display_rows:
         bid_txt = "None" if bid in (None, "") else str(bid)
         ask_txt = "None" if ask in (None, "") else str(ask)
         tag = _row_tag((_c, label, bid, ask, _lo, _hi))
