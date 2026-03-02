@@ -2103,6 +2103,22 @@ def _build_polymarket_section(
                         cmax = max(r[0] for r in base)
                         display_rows = [r for r in finite if cmin - 0.01 <= r[0] <= cmax + 0.01]
 
+                    # If market lower tail reaches the next lower bin, include one adjacent lower rung
+                    # to avoid "main band mentions 10.x but ladder starts at 11" mismatch.
+                    weight_map = {str(lbl): w for _c, lbl, w, _e in wpts_disp}
+                    if display_rows and finite:
+                        try:
+                            cmin_disp = min(r[0] for r in display_rows if not (math.isinf(r[4]) or math.isinf(r[5])))
+                            lowers = [r for r in finite if r[0] < cmin_disp - 0.01]
+                            if lowers:
+                                lo_row = lowers[-1]
+                                lo_w = float(weight_map.get(str(lo_row[1]), 0.0))
+                                near_main_band = lo_row[5] >= (show_lo - 0.6)
+                                if (near_main_band or lo_w >= 0.03) and all(str(lo_row[1]) != str(x[1]) for x in display_rows):
+                                    display_rows = [lo_row] + display_rows
+                        except Exception:
+                            pass
+
                     # include upper edge (e.g., 13°C or higher) when it has non-trivial weight.
                     edge_w = {lbl: w for _c, lbl, w, e in wpts_disp if e}
                     upper_edges = sorted([r for r in feasible_rows if (not math.isinf(r[4]) and math.isinf(r[5]))], key=lambda x: x[4])
