@@ -1339,6 +1339,14 @@ def metar_observation_block(
         except Exception:
             continue
 
+    temp_accel_2step = None
+    if len(trend_steps) >= 2:
+        try:
+            # positive: warming acceleration; negative: warming deceleration / rounded-top tendency
+            temp_accel_2step = float(trend_steps[0] - trend_steps[1])
+        except Exception:
+            temp_accel_2step = None
+
     t_trend_smooth = None
     if trend_steps:
         ws = [0.55, 0.30, 0.15]
@@ -1602,6 +1610,7 @@ def metar_observation_block(
         "cloud_trend": cloud_tr,
         "temp_trend_1step_c": t_trend,
         "temp_trend_smooth_c": t_trend_smooth,
+        "temp_accel_2step_c": temp_accel_2step,
         "metar_temp_quantized": _is_intish(latest.get("temp")) and (prev is None or _is_intish(prev.get("temp"))),
         "pressure_trend_1step_hpa": pressure_step,
         "wind_dir_change_deg": wind_dir_change,
@@ -3332,6 +3341,10 @@ def choose_section_text(
         t_cons = float((metar_diag.get("temp_trend_smooth_c") if metar_diag.get("temp_trend_smooth_c") is not None else metar_diag.get("temp_trend_1step_c")) or 0.0)
     except Exception:
         t_cons = 0.0
+    try:
+        t_acc = float(metar_diag.get("temp_accel_2step_c")) if metar_diag.get("temp_accel_2step_c") is not None else None
+    except Exception:
+        t_acc = None
 
     dir_delta = up_s - down_s
     consistency_shift = 0.0
@@ -3525,6 +3538,45 @@ def choose_section_text(
                     solar_plateau_cap = max(solar_plateau_cap, float(obs_max) + 0.35)
                 hi = min(hi, solar_plateau_cap)
                 lo = min(lo, hi - 0.2)
+
+    # Clear-sky rounded-top lock:
+    # on typical sunny-radiation days, once slope flattens and acceleration turns down near peak,
+    # avoid inertial warm tails (common over-forecast pattern).
+    if phase_now in {"near_window", "in_window"} and clear_sky_stable and (not precip_cooling) and (not precip_residual):
+        try:
+            latest_local_txt = str(metar_diag.get("latest_report_local") or "")
+            peak_local_txt = str(primary_window.get("peak_local") or "")
+            latest_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
+            peak_dt = datetime.fromisoformat(peak_local_txt) if peak_local_txt else None
+            if latest_dt is not None and peak_dt is not None:
+                if latest_dt.tzinfo is not None and peak_dt.tzinfo is None:
+                    peak_dt = peak_dt.replace(tzinfo=latest_dt.tzinfo)
+                elif latest_dt.tzinfo is None and peak_dt.tzinfo is not None:
+                    latest_dt = latest_dt.replace(tzinfo=peak_dt.tzinfo)
+            hleft_rt = max(0.0, (peak_dt - latest_dt).total_seconds() / 3600.0) if (latest_dt and peak_dt) else None
+        except Exception:
+            hleft_rt = None
+        try:
+            t_now_rt = float(metar_diag.get("latest_temp"))
+        except Exception:
+            t_now_rt = None
+
+        decel = (t_acc is not None and t_acc <= -0.25)
+        flat_or_down = t_cons <= 0.12
+        near_peak = (hleft_rt is None) or (hleft_rt <= 1.8)
+        if t_now_rt is not None and near_peak and (flat_or_down or (t_cons <= 0.22 and decel)):
+            add_rt = 0.55
+            if hleft_rt is not None and hleft_rt <= 1.0:
+                add_rt = 0.40
+            if "暖平流" in line850 and b_cons >= 0.9 and t_cons >= 0.10:
+                add_rt += 0.10
+            rounded_cap = t_now_rt + add_rt
+            if obs_max is not None:
+                rounded_cap = max(rounded_cap, float(obs_max) + 0.20)
+            hi = min(hi, rounded_cap)
+            lo = min(lo, hi - 0.2)
+            strict_late_cap = True
+            metar_diag["rounded_top_cap_applied"] = True
 
     # Quantized-METAR near-end guard:
     # many stations report integer-like temp steps; when close to window end, avoid reading a single +1C step
@@ -3752,6 +3804,10 @@ def choose_section_text(
             focus.append((0.95, "• 实况持续高于同小时模式（偏暖延续） → 最高温更偏上沿。"))
         elif t_bias <= -1.5:
             focus.append((0.95, "• 实况持续低于同小时模式（偏冷延续） → 最高温更偏下沿。"))
+
+    # 晴空辐射日圆弧顶信号（防惯性高估）
+    if bool(metar_diag.get("rounded_top_cap_applied")):
+        focus.append((1.02, "• 实况斜率已走平/转弱（圆弧顶特征）→ 上沿再上修空间有限，优先防高估。"))
 
     # 风场重排（给出具体方向场景）
     try:

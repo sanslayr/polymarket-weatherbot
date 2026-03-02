@@ -23,6 +23,9 @@ Last updated: 2026-03-02
   - commit: `11dafe7`
 - 窗口后再创新高冲突修复（post-window realized-peak guard）  
   - commit: `3a8a917`
+- 晴空圆弧顶锁高约束：
+  - 新增两步温度加速度信号（temp_accel_2step_c）
+  - clear-sky + 斜率走平/减弱 + 临近峰值 时，强化上沿压制，降低惯性高估
 
 ## 3) 云层/实况解析
 
