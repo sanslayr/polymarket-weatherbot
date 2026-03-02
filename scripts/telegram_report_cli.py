@@ -3460,6 +3460,30 @@ def choose_section_text(
     if q_cov is not None and q_cov < 0.6:
         allow_best_label = False
 
+    # Early/far-window + large model-vs-obs bias: suppress "most likely" to avoid false certainty.
+    try:
+        latest_local_txt = str(metar_diag.get("latest_report_local") or "")
+        peak_fused_txt = str(gate.get("peak_fused") or "")
+        latest_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
+        peak_dt = datetime.fromisoformat(peak_fused_txt) if peak_fused_txt else None
+        if latest_dt is not None and peak_dt is not None:
+            if latest_dt.tzinfo is not None and peak_dt.tzinfo is None:
+                peak_dt = peak_dt.replace(tzinfo=latest_dt.tzinfo)
+            elif latest_dt.tzinfo is None and peak_dt.tzinfo is not None:
+                latest_dt = latest_dt.replace(tzinfo=peak_dt.tzinfo)
+        h_to_peak = max(0.0, (peak_dt - latest_dt).total_seconds() / 3600.0) if (latest_dt and peak_dt) else None
+    except Exception:
+        h_to_peak = None
+
+    try:
+        t_bias_abs = abs(float(t_bias)) if t_bias is not None else 0.0
+    except Exception:
+        t_bias_abs = 0.0
+
+    if phase_now == "far":
+        if (h_to_peak is not None and h_to_peak >= 5.0 and t_bias_abs >= 1.5) or (h_to_peak is not None and h_to_peak >= 8.0):
+            allow_best_label = False
+
     try:
         poly_block = _build_polymarket_section(
             polymarket_event_url,
