@@ -2153,13 +2153,16 @@ def choose_section_text(
         txtx = str(extra)
 
         if _contains_any(txt850, ["暖平流", "冷平流", "平流"]):
-            s["advection"] += 1.0
+            s["advection"] += 0.95
         if _contains_any(txt500, ["槽", "抬升", "PVA", "涡度"]):
-            s["dynamic"] += 0.9
+            s["dynamic"] += 0.85
         if _contains_any(txtx, ["封盖", "压制", "湿层", "低云", "耦合偏弱"]):
-            s["stability"] += 1.0
+            s["stability"] += 0.9
         if _contains_any(txtx + txt850, ["锋", "锋生", "斜压"]):
-            s["baroclinic"] += 1.0
+            # text-only frontal cues are useful but should not dominate without object support
+            s["baroclinic"] += 0.55
+            if _contains_any(txt850, ["暖平流", "冷平流"]):
+                s["baroclinic"] += 0.15
         if _contains_any(txtx + txt850, ["风切", "切换"]):
             s["shear"] += 0.7
 
@@ -2174,7 +2177,16 @@ def choose_section_text(
             if "dry_intrusion" in t or "subsidence" in t:
                 s["stability"] += conf_boost
             if "baroclinic" in t or "front" in t:
-                s["baroclinic"] += conf_boost
+                b_boost = conf_boost
+                try:
+                    dmin = float(o.get("distance_km_min") or 0.0)
+                    if dmin >= 700:
+                        b_boost *= 0.75
+                except Exception:
+                    pass
+                if str(o.get("confidence") or "").lower() == "low":
+                    b_boost *= 0.85
+                s["baroclinic"] += b_boost
             if "shear" in t:
                 s["shear"] += conf_boost
 
@@ -2190,9 +2202,24 @@ def choose_section_text(
             if "dry_intrusion" in t or "subsidence" in t:
                 s["stability"] += w
             if "baroclinic" in t or "front" in t:
-                s["baroclinic"] += w
+                wb = w
+                try:
+                    dmin = float(c.get("distance_km_min") or 0.0)
+                    if dmin >= 700:
+                        wb *= 0.8
+                except Exception:
+                    pass
+                s["baroclinic"] += wb
             if "shear" in t:
                 s["shear"] += w
+
+        # low synoptic coverage: damp baroclinic/shear textual dominance
+        try:
+            if cov is not None and float(cov) < 0.65:
+                s["baroclinic"] *= 0.86
+                s["shear"] *= 0.9
+        except Exception:
+            pass
 
         return s
 
@@ -2516,6 +2543,11 @@ def choose_section_text(
             syn_lines.append(f"- **主导系统**：{_regime_label(r1)}（{regime}）。")
         else:
             syn_lines.append(f"- **主导系统**：{regime}（{desc}）。")
+
+        front_nature = _front_plain_desc(otype)
+        if front_nature and ("baroclinic" in otype or "front" in otype or r1 == "baroclinic"):
+            syn_lines.append(f"- **锋面性质**：{front_nature}。")
+
         # 2) 落地影响（方向 + 触发 + 交互）
         if impact == "station_relevant":
             scope_txt = "系统近站，影响将直接落在峰值窗"
@@ -2535,6 +2567,11 @@ def choose_section_text(
             syn_lines.append(f"- **主导系统**：{_regime_label(r1)}（结构未闭合，暂不立3D主系统）。")
         else:
             syn_lines.append("- **主导系统**：当前未识别到可稳定追踪的同一套分层系统。")
+
+        if r1 == "baroclinic":
+            fn = _front_plain_desc("")
+            if fn:
+                syn_lines.append(f"- **锋面性质**：{fn}。")
 
         tail = f"。当前组合关系：{inter_note}" if inter_note else ""
         syn_lines.append(f"- **落地影响**：{direction_txt}；短时以实况触发为主。建议：{trigger_txt}{tail}。")
