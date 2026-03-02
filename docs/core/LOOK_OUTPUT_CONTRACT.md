@@ -20,7 +20,7 @@ Last updated: 2026-03-02
 ## 3) Header rules
 - 标题：`📍 ICAO (City) | lat/lon (+地形标签)`
 - 时间：UTC + Local
-- 头部风险提示固定文案（前置空行）：`🦞龙虾学习中，请多指教🦞（不作为交易建议）`
+- 头部风险提示固定文案（前置空行 + 加粗）：`**🦞龙虾学习中🦞不构成交易建议**`
 - `near_window/in_window` 可启用 compact header（隐藏噪音行）
 
 ## 4) Synoptic rules
