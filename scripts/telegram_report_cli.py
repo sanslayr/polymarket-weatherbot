@@ -2056,17 +2056,19 @@ def _build_polymarket_section(
     if obs_floor is None:
         obs_floor = obs_max
 
+    # Market feasibility filtering uses observed realized value (not quantization interval).
+    market_floor = obs_max if obs_max is not None else obs_floor
+
     filtered = []
     for center, label, bid, ask, lo, hi in parsed:
-        # User policy: ignore bins whose label-center is below observed daily-max feasible floor.
-        # For quantized non-US METAR (e.g., -5°C), floor uses bin lower edge (-5.5°C).
-        if obs_floor is not None and center < float(obs_floor):
+        # User policy: ignore bins whose label-center is below observed daily max.
+        if market_floor is not None and center < float(market_floor):
             continue
         filtered.append((center, label, bid, ask, lo, hi))
 
     if not filtered:
-        if obs_floor is not None:
-            filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed if c >= float(obs_floor)]
+        if market_floor is not None:
+            filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed if c >= float(market_floor)]
         else:
             filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed]
     if not filtered:
