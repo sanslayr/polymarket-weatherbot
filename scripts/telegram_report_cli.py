@@ -1977,7 +1977,7 @@ def _build_polymarket_section(
             obs_max = None
 
     resolved_override = False
-    resolved_below_obs = False
+    resolved_winner_label = None
     filtered = []
     for center, label, bid, ask, lo, hi in parsed:
         # User policy: ignore bins whose label-center is below observed daily max.
@@ -1993,8 +1993,7 @@ def _build_polymarket_section(
             best_res = sorted(resolved_rows, key=lambda x: max(_px(x[2]), _px(x[3])), reverse=True)[0]
             filtered = [best_res]
             resolved_override = True
-            if obs_max is not None and float(best_res[0]) < float(obs_max):
-                resolved_below_obs = True
+            resolved_winner_label = str(best_res[1])
         elif obs_max is not None:
             filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed if c >= float(obs_max)]
         else:
@@ -2391,8 +2390,13 @@ def _build_polymarket_section(
         bid_only = _px(only[2])
         ask_only = _px(only[3])
         settled_single = (bid_only >= 0.98 or ask_only >= 0.98)
-        if settled_single:
+        if settled_single and (not resolved_override):
             range_notes.append("  • ✅ 已定局：当前仅剩单一高置信可交易区间。")
+            try:
+                settled_center = float(only[0])
+            except Exception:
+                settled_center = None
+        elif settled_single:
             try:
                 settled_center = float(only[0])
             except Exception:
@@ -2400,10 +2404,7 @@ def _build_polymarket_section(
     if mismatch:
         range_notes.append("  • 注：市场档位与气象主带存在错位，已按最近 below/above 边缘区间回退展示。")
     if resolved_override:
-        if resolved_below_obs:
-            range_notes.append("  • ✅ 市场已结算（Resolved）：盘口档位整体偏低，已结算至最高档。")
-        else:
-            range_notes.append("  • ✅ 市场已结算（Resolved）：当前显示为已结算胜出档位。")
+        range_notes.append(f"  • ✅ 市场已结算（Resolved）：{resolved_winner_label or '已结算胜出档位'}")
 
     # Market-vs-forecast distribution cues (use full filtered market set, not only displayed bins).
     try:
