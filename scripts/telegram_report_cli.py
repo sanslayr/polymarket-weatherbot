@@ -1730,6 +1730,17 @@ def metar_observation_block(
         if cands:
             obs_max_time_local = max(cands)
 
+    obs_max_interval_lo = obs_max_temp
+    obs_max_interval_hi = obs_max_temp
+    try:
+        if obs_max_temp is not None and unit == "C" and _is_intish(obs_max_temp):
+            # Non-US METAR temperatures are commonly integer °C reports; treat as quantized bin.
+            obs_max_interval_lo = float(obs_max_temp) - 0.50
+            obs_max_interval_hi = float(obs_max_temp) + 0.49
+    except Exception:
+        obs_max_interval_lo = obs_max_temp
+        obs_max_interval_hi = obs_max_temp
+
     cloud_tr = _cloud_trend(latest, prev) if prev else ""
     peak_lock_confirmed = False
     try:
@@ -1772,6 +1783,8 @@ def metar_observation_block(
         "wind_speed_trend_1step_kt": wind_speed_step,
         "peak_lock_confirmed": peak_lock_confirmed,
         "observed_max_temp_c": obs_max_temp,
+        "observed_max_interval_lo_c": obs_max_interval_lo,
+        "observed_max_interval_hi_c": obs_max_interval_hi,
         "observed_max_time_local": obs_max_time_local.isoformat() if obs_max_time_local else None,
     }
 
@@ -2025,23 +2038,30 @@ def _build_polymarket_section(
         t_now = None
     peak = float(primary_window.get("peak_temp_c") or 0.0)
     obs_max = None
+    obs_floor = None
     if metar_diag:
         try:
             obs_max = float(metar_diag.get("observed_max_temp_c")) if metar_diag.get("observed_max_temp_c") is not None else None
         except Exception:
             obs_max = None
+        try:
+            obs_floor = float(metar_diag.get("observed_max_interval_lo_c")) if metar_diag.get("observed_max_interval_lo_c") is not None else None
+        except Exception:
+            obs_floor = None
+    if obs_floor is None:
+        obs_floor = obs_max
 
     filtered = []
     for center, label, bid, ask, lo, hi in parsed:
-        # User policy: ignore bins whose label-center is below observed daily max.
-        # (stricter than thermal-overlap rule)
-        if obs_max is not None and center < float(obs_max):
+        # User policy: ignore bins whose label-center is below observed daily-max feasible floor.
+        # For quantized non-US METAR (e.g., -5°C), floor uses bin lower edge (-5.5°C).
+        if obs_floor is not None and center < float(obs_floor):
             continue
         filtered.append((center, label, bid, ask, lo, hi))
 
     if not filtered:
-        if obs_max is not None:
-            filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed if c >= float(obs_max)]
+        if obs_floor is not None:
+            filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed if c >= float(obs_floor)]
         else:
             filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed]
     if not filtered:
@@ -2674,6 +2694,12 @@ def choose_section_text(
         lo_u = _to_unit(float(lo_c))
         hi_u = _to_unit(float(hi_c))
         return f"{lo_u:.1f}~{hi_u:.1f}°{unit}"
+
+    def _is_intish_local(v: Any) -> bool:
+        try:
+            return abs(float(v) - round(float(v))) < 0.05
+        except Exception:
+            return False
 
     def _solar_clear_score(lat_deg: float, lon_deg: float, dt_local: datetime) -> float:
         """Return simplified clear-sky radiation score in [0,1] from solar geometry.
@@ -3485,6 +3511,25 @@ def choose_section_text(
     except Exception:
         obs_max = None
 
+    obs_floor = obs_max
+    obs_ceil = obs_max
+    try:
+        if metar_diag.get("observed_max_interval_lo_c") is not None and metar_diag.get("observed_max_interval_hi_c") is not None:
+            obs_floor = float(metar_diag.get("observed_max_interval_lo_c"))
+            obs_ceil = float(metar_diag.get("observed_max_interval_hi_c"))
+    except Exception:
+        obs_floor = obs_max
+        obs_ceil = obs_max
+
+    # Fallback: non-US stations usually report integer °C in METAR; treat observed integer as a bin.
+    if obs_max is not None and (obs_floor is None or obs_ceil is None):
+        obs_floor, obs_ceil = obs_max, obs_max
+    if obs_max is not None and unit == "C" and _is_intish_local(obs_max) and obs_floor == obs_ceil:
+        obs_floor = float(obs_max) - 0.50
+        obs_ceil = float(obs_max) + 0.49
+    if obs_floor is not None and obs_ceil is not None and obs_floor > obs_ceil:
+        obs_floor, obs_ceil = obs_ceil, obs_floor
+
     gate = classify_window_phase(primary_window, metar_diag)
     phase_now = str(gate.get('phase') or 'unknown')
 
@@ -3845,9 +3890,9 @@ def choose_section_text(
 
     lo = center - left_hw
     hi = center + right_hw
-    if obs_max is not None:
-        # Physical consistency: daily maximum cannot be below already-observed daily maximum.
-        lo = max(lo, float(obs_max))
+    if obs_floor is not None:
+        # Physical consistency with METAR quantization: daily maximum cannot be below observed-bin lower edge.
+        lo = max(lo, float(obs_floor))
 
     # anti-collapse guard near peak: avoid over-compressing main band when warm-support evidence is aligned.
     sf_local = _sounding_factor_pack()
@@ -4239,9 +4284,9 @@ def choose_section_text(
                 hi = min(hi, far_cap_hi)
                 lo = min(lo, hi - 0.2)
 
-    # Physical consistency: daily Tmax cannot be below already observed daily max.
-    if obs_max is not None:
-        lo = max(lo, float(obs_max) - 0.05)
+    # Physical consistency: daily Tmax cannot be below observed-bin lower edge.
+    if obs_floor is not None:
+        lo = max(lo, float(obs_floor))
         hi = max(hi, lo + 0.2)
 
     def _soft_snap(v: float) -> float:
@@ -4331,13 +4376,24 @@ def choose_section_text(
     else:
         peak_range_block.append(f"- **{_fmt_range(disp_lo, disp_hi)}**（{window_label} {window_txt}）")
     if compact_settled_mode and obs_max is not None:
-        settle_lo = _soft_snap(max(float(obs_max), lo))
-        settle_up = 0.25
-        if ("暖平流" in line850) and b_cons >= 0.55:
-            settle_up = 0.35
-        if bool(metar_diag.get("nocturnal_reheat_signal")):
-            settle_up = max(settle_up, 0.40)
-        settle_hi = _soft_snap(min(hi, max(settle_lo + 0.10, float(obs_max) + settle_up)))
+        if (
+            unit == "C"
+            and obs_floor is not None
+            and obs_ceil is not None
+            and (obs_ceil - obs_floor) >= 0.30
+        ):
+            # Quantized METAR anchor: e.g. observed -5°C means approx [-5.5, -4.51]°C.
+            settle_lo = _soft_snap(float(obs_floor))
+            settle_hi = _soft_snap(max(settle_lo + 0.10, float(obs_ceil)))
+        else:
+            settle_lo = _soft_snap(max(float(obs_floor if obs_floor is not None else obs_max), lo))
+            settle_up = 0.25
+            if ("暖平流" in line850) and b_cons >= 0.55:
+                settle_up = 0.35
+            if bool(metar_diag.get("nocturnal_reheat_signal")):
+                settle_up = max(settle_up, 0.40)
+            settle_hi = _soft_snap(min(hi, max(settle_lo + 0.10, float(obs_max) + settle_up)))
+
         peak_range_block = [
             "🌡️ **可能最高温区间（仅供参考）**",
             f"- **{_fmt_range(settle_lo, settle_hi)}**（按已观测最高温锚定；峰值窗已过）",
@@ -4551,9 +4607,13 @@ def choose_section_text(
             ]
 
     if compact_settled_mode and obs_max is not None:
+        if obs_floor is not None and obs_ceil is not None and (obs_ceil - obs_floor) >= 0.30:
+            anchor_txt = _fmt_range(float(obs_floor), float(obs_ceil))
+        else:
+            anchor_txt = _fmt_temp(float(obs_max))
         vars_block = [
             "⚠️ **关注变量**（窗口后）",
-            f"• 峰值窗基本已过，最高温大概率在已观测高点附近收敛（当前锚点 {_fmt_temp(float(obs_max))}）。",
+            f"• 峰值窗基本已过，最高温大概率在已观测高点附近收敛（当前锚点 {anchor_txt}）。",
         ]
 
     # 低置信度时不打“最有可能”标签，避免误导
