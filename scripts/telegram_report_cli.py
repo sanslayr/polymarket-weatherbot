@@ -1625,6 +1625,7 @@ def _build_polymarket_section(
     metar_diag: dict[str, Any] | None = None,
     range_hint: dict[str, float] | None = None,
     allow_best_label: bool = True,
+    allow_alpha_label: bool = True,
 ) -> str:
     slug = polymarket_event_url.rstrip('/').split('/')[-1]
     r = requests.get("https://gamma-api.polymarket.com/events", params={"limit": 1, "slug": slug}, timeout=5)
@@ -1982,8 +1983,10 @@ def _build_polymarket_section(
     def _row_tag(row: tuple[float, str, Any, Any, float, float]) -> str:
         _c, label, bid, ask, _lo, _hi = row
         ask_v = _px(ask)
-        if best_label and label == best_label:
+        if allow_best_label and best_label and label == best_label:
             return "👍最有可能"
+        if not allow_alpha_label:
+            return ""
         s = score_map.get((label, str(bid), str(ask)), 0.0)
         w = _weather_score(row)
         if ask_v > 0 and ask_v <= 0.15 and w >= 0.12 and s >= 0.22:
@@ -3484,6 +3487,8 @@ def choose_section_text(
         if (h_to_peak is not None and h_to_peak >= 5.0 and t_bias_abs >= 1.5) or (h_to_peak is not None and h_to_peak >= 8.0):
             allow_best_label = False
 
+    allow_alpha_label = bool(allow_best_label)
+
     try:
         poly_block = _build_polymarket_section(
             polymarket_event_url,
@@ -3496,6 +3501,7 @@ def choose_section_text(
                 "core_hi": float(core_hi),
             },
             allow_best_label=allow_best_label,
+            allow_alpha_label=allow_alpha_label,
         )
     except Exception:
         poly_block = "📈 **Polymarket 盘口与博弈**\n盘口读取异常，请稍后重试。"
