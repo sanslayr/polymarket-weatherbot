@@ -2112,12 +2112,19 @@ def _build_polymarket_section(
 
     lines.append("**博弈区间**")
 
+    settled_single = False
+    settled_center = None
     if len(display_rows) == 1:
         only = display_rows[0]
         bid_only = _px(only[2])
         ask_only = _px(only[3])
-        if bid_only >= 0.98 or ask_only >= 0.98:
+        settled_single = (bid_only >= 0.98 or ask_only >= 0.98)
+        if settled_single:
             lines.append("  • ✅ 已定局：当前仅剩单一高置信可交易区间。")
+            try:
+                settled_center = float(only[0])
+            except Exception:
+                settled_center = None
     if mismatch:
         lines.append("  • 注：市场档位与气象主带存在错位，已按最近 below/above 边缘区间回退展示。")
 
@@ -2131,7 +2138,10 @@ def _build_polymarket_section(
 
         sym = "°F" if use_unit == "F" else "°C"
 
-        pts_full: list[tuple[float, str, float, bool]] = []
+        if settled_single and settled_center is not None:
+            s_u = _to_unit(settled_center)
+            lines.append(f"  • 市场定价期望：{s_u:.1f}{sym}｜{s_u:.1f}~{s_u:.1f}{sym}（近似定局）。")
+        pts_full: list[tuple[float, str, float, float, float, bool]] = []
         for c, lbl, b, a, lo_i, hi_i in filtered:
             bidv = _px(b)
             askv = _px(a)
@@ -2141,55 +2151,91 @@ def _build_polymarket_section(
                 p = max(bidv, askv)
             if p > 0:
                 is_edge = bool(math.isinf(lo_i) or math.isinf(hi_i))
-                pts_full.append((float(c), str(lbl), float(p), is_edge))
+                pts_full.append((float(c), str(lbl), float(p), float(lo_i), float(hi_i), is_edge))
 
-        if len(pts_full) >= 2:
-            tot = sum(p for _c, _l, p, _e in pts_full)
+        if (not settled_single) and len(pts_full) >= 2:
+            tot = sum(p for _c, _l, p, _lo, _hi, _e in pts_full)
             if tot > 0:
-                wpts = sorted([(c, l, p / tot, e) for c, l, p, e in pts_full], key=lambda z: z[0])
-                m_center = sum(c * p for c, _l, p, _e in wpts)
-
-                # top priced bins by mid (helps explain 12/13+ style concentration)
-                top = sorted(wpts, key=lambda z: z[2], reverse=True)[:3]
-                if top:
-                    top_txt = " / ".join([f"{lbl}({w*100:.0f}%)" for _c, lbl, w, _e in top])
-                    lines.append(f"  • 市场定价前列（按mid权重）：{top_txt}。")
+                wpts = sorted([(c, l, p / tot, lo, hi, e) for c, l, p, lo, hi, e in pts_full], key=lambda z: z[0])
 
                 def _wq(q: float) -> float:
                     acc = 0.0
-                    for c, _l, p, _e in wpts:
+                    for c, _l, p, _lo, _hi, _e in wpts:
                         acc += p
                         if acc >= q:
                             return c
                     return wpts[-1][0]
 
-                q25 = _wq(0.25)
-                q75 = _wq(0.75)
+                emp_mu = sum(c * p for c, _l, p, _lo, _hi, _e in wpts)
+                emp_q25 = _wq(0.25)
+                emp_q75 = _wq(0.75)
+                edge_share = sum(p for _c, _l, p, _lo, _hi, e in wpts if e)
 
-                edge_share = sum(p for _c, _l, p, e in wpts if e)
-                m_u = _to_unit(m_center)
-                q25_u = _to_unit(q25)
-                q75_u = _to_unit(q75)
-                # Always show market implied expectation/range (normalized display).
-                lines.append(f"  • 市场隐含期望约 {m_u:.1f}{sym}，隐含主带约 {q25_u:.1f}~{q75_u:.1f}{sym}。")
+                # Normal-fit expectation/range (helps when higher/lower edge bins carry non-trivial mass).
+                fit_ok = False
+                fit_mu = emp_mu
+                fit_sigma = max(0.35, math.sqrt(max(0.0, sum(((c - emp_mu) ** 2) * p for c, _l, p, _lo, _hi, _e in wpts))))
+
+                try:
+                    sqrt2 = math.sqrt(2.0)
+
+                    def _ncdf(x: float, mu: float, sig: float) -> float:
+                        if sig <= 0:
+                            return 0.0
+                        z = (x - mu) / sig
+                        return 0.5 * (1.0 + math.erf(z / sqrt2))
+
+                    def _pmass(lo: float, hi: float, mu: float, sig: float) -> float:
+                        a = 0.0 if lo == -math.inf else _ncdf(lo, mu, sig)
+                        b = 1.0 if hi == math.inf else _ncdf(hi, mu, sig)
+                        return max(0.0, b - a)
+
+                    cmin = min(c for c, _l, _p, _lo, _hi, _e in wpts)
+                    cmax = max(c for c, _l, _p, _lo, _hi, _e in wpts)
+                    base_sig = max(0.5, fit_sigma)
+                    mu_lo = cmin - max(2.0, 2.0 * base_sig)
+                    mu_hi = cmax + max(2.0, 2.0 * base_sig)
+
+                    best_loss = 1e18
+                    best = None
+                    for i in range(41):
+                        mu = mu_lo + (mu_hi - mu_lo) * (i / 40.0)
+                        for j in range(36):
+                            sig = 0.35 + (4.5 - 0.35) * (j / 35.0)
+                            masses = [_pmass(lo, hi, mu, sig) for _c, _l, _p, lo, hi, _e in wpts]
+                            msum = sum(masses)
+                            if msum <= 1e-9:
+                                continue
+                            preds = [m / msum for m in masses]
+                            loss = 0.0
+                            for (_c, _l, p, _lo, _hi, _e), pr in zip(wpts, preds):
+                                loss += ((pr - p) ** 2) / max(0.01, p)
+                            if loss < best_loss:
+                                best_loss = loss
+                                best = (mu, sig)
+                    if best is not None:
+                        fit_mu, fit_sigma = best
+                        fit_ok = True
+                except Exception:
+                    fit_ok = False
+
+                if fit_ok:
+                    mu_u = _to_unit(fit_mu)
+                    lo_u = _to_unit(fit_mu - fit_sigma)
+                    hi_u = _to_unit(fit_mu + fit_sigma)
+                    lines.append(f"  • 市场定价期望：{mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（68%置信区间，正态拟合）。")
+                else:
+                    mu_u = _to_unit(emp_mu)
+                    lo_u = _to_unit(emp_q25)
+                    hi_u = _to_unit(emp_q75)
+                    lines.append(f"  • 市场定价期望：{mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（50%概率区间）。")
+
                 if edge_share > 0.55:
-                    lines.append(f"  • 注：边缘档位占比较高（约 {edge_share*100:.0f}%），上述隐含期望参考性偏弱。")
-
-                fc_lo = float(core_lo)
-                fc_hi = float(core_hi)
-                fc_center = 0.5 * (fc_lo + fc_hi)
-                gap = m_center - fc_center
-
-                ov = max(0.0, min(q75, fc_hi) - max(q25, fc_lo))
-                spread_m = max(0.0, q75 - q25)
-                base = max(0.3, spread_m)
-                ov_ratio = ov / base
-
-                # Deviation alert intentionally muted for now (operator preference):
-                # keep expectation/range visible without extra divergence warning line.
+                    lines.append(f"  • 注：边缘档位占比较高（约 {edge_share*100:.0f}%），上述期望参考性偏弱。")
 
                 # explicit hot-tail cue above forecast core upper bound
-                hot_tail = sum(p for c, _l, p, _e in wpts if c >= (fc_hi + 0.5))
+                fc_hi = float(core_hi)
+                hot_tail = sum(p for c, _l, p, _lo, _hi, _e in wpts if c >= (fc_hi + 0.5))
                 if hot_tail >= 0.18:
                     lines.append(f"  • 提示：市场对更高温尾部定价不低（≥{_to_unit(fc_hi + 0.5):.1f}{sym} 合计约 {hot_tail*100:.0f}%）。")
     except Exception:
