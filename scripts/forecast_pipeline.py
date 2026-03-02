@@ -201,7 +201,20 @@ def build_forecast_decision(
     extra = None
     s700 = str(diag700.get("summary") or "")
     if s700 and "干层" in s700:
-        extra = "700hPa 干空气偏明显：云开则升温加速，云不开则作用难落地"
+        s700_scope = str(diag700.get("dry_intrusion_scope") or "")
+        s700_impact = str(diag700.get("impact") or "")
+        snd_q = str(((snd.get("thermo") or {}).get("quality")) or "") if isinstance(snd, dict) else ""
+
+        if s700_impact:
+            extra = f"700hPa：{s700_impact}"
+        else:
+            extra = "700hPa 干空气偏明显：云开则升温加速，云不开则作用难落地"
+
+        if s700_scope in {"peripheral", "remote"}:
+            extra = extra + "（距离较远，按背景加分处理）"
+        if snd_q == "missing_profile" and s700_scope != "near":
+            extra = extra + "（本站探空剖面缺测，未作本地湿干结构确认）"
+
     elif s700 and ("湿层" in s700 or "约束" in s700):
         extra = "700hPa 湿层约束偏强：低云更易维持，上沿更易受压"
     elif diag925.get("summary"):
@@ -366,8 +379,10 @@ def load_or_build_forecast_decision(
     _log("forecast.cache_read", t)
     synoptic_error = None
 
+    force_rebuild = str(os.getenv("FORECAST_FORCE_REBUILD", "0") or "0") in {"1", "true", "yes", "on"}
+
     synoptic = {"scale_summary": {"synoptic": {"systems": []}}}
-    if cached:
+    if cached and (not force_rebuild):
         try:
             cached.setdefault("quality", {})["source_state"] = "cache-hit"
         except Exception:
