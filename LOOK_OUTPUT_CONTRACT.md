@@ -1,0 +1,64 @@
+# /look Output Contract (current)
+
+Last updated: 2026-03-02
+
+## 1) Scope
+- Commands: `/look`, `/lookhelp`
+- Channel: Telegram（群聊/私聊一致）
+
+## 2) Hard output rules
+1. **单条最终消息**（禁止预告/占位）
+2. 结构顺序固定：
+   1) 环流背景
+   2) METAR 实况
+   3) 最高温区间
+   4) 关注变量
+   5) Polymarket
+   6) 链接
+3. 口径：先结论后证据；人话优先；去机械模板
+
+## 3) Header rules
+- 标题：`📍 ICAO (City) | lat/lon (+地形标签)`
+- 时间：UTC + Local
+- `near_window/in_window` 可启用 compact header（隐藏噪音行）
+
+## 4) Synoptic rules
+- 主导系统 + 落地影响必须给“方向性结论”。
+- 关键证据按“有信号才显示”：
+  - 850 通常保留
+  - 700/500 仅在有判别力时展示
+  - 过滤泛化 boilerplate 句
+
+## 5) METAR block rules
+- 顶部保留“今日已观测最高温（时间）”。
+- 最新报标题内显示上一报时间。
+- 风：需要写与上一报相比的变化（转向/风速增减）。
+- 云：写全层结构，并给上一报全层对比（新增/消退/重排/稳定）。
+- 天气现象：保留原码并尽量给中文释义（例：`-RA（小雨）`）。
+
+## 6) Tmax interval rules
+- 形式：`主带区间 + 条件尾部`（合并在同一行表达）
+- 约束优先级：
+  - 低云持续压制
+  - 降水/雨后残余冷却
+  - 量化 METAR 台阶风险
+  - 午后平台期太阳辐射边际下降
+  - post-window 已观测高点守高逻辑
+- `post` 阶段应避免“文案说已定、区间却给大新高尾巴”的冲突。
+
+## 7) Post-window messaging rules
+- 若全天前段已出高点：
+  - 关注变量优先回答“是否还能反超前高”
+  - 应给“还差多少°C”的门槛语句
+  - 同时给支持/不支持反超的条件（云、雨、斜率、风场）
+
+## 8) Market rules
+- 市场日期按站点 local date 选取。
+- 档位解析必须兼容 F/C 与范围桶（如 `42-43F`）。
+- 标签规则 forecast-first：
+  - `最有可能`：天气一致性优先
+  - `潜在Alpha`：需满足最小天气一致性门槛
+
+## 9) Unit rules
+- 美国站点（ICAO `K*`）：Tmax 区间默认显示 °F
+- 其余站点：默认显示 °C
