@@ -1993,7 +1993,7 @@ def _build_polymarket_section(
         return ""
 
     if any(_row_tag(r) for r in focus):
-        lines.append("🦞 别让龙虾替你下单——真要准到离谱，这报告你也看不到")
+        lines.append("**🦞 别让龙虾替你下单——真要准到离谱，这报告你也看不到🦞**")
 
     lines.append("**博弈区间**")
 
