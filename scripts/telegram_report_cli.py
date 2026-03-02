@@ -1739,10 +1739,52 @@ def metar_observation_block(
     routine_cadence_min = None
     recent_interval_min = None
     speci_active = False
+    speci_count_24h = 0
+    report_count_24h = 0
+    speci_ratio_24h = 0.0
+    rapid_temp_jump_count_24h = 0
+    rapid_wind_jump_count_24h = 0
+    wx_transition_count_24h = 0
     try:
         obs_local: list[tuple[datetime, str]] = []
         for x in series:
             obs_local.append((_metar_obs_time_utc(x).astimezone(tz), str(x.get("rawOb") or "")))
+
+        report_count_24h = len(obs_local)
+        speci_count_24h = sum(1 for _dt, raw in obs_local if str(raw).upper().startswith("SPECI "))
+        speci_ratio_24h = round(float(speci_count_24h) / float(max(1, report_count_24h)), 3)
+
+        for i in range(1, len(series)):
+            cur = series[i]
+            pre = series[i - 1]
+            try:
+                if abs(float(cur.get("temp", 0)) - float(pre.get("temp", 0))) >= 1.2:
+                    rapid_temp_jump_count_24h += 1
+            except Exception:
+                pass
+
+            try:
+                ws_cur = float(cur.get("wspd", 0)) if cur.get("wspd") not in (None, "") else None
+                ws_pre = float(pre.get("wspd", 0)) if pre.get("wspd") not in (None, "") else None
+                wd_cur = float(cur.get("wdir", 0)) if cur.get("wdir") not in (None, "", "VRB") else None
+                wd_pre = float(pre.get("wdir", 0)) if pre.get("wdir") not in (None, "", "VRB") else None
+                ws_jump = abs(ws_cur - ws_pre) if (ws_cur is not None and ws_pre is not None) else 0.0
+                wd_jump = 0.0
+                if wd_cur is not None and wd_pre is not None:
+                    a = abs(wd_cur - wd_pre) % 360.0
+                    wd_jump = min(a, 360.0 - a)
+                if ws_jump >= 6.0 or wd_jump >= 50.0:
+                    rapid_wind_jump_count_24h += 1
+            except Exception:
+                pass
+
+            try:
+                wx_cur = _wx_state(cur.get("wxString") or cur.get("wx") or "")
+                wx_pre = _wx_state(pre.get("wxString") or pre.get("wx") or "")
+                if wx_cur != wx_pre and not (wx_cur == "none" and wx_pre == "none"):
+                    wx_transition_count_24h += 1
+            except Exception:
+                pass
 
         diffs_min: list[float] = []
         for i in range(1, len(obs_local)):
@@ -1772,6 +1814,12 @@ def metar_observation_block(
         routine_cadence_min = None
         recent_interval_min = None
         speci_active = False
+        speci_count_24h = 0
+        report_count_24h = 0
+        speci_ratio_24h = 0.0
+        rapid_temp_jump_count_24h = 0
+        rapid_wind_jump_count_24h = 0
+        wx_transition_count_24h = 0
 
     cloud_tr = _cloud_trend(latest, prev) if prev else ""
     peak_lock_confirmed = False
@@ -1825,7 +1873,26 @@ def metar_observation_block(
     except Exception:
         speci_likely_score = 0.0
 
-    speci_likely = bool((not speci_active) and (speci_likely_score >= 1.35))
+    speci_likely_threshold = 1.35
+    try:
+        if speci_ratio_24h >= 0.10:
+            speci_likely_threshold -= 0.12
+        elif speci_ratio_24h >= 0.05:
+            speci_likely_threshold -= 0.07
+        elif report_count_24h >= 20 and speci_ratio_24h <= 0.01:
+            speci_likely_threshold += 0.05
+
+        if rapid_temp_jump_count_24h >= 4 and speci_count_24h == 0:
+            speci_likely_threshold += 0.08
+        if wx_transition_count_24h >= 3:
+            speci_likely_threshold -= 0.05
+        if routine_cadence_min is not None and routine_cadence_min >= 50 and speci_count_24h >= 1:
+            speci_likely_threshold -= 0.05
+    except Exception:
+        pass
+    speci_likely_threshold = max(1.10, min(1.55, float(speci_likely_threshold)))
+
+    speci_likely = bool((not speci_active) and (speci_likely_score >= speci_likely_threshold))
 
     return "\n".join(lines), {
         "latest_report_utc": _metar_obs_time_utc(latest).isoformat().replace('+00:00', 'Z'),
@@ -1862,6 +1929,13 @@ def metar_observation_block(
         "metar_speci_active": speci_active,
         "metar_speci_likely": speci_likely,
         "metar_speci_likely_score": round(speci_likely_score, 2),
+        "metar_speci_likely_threshold": round(speci_likely_threshold, 2),
+        "metar_speci_count_24h": int(speci_count_24h),
+        "metar_speci_ratio_24h": float(speci_ratio_24h),
+        "metar_report_count_24h": int(report_count_24h),
+        "metar_rapid_temp_jump_count_24h": int(rapid_temp_jump_count_24h),
+        "metar_rapid_wind_jump_count_24h": int(rapid_wind_jump_count_24h),
+        "metar_wx_transition_count_24h": int(wx_transition_count_24h),
         "peak_lock_confirmed": peak_lock_confirmed,
         "observed_max_temp_c": obs_max_temp,
         "observed_max_interval_lo_c": obs_max_interval_lo,
