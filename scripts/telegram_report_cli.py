@@ -1929,7 +1929,7 @@ def _build_polymarket_section(
             return 0.0
 
     parsed: list[tuple[float, str, Any, Any, float, float]] = []
-    resolved_rows: list[tuple[float, str, Any, Any, float, float]] = []
+    resolved_rows: list[tuple[float, tuple[float, str, Any, Any, float, float]]] = []
     for m in markets:
         iv = _poly_parse_interval(str(m.get("slug", "")))
         if not iv:
@@ -1950,12 +1950,27 @@ def _build_polymarket_section(
         parsed.append(row)
 
         closed_flag = bool(m.get("closed")) or (m.get("acceptingOrders") is False)
-        if closed_flag and max(_num(m.get("bestBid")), _num(m.get("bestAsk"))) >= 0.98:
-            resolved_rows.append(row)
+        score_res = max(_num(m.get("bestBid")), _num(m.get("bestAsk")))
+        try:
+            op = m.get("outcomePrices")
+            if isinstance(op, list) and op:
+                score_res = max(score_res, _num(op[0]))
+        except Exception:
+            pass
+        if closed_flag and score_res >= 0.98:
+            resolved_rows.append((score_res, row))
 
     parsed.sort(key=lambda x: x[0])
     if not parsed:
         return "Polymarket：当前无可用盘口。"
+
+    if resolved_rows:
+        winner = sorted(resolved_rows, key=lambda x: x[0], reverse=True)[0][1]
+        winner_label = str(winner[1])
+        return "\n".join([
+            "📈 **Polymarket 盘口与博弈**",
+            f"✅ 市场已结算（Resolved）：{winner_label}",
+        ])
 
     def _px(v: Any) -> float:
         try:
@@ -1976,8 +1991,6 @@ def _build_polymarket_section(
         except Exception:
             obs_max = None
 
-    resolved_override = False
-    resolved_winner_label = None
     filtered = []
     for center, label, bid, ask, lo, hi in parsed:
         # User policy: ignore bins whose label-center is below observed daily max.
@@ -1987,14 +2000,7 @@ def _build_polymarket_section(
         filtered.append((center, label, bid, ask, lo, hi))
 
     if not filtered:
-        if resolved_rows:
-            # Market may already be resolved to edge bins far below current observed temp labels.
-            # Preserve explicit resolved output instead of dropping whole section.
-            best_res = sorted(resolved_rows, key=lambda x: max(_px(x[2]), _px(x[3])), reverse=True)[0]
-            filtered = [best_res]
-            resolved_override = True
-            resolved_winner_label = str(best_res[1])
-        elif obs_max is not None:
+        if obs_max is not None:
             filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed if c >= float(obs_max)]
         else:
             filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed]
@@ -2390,21 +2396,14 @@ def _build_polymarket_section(
         bid_only = _px(only[2])
         ask_only = _px(only[3])
         settled_single = (bid_only >= 0.98 or ask_only >= 0.98)
-        if settled_single and (not resolved_override):
+        if settled_single:
             range_notes.append("  • ✅ 已定局：当前仅剩单一高置信可交易区间。")
-            try:
-                settled_center = float(only[0])
-            except Exception:
-                settled_center = None
-        elif settled_single:
             try:
                 settled_center = float(only[0])
             except Exception:
                 settled_center = None
     if mismatch:
         range_notes.append("  • 注：市场档位与气象主带存在错位，已按最近 below/above 边缘区间回退展示。")
-    if resolved_override:
-        range_notes.append(f"  • ✅ 市场已结算（Resolved）：{resolved_winner_label or '已结算胜出档位'}")
 
     # Market-vs-forecast distribution cues (use full filtered market set, not only displayed bins).
     try:
