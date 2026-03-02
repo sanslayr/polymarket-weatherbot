@@ -4689,6 +4689,23 @@ def choose_section_text(
 
     trend_horizon = _trend_horizon_phrase()
 
+    next_key_report_txt = None
+    try:
+        cad_min = float(metar_diag.get("metar_routine_cadence_min")) if metar_diag.get("metar_routine_cadence_min") is not None else None
+    except Exception:
+        cad_min = None
+    try:
+        latest_local_txt = str(metar_diag.get("latest_report_local") or "")
+        latest_local_dt2 = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
+    except Exception:
+        latest_local_dt2 = None
+    if cad_min is not None and cad_min >= 50 and latest_local_dt2 is not None:
+        try:
+            nxt = latest_local_dt2 + timedelta(minutes=int(round(cad_min)))
+            next_key_report_txt = nxt.strftime("%H:%M")
+        except Exception:
+            next_key_report_txt = None
+
     # 温度趋势（优先）
     try:
         tv = float(t_tr or 0.0)
@@ -4700,6 +4717,9 @@ def choose_section_text(
             focus.append((0.55, "• 先盯温度斜率是否重新放大，这是临窗改判的最快信号。"))
     except Exception:
         focus.append((0.45, "• 先盯温度斜率是否重新放大，这是临窗改判的最快信号。"))
+
+    if next_key_report_txt and phase_now in {"near_window", "in_window", "post"} and (not bool(metar_diag.get("metar_speci_active"))):
+        focus.append((0.93, f"• 该站常规约每小时一报，下一关键报约 {next_key_report_txt} Local（对是否封顶更关键）。"))
 
     if bool(metar_diag.get("metar_speci_likely")):
         focus.append((0.88, "• 异常信号增多，下一报可能转为加密更新（SPECI）→ 建议等下一报再确认上沿。"))
@@ -4815,6 +4835,10 @@ def choose_section_text(
     # P1 short-term triggers (window-gated)
     try:
         rt_triggers = select_realtime_triggers(primary_window, metar_diag)
+        if next_key_report_txt and phase_now in {"near_window", "in_window", "post"} and (not bool(metar_diag.get("metar_speci_active"))):
+            key_line = f"• 该站常规约每小时一报，下一关键报约 {next_key_report_txt} Local（对是否封顶更关键）。"
+            if key_line not in rt_triggers:
+                rt_triggers = [key_line] + list(rt_triggers)
         phase_now = str(gate.get("phase") or "unknown")
         focus_sorted = [txt for _s, txt in sorted(focus, key=lambda x: x[0], reverse=True)]
         # 去重保序
