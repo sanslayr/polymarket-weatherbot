@@ -17,6 +17,16 @@ Last updated: 2026-03-02
 - 量化温度台阶识别（`metar_temp_quantized`）。
 - 临近窗口结束时限制“单报跳变”造成的过度上修。
 - 云层字段合并：`rawOb + clouds[] + cover`（技术实现层）。
+- 新增两步温度加速度信号（`temp_accel_2step_c`）用于识别“升温减速/圆弧顶”。
+
+## 3.1 太阳辐射简化曲线（清空日）
+- 在渲染层引入基于经纬度 + 本地时刻的理论晴空辐射相对量（0~1）：
+  - 使用 NOAA 近似（太阳赤纬 + equation of time + 经度修正本地太阳时）
+  - 指标：`solar_now / solar_prev / solar_next` 与 `solar_slope_next`
+- 用途：
+  - 与“晴空 + 斜率走平/减速”联合触发 rounded-top 锁高约束
+  - 太阳高度较低且 `solar_slope_next` 走平/转弱时，进一步抑制惯性高估
+  - 若 `solar_slope_next` 明显上升，避免过早压死末段冲高空间
 
 ## 4) 输出渲染技术增强
 - 最新报标题内嵌上一报时间。

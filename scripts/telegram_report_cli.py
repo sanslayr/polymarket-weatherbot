@@ -2453,6 +2453,55 @@ def choose_section_text(
         hi_u = _to_unit(float(hi_c))
         return f"{lo_u:.1f}~{hi_u:.1f}°{unit}"
 
+    def _solar_clear_score(lat_deg: float, lon_deg: float, dt_local: datetime) -> float:
+        """Return simplified clear-sky radiation score in [0,1] from solar geometry.
+        Uses NOAA-like equation-of-time/declination and local solar time correction by longitude.
+        """
+        tz_off_h = 0.0
+        try:
+            if dt_local.tzinfo is not None and dt_local.utcoffset() is not None:
+                tz_off_h = float(dt_local.utcoffset().total_seconds() / 3600.0)
+        except Exception:
+            tz_off_h = 0.0
+
+        doy = int(dt_local.timetuple().tm_yday)
+        hour = float(dt_local.hour + dt_local.minute / 60.0 + dt_local.second / 3600.0)
+        gamma = 2.0 * math.pi / 365.0 * (doy - 1 + (hour - 12.0) / 24.0)
+
+        decl = (
+            0.006918
+            - 0.399912 * math.cos(gamma)
+            + 0.070257 * math.sin(gamma)
+            - 0.006758 * math.cos(2 * gamma)
+            + 0.000907 * math.sin(2 * gamma)
+            - 0.002697 * math.cos(3 * gamma)
+            + 0.00148 * math.sin(3 * gamma)
+        )
+        eqtime = 229.18 * (
+            0.000075
+            + 0.001868 * math.cos(gamma)
+            - 0.032077 * math.sin(gamma)
+            - 0.014615 * math.cos(2 * gamma)
+            - 0.040849 * math.sin(2 * gamma)
+        )
+
+        tst_min = hour * 60.0 + eqtime + 4.0 * float(lon_deg) - 60.0 * tz_off_h
+        tst_min = tst_min % 1440.0
+        ha_deg = tst_min / 4.0 - 180.0
+
+        lat_rad = math.radians(float(lat_deg))
+        ha_rad = math.radians(ha_deg)
+        cosz = (
+            math.sin(lat_rad) * math.sin(decl)
+            + math.cos(lat_rad) * math.cos(decl) * math.cos(ha_rad)
+        )
+        cosz = max(-1.0, min(1.0, cosz))
+        if cosz <= 0.0:
+            return 0.0
+
+        # Relative clear-sky radiation shape (slightly convex to represent midday dominance)
+        return max(0.0, min(1.0, cosz ** 1.15))
+
     fdec = forecast_decision if isinstance(forecast_decision, dict) else {}
     d = (fdec.get("decision") or {}) if isinstance(fdec, dict) else {}
     bg = (d.get("background") or fdec.get("background") or {}) if isinstance(fdec, dict) else {}
@@ -3346,6 +3395,26 @@ def choose_section_text(
     except Exception:
         t_acc = None
 
+    solar_now = None
+    solar_prev = None
+    solar_next = None
+    solar_slope_next = None
+    try:
+        lat_s = float(metar_diag.get("station_lat")) if metar_diag.get("station_lat") is not None else None
+        lon_s = float(metar_diag.get("station_lon")) if metar_diag.get("station_lon") is not None else None
+        latest_local_txt = str(metar_diag.get("latest_report_local") or "")
+        latest_local_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
+        if latest_local_dt is not None and lat_s is not None and lon_s is not None:
+            solar_now = _solar_clear_score(lat_s, lon_s, latest_local_dt)
+            solar_prev = _solar_clear_score(lat_s, lon_s, latest_local_dt - timedelta(hours=1))
+            solar_next = _solar_clear_score(lat_s, lon_s, latest_local_dt + timedelta(hours=1))
+            solar_slope_next = float(solar_next - solar_now)
+    except Exception:
+        solar_now = None
+        solar_prev = None
+        solar_next = None
+        solar_slope_next = None
+
     dir_delta = up_s - down_s
     consistency_shift = 0.0
     if dir_delta >= 0.8:
@@ -3379,9 +3448,15 @@ def choose_section_text(
     )
     if clear_sky_stable and phase_now in {"near_window", "in_window"}:
         if t_cons <= 0.15:
-            consistency_shift *= 0.62
+            damp = 0.62
+            if solar_now is not None and solar_now <= 0.45:
+                damp = 0.54
+            consistency_shift *= damp
         if b_cons > 0.0 and t_cons <= 0.05:
-            consistency_shift = min(consistency_shift, 0.12)
+            cap_shift = 0.12
+            if solar_now is not None and solar_now <= 0.35:
+                cap_shift = 0.08
+            consistency_shift = min(consistency_shift, cap_shift)
 
     precip_cooling = False
     precip_residual = False
@@ -3564,11 +3639,25 @@ def choose_section_text(
         decel = (t_acc is not None and t_acc <= -0.25)
         flat_or_down = t_cons <= 0.12
         near_peak = (hleft_rt is None) or (hleft_rt <= 1.8)
-        if t_now_rt is not None and near_peak and (flat_or_down or (t_cons <= 0.22 and decel)):
+        solar_stalling = bool(solar_slope_next is not None and solar_slope_next <= 0.012)
+        solar_strong_rise = bool(solar_slope_next is not None and solar_slope_next >= 0.030)
+
+        rounded_top_signal = (
+            flat_or_down
+            or (t_cons <= 0.22 and decel)
+            or (t_cons <= 0.20 and solar_stalling)
+        )
+
+        if t_now_rt is not None and near_peak and rounded_top_signal and ((not solar_strong_rise) or decel):
             add_rt = 0.55
+            if solar_now is not None:
+                if solar_now <= 0.30:
+                    add_rt = 0.35
+                elif solar_now <= 0.50:
+                    add_rt = 0.45
             if hleft_rt is not None and hleft_rt <= 1.0:
-                add_rt = 0.40
-            if "暖平流" in line850 and b_cons >= 0.9 and t_cons >= 0.10:
+                add_rt = min(add_rt, 0.40)
+            if "暖平流" in line850 and b_cons >= 0.9 and t_cons >= 0.10 and (not solar_stalling):
                 add_rt += 0.10
             rounded_cap = t_now_rt + add_rt
             if obs_max is not None:
