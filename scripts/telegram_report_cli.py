@@ -1737,6 +1737,11 @@ def metar_observation_block(
             # Non-US METAR temperatures are commonly integer °C reports; treat as quantized bin.
             obs_max_interval_lo = float(obs_max_temp) - 0.50
             obs_max_interval_hi = float(obs_max_temp) + 0.49
+        elif obs_max_temp is not None and unit == "F":
+            # US display path: apply ±0.5°F quantized interval around observed value.
+            obs_f = float(obs_max_temp) * 9.0 / 5.0 + 32.0
+            obs_max_interval_lo = (obs_f - 0.50 - 32.0) * 5.0 / 9.0
+            obs_max_interval_hi = (obs_f + 0.50 - 32.0) * 5.0 / 9.0
     except Exception:
         obs_max_interval_lo = obs_max_temp
         obs_max_interval_hi = obs_max_temp
@@ -4377,8 +4382,7 @@ def choose_section_text(
         peak_range_block.append(f"- **{_fmt_range(disp_lo, disp_hi)}**（{window_label} {window_txt}）")
     if compact_settled_mode and obs_max is not None:
         if (
-            unit == "C"
-            and obs_floor is not None
+            obs_floor is not None
             and obs_ceil is not None
             and (obs_ceil - obs_floor) >= 0.30
         ):

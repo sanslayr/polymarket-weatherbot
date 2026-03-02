@@ -17,7 +17,7 @@ Last updated: 2026-03-02
 - 量化温度台阶识别（`metar_temp_quantized`）。
 - 临近窗口结束时限制“单报跳变”造成的过度上修。
 - 最高温区间下沿强制不低于当日已观测最高温对应的可行下沿（量化 METAR 情况下用观测桶下边界）。
-- 新增 `observed_max_interval_lo_c / observed_max_interval_hi_c`，用于非美国整数°C观测的量化区间锚定。
+- 新增 `observed_max_interval_lo_c / observed_max_interval_hi_c`，用于观测量化区间锚定（非美国整数°C桶、美国站点 ±0.5°F 桶）。
 - 云层字段合并：`rawOb + clouds[] + cover`（技术实现层）。
 - 新增两步温度加速度信号（`temp_accel_2step_c`）用于识别“升温减速/圆弧顶”。
 - 新增夜间增温辅助信号：`wind_speed_trend_1step_kt`、`dewpoint_trend_1step_c`，用于 after-sunset reheat 组合判定。
