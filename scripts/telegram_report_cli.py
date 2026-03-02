@@ -3152,6 +3152,7 @@ def choose_section_text(
     elif precip_state in {"moderate", "heavy", "convective"}:
         focus.append((0.9, "• 降水持续 → 白天增温效率受抑，最高温更偏下沿；短时波动可能放大。"))
 
+
     try:
         if snd_thermo.get("has_profile"):
             capev = snd_thermo.get("sbcape_jkg") or snd_thermo.get("mlcape_jkg") or snd_thermo.get("mucape_jkg")
@@ -3167,18 +3168,32 @@ def choose_section_text(
     try:
         rt_triggers = select_realtime_triggers(primary_window, metar_diag)
         phase_now = str(gate.get("phase") or "unknown")
+        focus_sorted = [txt for _s, txt in sorted(focus, key=lambda x: x[0], reverse=True)]
+        # 去重保序
+        uniq_focus: list[str] = []
+        for t in focus_sorted:
+            if t not in uniq_focus:
+                uniq_focus.append(t)
+
         if rt_triggers:
-            vars_block = vars_block[:1] + rt_triggers[:3]
+            if phase_now == "post":
+                post_extras = [
+                    t for t in uniq_focus
+                    if (
+                        ("云" in t) or ("降水" in t) or ("风" in t) or ("斜率" in t)
+                    ) and ("偏暖延续" not in t) and ("偏冷延续" not in t)
+                ]
+                merged = []
+                for t in (rt_triggers + post_extras):
+                    if t not in merged:
+                        merged.append(t)
+                vars_block = vars_block[:1] + merged[:3]
+            else:
+                vars_block = vars_block[:1] + rt_triggers[:3]
         else:
             if phase_now == "far":
-                focus.append((1.05, "• 当前远离峰值窗口：先跟踪上午到中午的升温斜率是否连续转正。"))
-            focus_sorted = [txt for _s, txt in sorted(focus, key=lambda x: x[0], reverse=True)]
-            # 去重保序
-            uniq: list[str] = []
-            for t in focus_sorted:
-                if t not in uniq:
-                    uniq.append(t)
-            vars_block = vars_block[:1] + uniq[:3]
+                uniq_focus = ["• 当前远离峰值窗口：先跟踪上午到中午的升温斜率是否连续转正。"] + [x for x in uniq_focus if "远离峰值窗口" not in x]
+            vars_block = vars_block[:1] + uniq_focus[:3]
             if len(vars_block) == 1:
                 vars_block.append("• 临窗前继续跟踪温度斜率与风向节奏，必要时再改判。")
     except Exception:

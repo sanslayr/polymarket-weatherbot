@@ -105,8 +105,37 @@ def select_realtime_triggers(primary_window: dict[str, Any], metar_diag: dict[st
         if downside:
             out.append("• 短时降温叠加压升信号 → 下沿下修与提前封顶风险上升。")
     elif phase == "post":
-        if peak_lock or t_tr <= 0:
-            out.append("• 窗口后阶段：高点大概率已定，后续以回落或横盘为主。")
+        try:
+            obs_max = float(metar_diag.get("observed_max_temp_c")) if metar_diag.get("observed_max_temp_c") is not None else None
+        except Exception:
+            obs_max = None
+        try:
+            t_now = float(metar_diag.get("latest_temp")) if metar_diag.get("latest_temp") is not None else None
+        except Exception:
+            t_now = None
+
+        cloud_code = str(metar_diag.get("latest_cloud_code") or "").upper()
+        precip_state = str(metar_diag.get("latest_precip_state") or "none").lower()
+        precip_trend = str(metar_diag.get("precip_trend") or "none").lower()
+        wet_now = (precip_state in {"light", "moderate", "heavy", "convective"}) or (precip_trend in {"new", "intensify", "steady", "end"})
+        cloudy_now = cloud_code in {"BKN", "OVC", "VV"}
+
+        if obs_max is not None and t_now is not None:
+            need = max(0.0, obs_max - t_now + 0.1)
+            if need >= 0.8:
+                if wet_now or cloudy_now or t_tr <= 0.2:
+                    out.append(f"• 反超前高门槛：还差约{need:.1f}°C；当前云雨/弱斜率背景下，反超概率偏低。")
+                else:
+                    out.append(f"• 反超前高门槛：还差约{need:.1f}°C；需连续2报升温且云层继续开窗，才有机会改写前高。")
+            elif need >= 0.3:
+                out.append(f"• 接近前高（差约{need:.1f}°C）：未来1小时若维持正斜率并减云，可小幅反超。")
+            elif t_tr >= 0.3 and (not wet_now) and (not cloudy_now):
+                out.append("• 已贴近前高：若下一报继续升温且不回补云层，存在小幅反超机会。")
+            else:
+                out.append("• 窗口后阶段：高点大概率已定，后续以回落或横盘为主。")
+        else:
+            if peak_lock or t_tr <= 0:
+                out.append("• 窗口后阶段：高点大概率已定，后续以回落或横盘为主。")
     else:
         # far/unknown: keep minimal
         if shift and ("开窗" in cloud_tr or "回补" in cloud_tr):
