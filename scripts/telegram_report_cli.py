@@ -2290,15 +2290,40 @@ def choose_section_text(
         weak_tokens = ["信号一般", "信号有限", "中性", "背景", "不明", "弱"]
         return any(k in t for k in weak_tokens)
 
+    def _h700_dist_km(s: str) -> float | None:
+        t = str(s or "")
+        m = re.search(r"约\s*([0-9]+(?:\.[0-9]+)?)\s*km", t)
+        if not m:
+            return None
+        try:
+            return float(m.group(1))
+        except Exception:
+            return None
+
+    def _is_generic_500(s: str) -> bool:
+        t = str(s or "")
+        generic_tokens = [
+            "高空仍有抬升触发条件",
+            "云层若放开更易再冲高",
+            "高空背景信号有限",
+            "高空背景一般",
+        ]
+        return any(k in t for k in generic_tokens)
+
     evidence_bits: list[str] = []
     if line850_h and not _is_weak_evidence(line850_h):
         evidence_bits.append(f"850hPa: {line850_h}")
 
     if h700_summary and not _is_weak_evidence(h700_summary):
-        evidence_bits.append(f"700hPa: {h700_summary}")
+        d700 = _h700_dist_km(h700_summary)
+        h700_key = ("近站" in h700_summary) or ((d700 is not None) and (d700 <= 360)) or ("湿层" in h700_summary) or ("约束" in h700_summary)
+        if h700_key:
+            evidence_bits.append(f"700hPa: {h700_summary}")
 
-    if line500 and not _is_weak_evidence(line500):
-        evidence_bits.append(f"500hPa: {line500}")
+    if line500 and (not _is_weak_evidence(line500)) and (not _is_generic_500(line500)):
+        strong500 = any(k in str(line500) for k in ["槽", "短波", "涡度", "PVA", "急流", "冷涡"])
+        if strong500:
+            evidence_bits.append(f"500hPa: {line500}")
 
     if h925_summary and not _is_weak_evidence(h925_summary):
         evidence_bits.append(f"925hPa: {h925_summary}")
