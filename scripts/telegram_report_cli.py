@@ -2233,7 +2233,13 @@ def _build_polymarket_section(
                     lines.append(f"  • 市场定价期望：{mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（约80-90%覆盖区间）。")
 
                 if edge_share > 0.55:
-                    lines.append(f"  • 注：边缘占比较高（约 {edge_share*100:.0f}%），期望仅供参考。")
+                    edge_bins = sorted([(str(lbl), float(p)) for _c, lbl, p, _lo, _hi, e in wpts if e], key=lambda x: x[1], reverse=True)
+                    edge_bins = [x for x in edge_bins if x[1] >= 0.02]
+                    if edge_bins:
+                        edge_txt = " / ".join([f"{lbl}({p*100:.0f}%)" for lbl, p in edge_bins[:2]])
+                        lines.append(f"  • 注：边缘占比较高（约 {edge_share*100:.0f}%，主要在 {edge_txt}），期望仅供参考。")
+                    else:
+                        lines.append(f"  • 注：边缘占比较高（约 {edge_share*100:.0f}%），期望仅供参考。")
 
                 # explicit hot-tail cue above forecast core upper bound
                 fc_hi = float(core_hi)
@@ -2255,7 +2261,7 @@ def _build_polymarket_section(
 
     if show_lobster_reminder:
         lines.append("")
-        lines.append("**🦞 龙虾只报天气，不替你下单。🦞**")
+        lines.append("**🦞 别让龙虾替你下单——真要准到离谱，这报告你也看不到🦞**")
 
     return "\n".join(lines)
 
@@ -3789,7 +3795,7 @@ def _render_metar_only_report(st: Station, model: str, links_payload: dict[str, 
         f"📍 **{st.icao} ({st.city}) | {abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}**\n"
         f"判断时间: {now_utc.strftime('%Y-%m-%d %H:%M')} UTC | {now_local.strftime('%Y-%m-%d %H:%M')} Local ({format_utc_offset(now_local)})\n"
         f"分析基准模型: {model.upper()}（运行时次: {rt_fmt}）\n"
-        "\n**⚠️🦞AI认真算，市场认真毒打🦞；龙虾学习中，常见离谱输出，老师们请多指教！不构成任何交易建议。**"
+        "\n**🦞龙虾学习中，请多指教🦞（不作为交易建议）**"
     )
 
     pseudo_peak = float(_metar_diag.get("latest_temp") or 0.0)
@@ -4074,7 +4080,7 @@ def render_report(command_text: str) -> str:
     except Exception:
         pass
 
-    header_lines.append("\n**⚠️🦞AI认真算，市场认真毒打🦞；龙虾学习中，常见离谱输出，老师们请多指教！不构成任何交易建议。**")
+    header_lines.append("\n**🦞龙虾学习中，请多指教🦞（不作为交易建议）**")
 
     header = "\n".join(header_lines)
 
