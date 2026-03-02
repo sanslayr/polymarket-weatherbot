@@ -3299,16 +3299,43 @@ def choose_section_text(
         elif t_bias <= -1.5:
             focus.append((0.95, "• 实况持续低于同小时模式（偏冷延续） → 最高温更偏下沿。"))
 
-    # 风场重排
+    # 风场重排（给出具体方向场景）
     try:
         wdir = metar_diag.get("latest_wdir")
         wspd = metar_diag.get("latest_wspd")
         wdchg = float(metar_diag.get("wind_dir_change_deg") or 0.0)
+        st_lat = float(metar_diag.get("station_lat") or 0.0)
+        nh = st_lat >= 0
+        warm_sector = "偏南到西南" if nh else "偏北到西北"
+        cool_sector = "偏北到东北" if nh else "偏南到东南"
+
         if wdir not in (None, "", "VRB") and wspd is not None:
-            sc = 0.9 if wdchg >= 35 else 0.6
-            focus.append((sc, f"• 近地风若从当前风场（{wdir}° {wspd}kt）明显转向/增风 → 峰值时段与幅度可能重排。"))
+            try:
+                ws = float(wspd)
+                wind_gate = int(max(14.0, round(ws + 3.0)))
+            except Exception:
+                ws = None
+                wind_gate = 15
+
+            sc = 0.95 if wdchg >= 35 else 0.72
+            if "冷平流" in line850:
+                txt = (
+                    f"• 风场改判阈值：若转{cool_sector}并增至≈{wind_gate}kt以上，冷输送压温会更明显；"
+                    f"若回摆到{warm_sector}且风速回落，才可能释放小幅反超空间（当前{wdir}° {wspd}kt）。"
+                )
+            elif "暖平流" in line850:
+                txt = (
+                    f"• 风场改判阈值：若转{warm_sector}并增至≈{wind_gate}kt以上，暖输送更易落地；"
+                    f"若转{cool_sector}并增强，后段上沿会被压住（当前{wdir}° {wspd}kt）。"
+                )
+            else:
+                txt = (
+                    f"• 风场改判阈值：若转{cool_sector}并增至≈{wind_gate}kt以上，多偏压温；"
+                    f"若转{warm_sector}且维持正斜率，才有后段上修空间（当前{wdir}° {wspd}kt）。"
+                )
+            focus.append((sc, txt))
         else:
-            focus.append((0.45, "• 近地风场若由不定转为稳定单一来流 → 峰值时段可能后移并抬升。"))
+            focus.append((0.45, "• 近地风场若由不定转为稳定单一来流：偏冷象限通常压温，偏暖象限才支持后段反超。"))
     except Exception:
         focus.append((0.45, "• 近地风向/风速若突变 → 峰值出现时段与幅度可能改写。"))
 
@@ -3372,10 +3399,15 @@ def choose_section_text(
             vars_block = vars_block[:1] + uniq_focus[:3]
             if len(vars_block) == 1:
                 vars_block.append("• 临窗前继续跟踪温度斜率与风向节奏，必要时再改判。")
-    except Exception:
-        vars_block = vars_block[:1] + [
-            "• 临窗前继续跟踪温度斜率与风向节奏，必要时再改判。"
-        ]
+    except Exception as _e:
+        if str(os.getenv("LOOK_DEBUG_ERRORS", "0") or "0").lower() in {"1", "true", "yes", "on"}:
+            vars_block = vars_block[:1] + [
+                f"• 变量块调试：{type(_e).__name__}: {_e}",
+            ]
+        else:
+            vars_block = vars_block[:1] + [
+                "• 临窗前继续跟踪温度斜率与风向节奏，必要时再改判。"
+            ]
 
     try:
         poly_block = _build_polymarket_section(
@@ -3546,6 +3578,11 @@ def render_report(command_text: str) -> str:
     t0 = time.perf_counter()
     metar24 = fetch_metar_24h(st.icao)
     metar_text, metar_diag = metar_observation_block(metar24, hourly_day, tz_name, target_date=target_date)
+    try:
+        metar_diag["station_lat"] = float(st.lat)
+        metar_diag["station_lon"] = float(st.lon)
+    except Exception:
+        pass
     _mark("metar_fetch_parse", time.perf_counter() - t0)
 
     # 实况纠偏：当实况显著高于模型峰值时，优先以实况峰值时段重锚窗口。
