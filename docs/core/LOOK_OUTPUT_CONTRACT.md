@@ -20,7 +20,7 @@ Last updated: 2026-03-02
 ## 3) Header rules
 - 标题：`📍 ICAO (City) | lat/lon (+地形标签)`
 - 时间：UTC + Local
-- 头部末行固定风险提示：`🦞⚠️ 报告由AI生成🦞，可能存在与事实不符或幻觉成分，仅供参考，不构成任何交易建议。`
+- 头部末行固定风险提示：`⚠️🦞报告由AI生成🦞，分析可能有不少bug，也可能和事实打架；仅供参考，不构成任何交易建议。`
 - `near_window/in_window` 可启用 compact header（隐藏噪音行）
 
 ## 4) Synoptic rules
