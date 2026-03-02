@@ -964,6 +964,78 @@ def metar_observation_block(
             return f"较上一报 {dv:+.1f}°C"
         return _delta_text(_to_temp_unit(float(v_c)) - _to_temp_unit(0.0), f"°{unit}")
 
+    def _cloud_cov_code(code: str) -> float:
+        c = str(code or "").upper()
+        return {
+            "CLR": 0.0,
+            "CAVOK": 0.0,
+            "FEW": 0.20,
+            "SCT": 0.45,
+            "BKN": 0.75,
+            "OVC": 1.00,
+            "VV": 1.00,
+        }.get(c, 0.45)
+
+    def _cloud_base_weight(ft: int | None) -> float:
+        if ft is None:
+            return 0.65
+        x = float(ft)
+        if x < 2500:
+            return 1.0
+        if x < 7000:
+            return 0.75
+        if x < 15000:
+            return 0.45
+        return 0.25
+
+    def _metar_cloud_effective_cover(obs: dict[str, Any]) -> float:
+        pairs = _collect_cloud_pairs(obs)
+        if not pairs:
+            return 0.35
+        if len(pairs) == 1 and str(pairs[0][0]).upper() in {"CLR", "CAVOK"}:
+            return 0.0
+
+        layers: list[tuple[float, float]] = []
+        for code, ft in pairs:
+            cov = _cloud_cov_code(str(code))
+            wt = _cloud_base_weight(ft)
+            score = max(0.0, min(0.98, cov * wt))
+            order = float(ft) if ft is not None else 99999.0
+            layers.append((order, score))
+        layers.sort(key=lambda z: z[0])
+
+        gammas = [1.0, 0.55, 0.30, 0.20]
+        prod = 1.0
+        for i, (_ord, base_score) in enumerate(layers):
+            g = gammas[i] if i < len(gammas) else 0.15
+            x = max(0.0, min(0.98, g * base_score))
+            prod *= (1.0 - x)
+        c_eff = 1.0 - prod
+        return max(0.0, min(1.0, c_eff))
+
+    def _cloud_transmittance(obs: dict[str, Any]) -> float:
+        c_eff = _metar_cloud_effective_cover(obs)
+        t = 1.0 - 0.85 * (c_eff ** 1.2)
+        return max(0.12, min(1.0, t))
+
+    def _wx_transmittance(wx_raw: Any) -> float:
+        s = str(wx_raw or "").upper().replace(" ", "")
+        if not s:
+            return 1.0
+        if "TS" in s:
+            return 0.45
+        if "FG" in s:
+            return 0.60
+        if any(k in s for k in ["BR", "HZ", "FU", "DU", "SA", "VA"]):
+            return 0.90
+        if any(k in s for k in ["+RA", "+DZ", "+SN"]):
+            return 0.55
+        if any(k in s for k in ["-RA", "-DZ", "-SN"]):
+            return 0.75
+        if any(k in s for k in ["RA", "DZ", "SN", "PL", "GR", "GS"]):
+            return 0.60
+        return 1.0
+
     def _wx_human_desc(wx_raw: Any) -> str:
         t = str(wx_raw or "").upper().strip().replace(" ", "")
         if not t or t == "无降水天气现象":
@@ -1441,6 +1513,42 @@ def metar_observation_block(
     elif wx_trend == "end":
         wx_change_hint = "降水已结束"
 
+    # METAR-based cloud/radiation quantification (multi-layer aware)
+    c_eff_now = _metar_cloud_effective_cover(latest)
+    c_eff_prev = _metar_cloud_effective_cover(prev) if prev else None
+    c_eff_prev2 = _metar_cloud_effective_cover(prev2) if prev2 else None
+    t_cloud_now = _cloud_transmittance(latest)
+    t_cloud_prev = _cloud_transmittance(prev) if prev else None
+    t_cloud_prev2 = _cloud_transmittance(prev2) if prev2 else None
+
+    t_wx_now = _wx_transmittance(wx_now)
+    t_wx_prev = _wx_transmittance(wx_prev) if prev else None
+    wx_prev2 = str((prev2 or {}).get("wxString") or (prev2 or {}).get("wx") or "").upper() if prev2 else ""
+    t_wx_prev2 = _wx_transmittance(wx_prev2) if prev2 else None
+
+    rad_eff_now = max(0.0, min(1.0, t_cloud_now * t_wx_now))
+    rad_eff_prev = (max(0.0, min(1.0, t_cloud_prev * t_wx_prev)) if (t_cloud_prev is not None and t_wx_prev is not None) else None)
+    rad_eff_prev2 = (max(0.0, min(1.0, t_cloud_prev2 * t_wx_prev2)) if (t_cloud_prev2 is not None and t_wx_prev2 is not None) else None)
+
+    rad_eff_smooth = rad_eff_now
+    ws_rad = [0.6, 0.3, 0.1]
+    rad_series = [rad_eff_now, rad_eff_prev, rad_eff_prev2]
+    num = 0.0
+    den = 0.0
+    for i, v in enumerate(rad_series):
+        if isinstance(v, (int, float)):
+            num += float(v) * ws_rad[i]
+            den += ws_rad[i]
+    if den > 0:
+        rad_eff_smooth = num / den
+
+    rad_eff_trend = None
+    if rad_eff_prev is not None:
+        try:
+            rad_eff_trend = float(rad_eff_now - rad_eff_prev)
+        except Exception:
+            rad_eff_trend = None
+
     summary_bits = [trend_hint, cloud_hint]
     if wx_hint:
         summary_bits.append(wx_hint)
@@ -1608,6 +1716,13 @@ def metar_observation_block(
         "latest_precip_state": wx_state_now,
         "precip_trend": wx_trend,
         "cloud_trend": cloud_tr,
+        "cloud_effective_cover": c_eff_now,
+        "cloud_effective_cover_smooth": (0.6 * c_eff_now + 0.3 * c_eff_prev + 0.1 * c_eff_prev2) if (c_eff_prev is not None and c_eff_prev2 is not None) else c_eff_now,
+        "cloud_transmittance": t_cloud_now,
+        "wx_transmittance": t_wx_now,
+        "radiation_eff": rad_eff_now,
+        "radiation_eff_smooth": rad_eff_smooth,
+        "radiation_eff_trend_1step": rad_eff_trend,
         "temp_trend_1step_c": t_trend,
         "temp_trend_smooth_c": t_trend_smooth,
         "temp_accel_2step_c": temp_accel_2step,
@@ -3415,6 +3530,19 @@ def choose_section_text(
         solar_next = None
         solar_slope_next = None
 
+    rad_eff = None
+    rad_eff_tr = None
+    try:
+        if metar_diag.get("radiation_eff_smooth") is not None:
+            rad_eff = float(metar_diag.get("radiation_eff_smooth"))
+        elif metar_diag.get("radiation_eff") is not None:
+            rad_eff = float(metar_diag.get("radiation_eff"))
+        if metar_diag.get("radiation_eff_trend_1step") is not None:
+            rad_eff_tr = float(metar_diag.get("radiation_eff_trend_1step"))
+    except Exception:
+        rad_eff = None
+        rad_eff_tr = None
+
     dir_delta = up_s - down_s
     consistency_shift = 0.0
     if dir_delta >= 0.8:
@@ -3517,7 +3645,16 @@ def choose_section_text(
         warm_support += 0.6
     if "干层" in h700_summary:
         warm_support += 0.4
-    if cloud_code_now not in {"BKN", "OVC", "VV"}:
+    if rad_eff is not None:
+        if rad_eff >= 0.72:
+            warm_support += 0.55
+        elif rad_eff >= 0.55:
+            warm_support += 0.30
+        elif rad_eff >= 0.40:
+            warm_support += 0.12
+        else:
+            warm_support -= 0.08
+    elif cloud_code_now not in {"BKN", "OVC", "VV"}:
         warm_support += 0.5
     if isinstance(metar_diag.get("temp_bias_smooth_c"), (int, float)) and float(metar_diag.get("temp_bias_smooth_c") or 0.0) >= 0.5:
         warm_support += 0.4
@@ -3641,23 +3778,33 @@ def choose_section_text(
         near_peak = (hleft_rt is None) or (hleft_rt <= 1.8)
         solar_stalling = bool(solar_slope_next is not None and solar_slope_next <= 0.012)
         solar_strong_rise = bool(solar_slope_next is not None and solar_slope_next >= 0.030)
+        rad_stalling = bool((rad_eff is not None and rad_eff <= 0.55) and (rad_eff_tr is None or rad_eff_tr <= 0.01))
+        rad_recover = bool((rad_eff is not None and rad_eff >= 0.72) and (rad_eff_tr is not None and rad_eff_tr >= 0.025))
 
         rounded_top_signal = (
             flat_or_down
             or (t_cons <= 0.22 and decel)
             or (t_cons <= 0.20 and solar_stalling)
+            or (t_cons <= 0.20 and rad_stalling)
         )
 
-        if t_now_rt is not None and near_peak and rounded_top_signal and ((not solar_strong_rise) or decel):
+        if t_now_rt is not None and near_peak and rounded_top_signal and ((not solar_strong_rise and not rad_recover) or decel):
             add_rt = 0.55
             if solar_now is not None:
                 if solar_now <= 0.30:
                     add_rt = 0.35
                 elif solar_now <= 0.50:
                     add_rt = 0.45
+            if rad_eff is not None:
+                if rad_eff <= 0.40:
+                    add_rt = min(add_rt, 0.35)
+                elif rad_eff <= 0.55:
+                    add_rt = min(add_rt, 0.45)
+                elif rad_eff >= 0.75 and (rad_eff_tr is not None and rad_eff_tr > 0.02):
+                    add_rt += 0.08
             if hleft_rt is not None and hleft_rt <= 1.0:
                 add_rt = min(add_rt, 0.40)
-            if "暖平流" in line850 and b_cons >= 0.9 and t_cons >= 0.10 and (not solar_stalling):
+            if "暖平流" in line850 and b_cons >= 0.9 and t_cons >= 0.10 and (not solar_stalling) and (not rad_stalling):
                 add_rt += 0.10
             rounded_cap = t_now_rt + add_rt
             if obs_max is not None:
@@ -3897,6 +4044,22 @@ def choose_section_text(
     # 晴空辐射日圆弧顶信号（防惯性高估）
     if bool(metar_diag.get("rounded_top_cap_applied")):
         focus.append((1.02, "• 实况斜率已走平/转弱（圆弧顶特征）→ 上沿再上修空间有限，优先防高估。"))
+
+    # 基于METAR多层云量 + 天气现象的有效辐射因子（0~1）
+    if phase_now in {"near_window", "in_window"}:
+        try:
+            rad_eff_focus = float(metar_diag.get("radiation_eff_smooth")) if metar_diag.get("radiation_eff_smooth") is not None else None
+        except Exception:
+            rad_eff_focus = None
+        try:
+            rad_tr_focus = float(metar_diag.get("radiation_eff_trend_1step")) if metar_diag.get("radiation_eff_trend_1step") is not None else None
+        except Exception:
+            rad_tr_focus = None
+
+        if rad_eff_focus is not None and rad_eff_focus <= 0.50 and (rad_tr_focus is None or rad_tr_focus <= 0.01):
+            focus.append((0.98, "• 有效辐射偏弱且未回升（云层/天气现象综合）→ 末段冲高空间受限。"))
+        elif rad_eff_focus is not None and rad_eff_focus >= 0.72 and (rad_tr_focus is not None and rad_tr_focus >= 0.02):
+            focus.append((0.72, "• 有效辐射仍在回升（云层开窗占优）→ 尾段仍保留小幅冲高可能。"))
 
     # 风场重排（给出具体方向场景）
     try:

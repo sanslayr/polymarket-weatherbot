@@ -29,6 +29,9 @@ Last updated: 2026-03-02
   - 引入太阳辐射简化曲线（经纬度+本地太阳时）辅助判定：
     - `solar_now/solar_next` 走平或回落时，压制上沿更积极
     - `solar_slope_next` 仍强上升时，避免过早压死末段冲高
+  - 引入 METAR 多层云量+天气现象量化的 `radiation_eff`（0~1）：
+    - `radiation_eff` 低且不回升时，压制上沿
+    - `radiation_eff` 高且回升时，保留末段冲高空间
 
 ## 3) 云层/实况解析
 
