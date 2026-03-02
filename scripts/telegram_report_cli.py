@@ -1785,7 +1785,11 @@ def run_synoptic_section(st: Station, target_date: str, peak_local: str, tz_name
 
 def _poly_num(tok: str) -> int:
     t = str(tok).lower()
+    if t.startswith("neg-"):
+        # formats like neg-9
+        return int(t[3:])
     if t.startswith("neg"):
+        # formats like neg9
         return -int(t[3:])
     return int(t)
 
@@ -1794,14 +1798,14 @@ def _poly_parse_interval(slug: str) -> tuple[float, float, str] | None:
     s = slug.lower()
 
     # explicit ranged bins first, e.g. "-42-43f" / "-12-13c"
-    m = re.search(r"-(neg\d+|\d{1,3})-(neg\d+|\d{1,3})c$", s)
+    m = re.search(r"-(neg-?\d+|\d{1,3})-(neg-?\d+|\d{1,3})c$", s)
     if m:
         n1 = _poly_num(m.group(1))
         n2 = _poly_num(m.group(2))
         if abs(n1 - n2) <= 8:
             lo, hi = (n1, n2) if n1 <= n2 else (n2, n1)
             return (lo - 0.5, hi + 0.5, "C")
-    m = re.search(r"-(neg\d+|\d{1,3})-(neg\d+|\d{1,3})f$", s)
+    m = re.search(r"-(neg-?\d+|\d{1,3})-(neg-?\d+|\d{1,3})f$", s)
     if m:
         n1 = _poly_num(m.group(1))
         n2 = _poly_num(m.group(2))
@@ -1809,27 +1813,27 @@ def _poly_parse_interval(slug: str) -> tuple[float, float, str] | None:
             lo, hi = (n1, n2) if n1 <= n2 else (n2, n1)
             return (lo - 0.5, hi + 0.5, "F")
 
-    m = re.search(r"-(neg\d+|\d+)c$", s)
+    m = re.search(r"-(neg-?\d+|\d+)c$", s)
     if m:
         n = _poly_num(m.group(1))
         return (n - 0.5, n + 0.5, "C")
-    m = re.search(r"-(neg\d+|\d+)corbelow$", s)
+    m = re.search(r"-(neg-?\d+|\d+)corbelow$", s)
     if m:
         n = _poly_num(m.group(1))
         return (-math.inf, n + 0.5, "C")
-    m = re.search(r"-(neg\d+|\d+)corhigher$", s)
+    m = re.search(r"-(neg-?\d+|\d+)corhigher$", s)
     if m:
         n = _poly_num(m.group(1))
         return (n - 0.5, math.inf, "C")
-    m = re.search(r"-(neg\d+|\d+)f$", s)
+    m = re.search(r"-(neg-?\d+|\d+)f$", s)
     if m:
         n = _poly_num(m.group(1))
         return (n - 0.5, n + 0.5, "F")
-    m = re.search(r"-(neg\d+|\d+)forbelow$", s)
+    m = re.search(r"-(neg-?\d+|\d+)forbelow$", s)
     if m:
         n = _poly_num(m.group(1))
         return (-math.inf, n + 0.5, "F")
-    m = re.search(r"-(neg\d+|\d+)forhigher$", s)
+    m = re.search(r"-(neg-?\d+|\d+)forhigher$", s)
     if m:
         n = _poly_num(m.group(1))
         return (n - 0.5, math.inf, "F")
@@ -1839,14 +1843,14 @@ def _poly_parse_interval(slug: str) -> tuple[float, float, str] | None:
 def _poly_label(slug: str) -> str:
     s = slug.lower()
     for pat, fmt in [
-        (r"-(neg\d+|\d{1,3})-(neg\d+|\d{1,3})c$", lambda a, b: f"{_poly_num(a)}-{_poly_num(b)}°C"),
-        (r"-(neg\d+|\d{1,3})-(neg\d+|\d{1,3})f$", lambda a, b: f"{_poly_num(a)}-{_poly_num(b)}°F"),
-        (r"-(neg\d+|\d+)c$", lambda n: f"{_poly_num(n)}°C"),
-        (r"-(neg\d+|\d+)corbelow$", lambda n: f"{_poly_num(n)}°C or below"),
-        (r"-(neg\d+|\d+)corhigher$", lambda n: f"{_poly_num(n)}°C or higher"),
-        (r"-(neg\d+|\d+)f$", lambda n: f"{_poly_num(n)}°F"),
-        (r"-(neg\d+|\d+)forbelow$", lambda n: f"{_poly_num(n)}°F or below"),
-        (r"-(neg\d+|\d+)forhigher$", lambda n: f"{_poly_num(n)}°F or higher"),
+        (r"-(neg-?\d+|\d{1,3})-(neg-?\d+|\d{1,3})c$", lambda a, b: f"{_poly_num(a)}-{_poly_num(b)}°C"),
+        (r"-(neg-?\d+|\d{1,3})-(neg-?\d+|\d{1,3})f$", lambda a, b: f"{_poly_num(a)}-{_poly_num(b)}°F"),
+        (r"-(neg-?\d+|\d+)c$", lambda n: f"{_poly_num(n)}°C"),
+        (r"-(neg-?\d+|\d+)corbelow$", lambda n: f"{_poly_num(n)}°C or below"),
+        (r"-(neg-?\d+|\d+)corhigher$", lambda n: f"{_poly_num(n)}°C or higher"),
+        (r"-(neg-?\d+|\d+)f$", lambda n: f"{_poly_num(n)}°F"),
+        (r"-(neg-?\d+|\d+)forbelow$", lambda n: f"{_poly_num(n)}°F or below"),
+        (r"-(neg-?\d+|\d+)forhigher$", lambda n: f"{_poly_num(n)}°F or higher"),
     ]:
         m = re.search(pat, s)
         if m:
