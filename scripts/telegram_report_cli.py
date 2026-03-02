@@ -696,16 +696,12 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
     fc_t = tmap.get(hour_key)
     fc_p = pmap.get(hour_key)
 
-    def parse_cloud_layers(obs: dict[str, Any]) -> str:
-        import re
+    def _collect_cloud_pairs(obs: dict[str, Any]) -> list[tuple[str, int | None]]:
         raw_ob = (obs.get("rawOb") or "")
-        fallback_cover = obs.get("cover")
-        if not raw_ob and not obs.get("clouds"):
-            return fallback_cover or "N/A"
         if " CAVOK" in raw_ob:
-            return "CAVOK"
+            return [("CAVOK", None)]
         if " CLR" in raw_ob:
-            return "CLR"
+            return [("CLR", None)]
 
         pairs: list[tuple[str, int | None]] = []
         seen: set[tuple[str, int | None]] = set()
@@ -736,7 +732,47 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
                 pairs.append((code, ft))
 
         if not pairs:
-            return fallback_cover or "N/A"
+            fallback_cover = str(obs.get("cover") or "").upper()
+            if fallback_cover in {"CAVOK", "CLR"}:
+                return [(fallback_cover, None)]
+            if fallback_cover in {"FEW", "SCT", "BKN", "OVC", "VV"}:
+                return [(fallback_cover, None)]
+        return pairs
+
+    def _cloud_compact(obs: dict[str, Any]) -> str:
+        pairs = _collect_cloud_pairs(obs)
+        if not pairs:
+            return str(obs.get("cover") or "N/A")
+        if len(pairs) == 1 and pairs[0][0] in {"CAVOK", "CLR"}:
+            return pairs[0][0]
+        toks: list[str] = []
+        for code, ft in pairs:
+            if ft is None:
+                toks.append(code)
+            else:
+                toks.append(f"{code}{int(round(ft/100.0)):03d}")
+        return " ".join(toks)
+
+    def _cloud_tokens(obs: dict[str, Any]) -> list[str]:
+        pairs = _collect_cloud_pairs(obs)
+        if not pairs:
+            return []
+        if len(pairs) == 1 and pairs[0][0] in {"CAVOK", "CLR"}:
+            return [pairs[0][0]]
+        toks: list[str] = []
+        for code, ft in pairs:
+            if ft is None:
+                toks.append(code)
+            else:
+                toks.append(f"{code}{int(round(ft/100.0)):03d}")
+        return toks
+
+    def parse_cloud_layers(obs: dict[str, Any]) -> str:
+        pairs = _collect_cloud_pairs(obs)
+        if not pairs:
+            return str(obs.get("cover") or "N/A")
+        if len(pairs) == 1 and pairs[0][0] in {"CAVOK", "CLR"}:
+            return pairs[0][0]
 
         code_meaning = {
             "FEW": "少云",
@@ -744,6 +780,8 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
             "BKN": "多云",
             "OVC": "阴天",
             "VV": "垂直能见度",
+            "CAVOK": "能见良好",
+            "CLR": "净空",
         }
         out = []
         for code, ft in pairs:
@@ -785,12 +823,136 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
             return "较上一报持平"
         return f"较上一报 {v:+.1f}{unit}"
 
+    def _wx_human_desc(wx_raw: Any) -> str:
+        t = str(wx_raw or "").upper().strip()
+        if not t or t == "无降水天气现象":
+            return ""
+
+        parts: list[str] = []
+        intensity = ""
+        if "+" in t:
+            intensity = "强"
+        elif "-" in t:
+            intensity = "小"
+
+        if "TS" in t:
+            parts.append("雷暴")
+        if "SH" in t:
+            parts.append("阵性")
+
+        if "FZRA" in t:
+            parts.append("冻雨")
+        elif "DZ" in t:
+            parts.append((intensity or "毛毛") + "雨")
+        elif "RA" in t:
+            parts.append((intensity + "雨") if intensity else "雨")
+        elif "SN" in t:
+            parts.append((intensity + "雪") if intensity else "雪")
+
+        if "FG" in t:
+            parts.append("雾")
+        elif "BR" in t:
+            parts.append("轻雾")
+        elif "HZ" in t:
+            parts.append("霾")
+
+        if not parts:
+            return ""
+        # de-duplicate while preserving order
+        uniq = list(dict.fromkeys(parts))
+        return "、".join(uniq)
+
+    def _wind_change_text(cur: dict[str, Any], prev_x: dict[str, Any] | None) -> str:
+        if not prev_x:
+            return ""
+
+        cur_d = cur.get("wdir")
+        cur_s = cur.get("wspd")
+        prv_d = prev_x.get("wdir")
+        prv_s = prev_x.get("wspd")
+
+        def _f(v: Any) -> float | None:
+            try:
+                if v in (None, "", "VRB"):
+                    return None
+                return float(v)
+            except Exception:
+                return None
+
+        cd = _f(cur_d)
+        pd = _f(prv_d)
+        try:
+            cs = float(cur_s)
+        except Exception:
+            cs = None
+        try:
+            ps = float(prv_s)
+        except Exception:
+            ps = None
+
+        prev_wind_txt = f"{prv_d}° {prv_s}kt" if (prv_d not in (None, "", "VRB") and prv_s not in (None, "")) else f"{prv_d or 'VRB'} {prv_s or '?'}kt"
+
+        if cd is None and pd is None:
+            dir_msg = "风向信息不足"
+        elif cd is None and pd is not None:
+            dir_msg = "转为风向不定"
+        elif cd is not None and pd is None:
+            dir_msg = "风向由不定转为可判定"
+        else:
+            d = abs((cd - pd + 180.0) % 360.0 - 180.0)
+            if d >= 60:
+                dir_msg = "风向明显转向"
+            elif d >= 25:
+                dir_msg = "风向小幅转向"
+            else:
+                dir_msg = "风向基本稳定"
+
+        if cs is None or ps is None:
+            spd_msg = "风速变化待确认"
+        else:
+            ds = cs - ps
+            if ds >= 3.0:
+                spd_msg = f"风速增强{ds:.0f}kt"
+            elif ds <= -3.0:
+                spd_msg = f"风速减弱{abs(ds):.0f}kt"
+            else:
+                spd_msg = "风速变化不大"
+
+        return f"较上一报{prev_wind_txt}，{dir_msg}，{spd_msg}"
+
+    def _cloud_change_text(cur: dict[str, Any], prev_x: dict[str, Any] | None) -> str:
+        if not prev_x:
+            return ""
+        prev_compact = _cloud_compact(prev_x)
+        cur_tokens = _cloud_tokens(cur)
+        prev_tokens = _cloud_tokens(prev_x)
+        tr = _cloud_trend(cur, prev_x)
+
+        if cur_tokens == prev_tokens:
+            return f"（上一报{prev_compact}，云层稳定无变化）"
+
+        cur_set = set(cur_tokens)
+        prev_set = set(prev_tokens)
+        added = [t for t in cur_tokens if t not in prev_set]
+        removed = [t for t in prev_tokens if t not in cur_set]
+
+        if added and removed:
+            tr_txt = f"云层重排（新增{'/'.join(added)}；消退{'/'.join(removed)}）"
+        elif added:
+            tr_txt = f"云量增加（新增{'/'.join(added)}）"
+        elif removed:
+            tr_txt = f"云量减少（消退{'/'.join(removed)}）"
+        else:
+            tr_txt = tr if tr else "云层结构有调整"
+
+        return f"（上一报{prev_compact}，{tr_txt}）"
+
     def fmt_latest_obs(x: dict[str, Any], prev_x: dict[str, Any] | None) -> list[str]:
         local = _metar_obs_time_utc(x).astimezone(tz)
-        raw_ob = (x.get("rawOb") or "").strip()
         wx = x.get("wxString") or x.get("wx") or "无降水天气现象"
+        wx_desc = _wx_human_desc(wx)
         cloud = parse_cloud_layers(x)
-        prev_cloud = None
+
         dt = dp = dpres = 0.0
         if prev_x:
             try:
@@ -799,30 +961,35 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
                 dpres = float(x.get("altim", 0)) - float(prev_x.get("altim", 0))
             except Exception:
                 pass
-            prev_cloud = parse_cloud_layers(prev_x)
-        cloud_compare = ""
+
+        latest_hdr = f"**最新报（{local.strftime('%H:%M')} {time_label}）**"
         if prev_x:
-            prev_code = _cloud_token(prev_x) or "未知"
-            tr = _cloud_trend(x, prev_x)
-            if "稳定" in tr:
-                tr_txt = "云层稳定无变化"
-            elif "增加" in tr or "回补" in tr:
-                tr_txt = "云量增加"
-            elif "减弱" in tr or "开窗" in tr:
-                tr_txt = "云量减少"
-            else:
-                tr_txt = "云层趋势待确认"
-            cloud_compare = f"（上一报{prev_code}，{tr_txt}）"
+            prev_local = _metar_obs_time_utc(prev_x).astimezone(tz)
+            latest_hdr = f"**最新报（{local.strftime('%H:%M')} {time_label}）（上一报 {prev_local.strftime('%H:%M')} {time_label}）**"
+
+        wind_line = fmt_wind(x)
+        wind_cmp = _wind_change_text(x, prev_x)
+        if wind_cmp:
+            wind_line = f"{wind_line}（{wind_cmp}）"
+
+        cloud_line = cloud
+        cloud_cmp = _cloud_change_text(x, prev_x)
+        if cloud_cmp:
+            cloud_line = f"{cloud}{cloud_cmp}"
+
         lines = [
-            f"**最新报（{local.strftime('%H:%M')} {time_label}）**",
+            latest_hdr,
             f"• **气温**：{x.get('temp')}°C（{_delta_text(dt, '°C')}）",
             f"• **露点**：{x.get('dewp')}°C（{_delta_text(dp, '°C')}）",
             f"• **气压**：{x.get('altim')} hPa（{_delta_text(dpres, ' hPa')}）",
-            f"• **风**：{fmt_wind(x)}",
-            f"• **云层**：{cloud}{cloud_compare}",
+            f"• **风**：{wind_line}",
+            f"• **云层**：{cloud_line}",
         ]
         if wx and wx != "无降水天气现象":
-            lines.append(f"• **天气现象**：{wx}")
+            if wx_desc:
+                lines.append(f"• **天气现象**：{wx}（{wx_desc}）")
+            else:
+                lines.append(f"• **天气现象**：{wx}")
         return lines
 
     def _cloud_code(x: dict[str, Any] | None) -> str:
@@ -927,10 +1094,6 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
 
     lines = []
     lines.extend(fmt_latest_obs(latest, prev))
-    if prev:
-        prev_local = _metar_obs_time_utc(prev).astimezone(tz)
-        lines.append("")
-        lines.append(f"上一报时间：{prev_local.strftime('%H:%M')} {time_label}")
 
     bias = None if fc_t is None else round(float(latest.get("temp", 0)) - float(fc_t), 2)
     p_bias = None if fc_p is None else round(float(latest.get("altim", 0)) - float(fc_p), 2)
