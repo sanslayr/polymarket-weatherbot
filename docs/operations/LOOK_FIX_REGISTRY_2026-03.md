@@ -39,6 +39,10 @@ Last updated: 2026-03-02
 
 - 700/500hPa 证据“有信号才显示”，过滤泛化句  
   - commit: `1608961`
+- 500hPa 识别增强（减少漏检）：
+  - 由单轴 `dzx` + 曲率改为方向无关的 `|∇z500| + Laplacian` 判据
+  - 新增弱场 fallback（weak_ridge/weak_trough）避免“500 完全识别不出”
+  - 接入前后场趋势标记（strengthening/deepening/filling/weakening）并纳入 500 置信度约束
 
 ## 5) Polymarket 解析/标签逻辑
 

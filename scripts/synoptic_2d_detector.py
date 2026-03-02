@@ -498,20 +498,55 @@ def detect_frontogenesis_zones(
     return systems[:4]
 
 
-def detect_500_axes(lat: np.ndarray, lon: np.ndarray, z500: np.ndarray, station: dict[str, float]) -> list[dict[str, Any]]:
+def detect_500_axes(
+    lat: np.ndarray,
+    lon: np.ndarray,
+    z500: np.ndarray,
+    station: dict[str, float],
+    prev_z500: np.ndarray | None = None,
+) -> list[dict[str, Any]]:
     lat_step, lon_step = grid_step_degrees(lat, lon)
     cell_area = approx_cell_area_km2(float(np.median(lat)), lat_step, lon_step)
-    min_pixels = max(6, int(round(140000.0 / max(cell_area, 1.0))))
+    min_pixels = max(5, int(round(120000.0 / max(cell_area, 1.0))))
 
     dzy, dzx = finite_diff(lat, lon, z500)
-    # trough proxy: strong west-east gradient with cyclonic curvature proxy
-    d2y, d2x = finite_diff(lat, lon, dzx)
-    curvature = d2x
+    grad_mag = np.hypot(dzx, dzy)
 
-    trough_mask = (np.abs(dzx) > np.percentile(np.abs(dzx), 85)) & (curvature < np.percentile(curvature, 20))
-    ridge_mask = (np.abs(dzx) > np.percentile(np.abs(dzx), 85)) & (curvature > np.percentile(curvature, 80))
+    # Orientation-agnostic curvature proxy via Laplacian of z500.
+    d2y_from_dzy, _ = finite_diff(lat, lon, dzy)
+    _, d2x_from_dzx = finite_diff(lat, lon, dzx)
+    lap = d2x_from_dzx + d2y_from_dzy
+
+    gthr = float(np.percentile(grad_mag, 84))
+    l_low = float(np.percentile(lap, 18))
+    l_high = float(np.percentile(lap, 82))
+
+    trough_mask = (grad_mag > gthr) & (lap < l_low)
+    ridge_mask = (grad_mag > gthr) & (lap > l_high)
 
     systems: list[dict[str, Any]] = []
+
+    def _trend_for(comp: list[tuple[int, int]], stype: str) -> str | None:
+        if prev_z500 is None:
+            return None
+        try:
+            dz = float(np.mean([z500[i, j] - prev_z500[i, j] for i, j in comp]))
+        except Exception:
+            return None
+        if "trough" in stype:
+            if dz <= -4.0:
+                return "deepening"
+            if dz >= 4.0:
+                return "filling"
+            return "steady"
+        if "ridge" in stype:
+            if dz >= 4.0:
+                return "strengthening"
+            if dz <= -4.0:
+                return "weakening"
+            return "steady"
+        return None
+
     for system_type, mask in (("shortwave_trough", trough_mask), ("ridge", ridge_mask)):
         comps = connected_components(mask)
         for comp in comps:
@@ -520,7 +555,7 @@ def detect_500_axes(lat: np.ndarray, lon: np.ndarray, z500: np.ndarray, station:
             c_lat, c_lon = centroid(lat, lon, comp)
             dist = haversine_km(station["lat"], station["lon"], c_lat, c_lon)
             geo = build_geo_context(station, c_lat, c_lon, dist)
-            strength = float(np.mean(np.abs([dzx[i, j] for i, j in comp])))
+            strength = float(np.mean([grad_mag[i, j] for i, j in comp]))
             systems.append(
                 {
                     "system_type": system_type,
@@ -528,13 +563,56 @@ def detect_500_axes(lat: np.ndarray, lon: np.ndarray, z500: np.ndarray, station:
                     "level": "500",
                     "center_lat": geo["center_lat"],
                     "center_lon": geo["center_lon"],
-                    "axis_strength": round(strength, 6),
+                    "axis_strength": round(strength, 8),
                     "area_pixels": len(comp),
                     "distance_to_station_km": geo["distance_km"],
                     "region_name": station_sector_label(station["lat"], station["lon"], c_lat, c_lon, dist),
                     "geo_context": geo,
+                    "trend": _trend_for(comp, system_type),
                 }
             )
+
+    # Weak-field fallback: if no explicit axis found, still emit weak ridge/trough background
+    # using normalized z500 anomaly extrema to reduce "500 not detected" dropouts.
+    if not systems:
+        z_mean = float(np.nanmean(z500))
+        z_std = float(np.nanstd(z500))
+        if z_std > 1e-6:
+            anom = (z500 - z_mean) / z_std
+            fallback_candidates: list[tuple[str, int, int, float]] = []
+
+            i_max, j_max = np.unravel_index(int(np.nanargmax(anom)), anom.shape)
+            s_max = float(anom[i_max, j_max])
+            if s_max >= 0.85:
+                fallback_candidates.append(("weak_ridge_fallback", int(i_max), int(j_max), s_max))
+
+            i_min, j_min = np.unravel_index(int(np.nanargmin(anom)), anom.shape)
+            s_min = float(anom[i_min, j_min])
+            if s_min <= -0.85:
+                fallback_candidates.append(("weak_trough_fallback", int(i_min), int(j_min), abs(s_min)))
+
+            for stype, ii, jj, score in fallback_candidates:
+                c_lat = float(lat[ii])
+                c_lon = float(lon[jj])
+                dist = haversine_km(station["lat"], station["lon"], c_lat, c_lon)
+                geo = build_geo_context(station, c_lat, c_lon, dist)
+                comp = [(ii, jj)]
+                systems.append(
+                    {
+                        "system_type": stype,
+                        "scale": "synoptic",
+                        "level": "500",
+                        "center_lat": geo["center_lat"],
+                        "center_lon": geo["center_lon"],
+                        "axis_strength": round(score, 6),
+                        "area_pixels": 1,
+                        "distance_to_station_km": geo["distance_km"],
+                        "region_name": station_sector_label(station["lat"], station["lon"], c_lat, c_lon, dist),
+                        "geo_context": geo,
+                        "trend": _trend_for(comp, stype),
+                        "detection_mode": "fallback_weak",
+                    }
+                )
 
     systems.sort(key=lambda x: x["distance_to_station_km"])
     return systems[:6]
@@ -610,8 +688,11 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
 
     prev = payload.get("previous_fields")
     prev_mslp = None
+    prev_z500 = None
     if prev and "mslp_hpa" in prev:
         prev_mslp = np.asarray(prev["mslp_hpa"], dtype=float)
+    if prev and "z500_gpm" in prev:
+        prev_z500 = np.asarray(prev["z500_gpm"], dtype=float)
 
     lows = detect_pressure_centers(lat, lon, mslp, station, "surface_low", prev_mslp)
     highs = detect_pressure_centers(lat, lon, mslp, station, "surface_high", prev_mslp)
@@ -620,7 +701,7 @@ def analyze(payload: dict[str, Any]) -> dict[str, Any]:
     llj = detect_llj_shear_zones(lat, lon, u850, v850, u925, v925, station)
     dry700 = detect_dry_intrusion_700(lat, lon, t700, t850, station)
     baro = detect_baroclinic_coupling(lat, lon, mslp, t850, station)
-    axes = detect_500_axes(lat, lon, z500, station)
+    axes = detect_500_axes(lat, lon, z500, station, prev_z500=prev_z500)
     planetary = diagnose_planetary(lat, z500, u850)
 
     systems = planetary + lows + highs + axes + fronts + llj + dry700 + baro + bands["warm_advection"] + bands["cold_advection"]
