@@ -1922,7 +1922,14 @@ def _build_polymarket_section(
     if not event_found:
         return "Polymarket：未找到对应市场。"
 
+    def _num(v: Any) -> float:
+        try:
+            return float(v)
+        except Exception:
+            return 0.0
+
     parsed: list[tuple[float, str, Any, Any, float, float]] = []
+    resolved_rows: list[tuple[float, str, Any, Any, float, float]] = []
     for m in markets:
         iv = _poly_parse_interval(str(m.get("slug", "")))
         if not iv:
@@ -1939,7 +1946,12 @@ def _build_polymarket_section(
             center = 999.0
         else:
             center = (lo + hi) / 2
-        parsed.append((center, _poly_label(str(m.get("slug", ""))), m.get("bestBid"), m.get("bestAsk"), lo, hi))
+        row = (center, _poly_label(str(m.get("slug", ""))), m.get("bestBid"), m.get("bestAsk"), lo, hi)
+        parsed.append(row)
+
+        closed_flag = bool(m.get("closed")) or (m.get("acceptingOrders") is False)
+        if closed_flag and max(_num(m.get("bestBid")), _num(m.get("bestAsk"))) >= 0.98:
+            resolved_rows.append(row)
 
     parsed.sort(key=lambda x: x[0])
     if not parsed:
@@ -1964,6 +1976,8 @@ def _build_polymarket_section(
         except Exception:
             obs_max = None
 
+    resolved_override = False
+    resolved_below_obs = False
     filtered = []
     for center, label, bid, ask, lo, hi in parsed:
         # User policy: ignore bins whose label-center is below observed daily max.
@@ -1973,7 +1987,15 @@ def _build_polymarket_section(
         filtered.append((center, label, bid, ask, lo, hi))
 
     if not filtered:
-        if obs_max is not None:
+        if resolved_rows:
+            # Market may already be resolved to edge bins far below current observed temp labels.
+            # Preserve explicit resolved output instead of dropping whole section.
+            best_res = sorted(resolved_rows, key=lambda x: max(_px(x[2]), _px(x[3])), reverse=True)[0]
+            filtered = [best_res]
+            resolved_override = True
+            if obs_max is not None and float(best_res[0]) < float(obs_max):
+                resolved_below_obs = True
+        elif obs_max is not None:
             filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed if c >= float(obs_max)]
         else:
             filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed]
@@ -2377,6 +2399,11 @@ def _build_polymarket_section(
                 settled_center = None
     if mismatch:
         range_notes.append("  • 注：市场档位与气象主带存在错位，已按最近 below/above 边缘区间回退展示。")
+    if resolved_override:
+        if resolved_below_obs:
+            range_notes.append("  • ✅ 市场已结算（Resolved）：盘口档位整体偏低，已结算至最高档。")
+        else:
+            range_notes.append("  • ✅ 市场已结算（Resolved）：当前显示为已结算胜出档位。")
 
     # Market-vs-forecast distribution cues (use full filtered market set, not only displayed bins).
     try:
