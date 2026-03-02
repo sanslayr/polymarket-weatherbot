@@ -2208,9 +2208,14 @@ def _build_polymarket_section(
                     return wpts[-1][0]
 
                 emp_mu = sum(c * p for c, _l, p, _lo, _hi, _e in wpts)
-                emp_qlo = _wq(0.075)
-                emp_qhi = _wq(0.925)
                 edge_share = sum(p for _c, _l, p, _lo, _hi, e in wpts if e)
+                # Dynamic coverage target (avoid hard-coded 85%):
+                # tighter books -> broader confidence statement; edge-heavy books -> narrower core range.
+                cov_target = max(0.80, min(0.90, 0.90 - 0.18 * edge_share))
+                q_lo = (1.0 - cov_target) / 2.0
+                q_hi = 1.0 - q_lo
+                emp_qlo = _wq(q_lo)
+                emp_qhi = _wq(q_hi)
 
                 # Normal-fit expectation/range (helps when higher/lower edge bins carry non-trivial mass).
                 fit_ok = False
@@ -2260,20 +2265,30 @@ def _build_polymarket_section(
                 except Exception:
                     fit_ok = False
 
+                cov_pct = int(round(cov_target * 100.0))
                 if fit_ok:
-                    # ~85% central coverage for normal assumption
-                    z85 = 1.44
+                    # convert target central coverage -> z via binary search (erf-based CDF)
+                    z_lo_b, z_hi_b = 0.5, 2.2
+                    for _ in range(28):
+                        z_mid = 0.5 * (z_lo_b + z_hi_b)
+                        c_mid = math.erf(z_mid / math.sqrt(2.0))
+                        if c_mid < cov_target:
+                            z_lo_b = z_mid
+                        else:
+                            z_hi_b = z_mid
+                    z_cov = 0.5 * (z_lo_b + z_hi_b)
+
                     mu_u = _to_unit(fit_mu)
-                    lo_u = _to_unit(fit_mu - z85 * fit_sigma)
-                    hi_u = _to_unit(fit_mu + z85 * fit_sigma)
+                    lo_u = _to_unit(fit_mu - z_cov * fit_sigma)
+                    hi_u = _to_unit(fit_mu + z_cov * fit_sigma)
                     lines.append("  • 市场定价期望：")
-                    lines.append(f"    {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（85%范围）。")
+                    lines.append(f"    {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（{cov_pct}%范围）。")
                 else:
                     mu_u = _to_unit(emp_mu)
                     lo_u = _to_unit(emp_qlo)
                     hi_u = _to_unit(emp_qhi)
                     lines.append("  • 市场定价期望：")
-                    lines.append(f"    {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（85%范围）。")
+                    lines.append(f"    {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（{cov_pct}%范围）。")
 
                 if edge_share > 0.55:
                     edge_bins = sorted([(str(lbl), float(p)) for _c, lbl, p, _lo, _hi, e in wpts if e], key=lambda x: x[1], reverse=True)
