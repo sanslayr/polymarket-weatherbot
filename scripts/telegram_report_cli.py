@@ -2233,7 +2233,7 @@ def _build_polymarket_section(
                     lines.append(f"  • 市场定价期望：{mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（约80-90%覆盖区间）。")
 
                 if edge_share > 0.55:
-                    lines.append(f"  • 注：边缘档位占比较高（约 {edge_share*100:.0f}%），上述期望参考性偏弱。")
+                    lines.append(f"  • 注：边缘占比较高（约 {edge_share*100:.0f}%），期望仅供参考。")
 
                 # explicit hot-tail cue above forecast core upper bound
                 fc_hi = float(core_hi)
@@ -2255,7 +2255,7 @@ def _build_polymarket_section(
 
     if show_lobster_reminder:
         lines.append("")
-        lines.append("**🦞 别让龙虾替你下单——真要准到离谱，这报告你也看不到🦞**")
+        lines.append("**🦞 龙虾只报天气，不替你下单。🦞**")
 
     return "\n".join(lines)
 
