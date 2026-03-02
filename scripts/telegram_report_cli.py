@@ -2065,8 +2065,8 @@ def _build_polymarket_section(
 
         sym = "°F" if use_unit == "F" else "°C"
 
-        pts_full: list[tuple[float, str, float]] = []
-        for c, lbl, b, a, _lo, _hi in filtered:
+        pts_full: list[tuple[float, str, float, bool]] = []
+        for c, lbl, b, a, lo_i, hi_i in filtered:
             bidv = _px(b)
             askv = _px(a)
             if bidv > 0 and askv > 0:
@@ -2074,23 +2074,24 @@ def _build_polymarket_section(
             else:
                 p = max(bidv, askv)
             if p > 0:
-                pts_full.append((float(c), str(lbl), float(p)))
+                is_edge = bool(math.isinf(lo_i) or math.isinf(hi_i))
+                pts_full.append((float(c), str(lbl), float(p), is_edge))
 
         if len(pts_full) >= 2:
-            tot = sum(p for _c, _l, p in pts_full)
+            tot = sum(p for _c, _l, p, _e in pts_full)
             if tot > 0:
-                wpts = sorted([(c, l, p / tot) for c, l, p in pts_full], key=lambda z: z[0])
-                m_center = sum(c * p for c, _l, p in wpts)
+                wpts = sorted([(c, l, p / tot, e) for c, l, p, e in pts_full], key=lambda z: z[0])
+                m_center = sum(c * p for c, _l, p, _e in wpts)
 
                 # top priced bins by mid (helps explain 12/13+ style concentration)
                 top = sorted(wpts, key=lambda z: z[2], reverse=True)[:3]
                 if top:
-                    top_txt = " / ".join([f"{lbl}({w*100:.0f}%)" for _c, lbl, w in top])
+                    top_txt = " / ".join([f"{lbl}({w*100:.0f}%)" for _c, lbl, w, _e in top])
                     lines.append(f"  • 市场定价前列（按mid权重）：{top_txt}。")
 
                 def _wq(q: float) -> float:
                     acc = 0.0
-                    for c, _l, p in wpts:
+                    for c, _l, p, _e in wpts:
                         acc += p
                         if acc >= q:
                             return c
@@ -2098,6 +2099,16 @@ def _build_polymarket_section(
 
                 q25 = _wq(0.25)
                 q75 = _wq(0.75)
+
+                edge_share = sum(p for _c, _l, p, e in wpts if e)
+                m_u = _to_unit(m_center)
+                q25_u = _to_unit(q25)
+                q75_u = _to_unit(q75)
+                if edge_share <= 0.55:
+                    lines.append(f"  • 市场隐含期望约 {m_u:.1f}{sym}，隐含主带约 {q25_u:.1f}~{q75_u:.1f}{sym}。")
+                else:
+                    lines.append(f"  • 注：边缘档位占比较高（约 {edge_share*100:.0f}%），市场隐含期望参考性偏弱。")
+
                 fc_lo = float(core_lo)
                 fc_hi = float(core_hi)
                 fc_center = 0.5 * (fc_lo + fc_hi)
@@ -2108,17 +2119,14 @@ def _build_polymarket_section(
                 ov_ratio = ov / base
 
                 if abs(gap) >= 1.0 or ov_ratio < 0.25:
-                    m_u = _to_unit(m_center)
                     fc_u = _to_unit(fc_center)
-                    q25_u = _to_unit(q25)
-                    q75_u = _to_unit(q75)
                     lines.append(
                         f"  • 提示：市场定价重心约 {m_u:.1f}{sym}（主带 {q25_u:.1f}~{q75_u:.1f}{sym}），"
                         f"与气象主看中心 {fc_u:.1f}{sym} 偏离较大。"
                     )
 
                 # explicit hot-tail cue above forecast core upper bound
-                hot_tail = sum(p for c, _l, p in wpts if c >= (fc_hi + 0.5))
+                hot_tail = sum(p for c, _l, p, _e in wpts if c >= (fc_hi + 0.5))
                 if hot_tail >= 0.18:
                     lines.append(f"  • 提示：市场对更高温尾部定价不低（≥{_to_unit(fc_hi + 0.5):.1f}{sym} 合计约 {hot_tail*100:.0f}%）。")
     except Exception:
