@@ -4172,7 +4172,7 @@ def choose_section_text(
 
     # 窗口已过后的惯性上冲抑制信号
     if bool(metar_diag.get("late_end_cap_applied")):
-        focus.append((1.01, "• 峰值窗已过且斜率未再放大 → 继续大幅上冲概率偏低，优先防惯性高估。"))
+        focus.append((1.01, "• 峰值窗已过且斜率未再放大 → 继续大幅上冲概率偏低。"))
 
     # 基于METAR多层云量 + 天气现象的有效辐射因子（0~1）
     if phase_now in {"near_window", "in_window"}:
