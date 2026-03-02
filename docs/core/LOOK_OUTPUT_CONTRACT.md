@@ -20,6 +20,7 @@ Last updated: 2026-03-02
 ## 3) Header rules
 - 标题：`📍 ICAO (City) | lat/lon (+地形标签)`
 - 时间：UTC + Local
+- 头部末行固定风险提示：`⚠️ AI生成，仅供参考，不构成交易建议`（可同义改写）
 - `near_window/in_window` 可启用 compact header（隐藏噪音行）
 
 ## 4) Synoptic rules
@@ -38,6 +39,7 @@ Last updated: 2026-03-02
 - 天气现象：保留原码并尽量给中文释义（例：`-RA（小雨）`）。
 
 ## 6) Tmax interval rules
+- 标题固定：`可能最高温区间（仅供参考）`
 - 形式：`主带区间 + 条件尾部`（合并在同一行表达）
 - 约束优先级：
   - 低云持续压制
@@ -62,6 +64,7 @@ Last updated: 2026-03-02
 - 标签规则 forecast-first：
   - `最有可能`：天气一致性优先
   - `潜在Alpha`：需满足最小天气一致性门槛
+- 若出现 `最有可能/潜在Alpha` 等强调标签，标题下需追加轻量风险提醒（可幽默语气），明确“非投资建议”。
 
 ## 9) Unit rules
 - 美国站点（ICAO `K*`）：Tmax 区间默认显示 °F

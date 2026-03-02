@@ -1977,7 +1977,26 @@ def _build_polymarket_section(
 
     score_map = {(lbl, str(bid), str(ask)): _alpha_score((c, lbl, bid, ask, lo, hi)) for c, lbl, bid, ask, lo, hi in focus}
 
-    lines = ["📈 **Polymarket 盘口与博弈**", "**博弈区间**"]
+    lines = ["📈 **Polymarket 盘口与博弈**"]
+
+    def _row_tag(row: tuple[float, str, Any, Any, float, float]) -> str:
+        _c, label, bid, ask, _lo, _hi = row
+        ask_v = _px(ask)
+        if best_label and label == best_label:
+            return "👍最有可能"
+        s = score_map.get((label, str(bid), str(ask)), 0.0)
+        w = _weather_score(row)
+        if ask_v > 0 and ask_v <= 0.15 and w >= 0.12 and s >= 0.22:
+            return "😇潜在Alpha"
+        if ask_v > 0.15 and ask_v <= 0.18 and w >= 0.45 and s >= 0.30:
+            return "😇潜在Alpha"
+        return ""
+
+    if any(_row_tag(r) for r in focus):
+        lines.append("🦞 友情提醒：下面的“最有可能/潜在Alpha”只是模型博弈视角，不是喊单，别让龙虾替你下单。")
+
+    lines.append("**博弈区间**")
+
     if len(focus) == 1:
         only = focus[0]
         bid_only = _px(only[2])
@@ -1986,27 +2005,11 @@ def _build_polymarket_section(
             lines.append("  • ✅ 已定局：当前仅剩单一高置信可交易区间。")
     if mismatch:
         lines.append("  • 注：市场档位与气象主带存在错位，已按最近 below/above 边缘区间回退展示。")
+
     for _c, label, bid, ask, _lo, _hi in focus:
-        ask_v = _px(ask)
-        bid_v = _px(bid)
-        spread_v = max(0.0, ask_v - bid_v)
         bid_txt = "None" if bid in (None, "") else str(bid)
         ask_txt = "None" if ask in (None, "") else str(ask)
-        tag = ""
-        if best_label and label == best_label:
-            tag = "👍最有可能"
-        else:
-            # 潜在alpha：
-            # - 常规: Ask<=0.15
-            # - 扩展: 0.15<Ask<=0.18 且天气一致性高
-            row = (_c, label, bid, ask, _lo, _hi)
-            s = score_map.get((label, str(bid), str(ask)), 0.0)
-            w = _weather_score(row)
-            # 常规alpha也必须满足最低天气一致性，避免“很便宜但偏离天气区间太远”的误标。
-            if ask_v > 0 and ask_v <= 0.15 and w >= 0.12 and s >= 0.22:
-                tag = "😇潜在Alpha"
-            elif ask_v > 0.15 and ask_v <= 0.18 and w >= 0.45 and s >= 0.30:
-                tag = "😇潜在Alpha"
+        tag = _row_tag((_c, label, bid, ask, _lo, _hi))
 
         if tag:
             lines.append(f"  • **{label}（{tag}）：Bid {bid_txt} | Ask {ask_txt}**")
@@ -3256,7 +3259,7 @@ def choose_section_text(
     lo = _soft_snap(lo)
     hi = _soft_snap(max(hi, lo + 0.2))
 
-    peak_range_block = ["🌡️ **可能最高温区间**"]
+    peak_range_block = ["🌡️ **可能最高温区间（仅供参考）**"]
 
     if bool(metar_diag.get("post_focus_window_active")) and syn_w:
         post_mode = str(metar_diag.get("post_window_mode") or "")
@@ -3503,7 +3506,8 @@ def _render_metar_only_report(st: Station, model: str, links_payload: dict[str, 
     header = (
         f"📍 **{st.icao} ({st.city}) | {abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}**\n"
         f"判断时间: {now_utc.strftime('%Y-%m-%d %H:%M')} UTC | {now_local.strftime('%Y-%m-%d %H:%M')} Local ({format_utc_offset(now_local)})\n"
-        f"分析基准模型: {model.upper()}（运行时次: {rt_fmt}）"
+        f"分析基准模型: {model.upper()}（运行时次: {rt_fmt}）\n"
+        "⚠️ 报告由AI生成，可能存在与事实不符或幻觉成分，仅供参考，不构成任何交易建议。"
     )
 
     pseudo_peak = float(_metar_diag.get("latest_temp") or 0.0)
@@ -3782,6 +3786,8 @@ def render_report(command_text: str) -> str:
                 header_lines.append("⚠️ 数据提醒：Open-Meteo 请求过多（429），环流层已降级。")
     except Exception:
         pass
+
+    header_lines.append("⚠️ 报告由AI生成，可能存在与事实不符或幻觉成分，仅供参考，不构成任何交易建议。")
 
     header = "\n".join(header_lines)
 
