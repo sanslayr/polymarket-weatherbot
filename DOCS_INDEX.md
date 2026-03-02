@@ -9,15 +9,17 @@ Last updated: 2026-03-02
    - 天气形势特殊情形规则（跨城市 + 站点可扩展）
 3. `TECHNICAL_IMPLEMENTATION_NOTES.md`  
    - 非形势的工程实现备注（市场解析/数据精度/渲染细节）
-4. `ARCHITECTURE.md`  
+4. `LOG_ARCHIVE_POLICY.md`  
+   - 日志与快照归档策略（留存周期/目录/审计字段）
+5. `ARCHITECTURE.md`  
    - 模块分层、主链路、缓存与降级策略
-5. `DECISION_SCHEMA.md`  
+6. `DECISION_SCHEMA.md`  
    - `forecast-decision.v4` 契约
-6. `FORECAST_3D_STORAGE.md`  
+7. `FORECAST_3D_STORAGE.md`  
    - runtime cache / bundle / synoptic key 规则
-7. `TELEGRAM_COMMANDS.md`  
+8. `TELEGRAM_COMMANDS.md`  
    - Telegram 命令入口与参数约束
-8. `LOOK_FIX_REGISTRY_2026-03.md`  
+9. `LOOK_FIX_REGISTRY_2026-03.md`  
    - 近期修复清单（按主题归纳 + commit）
 
 ---
@@ -30,6 +32,7 @@ Last updated: 2026-03-02
 - `LOOK_OUTPUT_CONTRACT.md`
 - `SPECIAL_CASE_PLAYBOOK.md`
 - `TECHNICAL_IMPLEMENTATION_NOTES.md`
+- `LOG_ARCHIVE_POLICY.md`
 - `TELEGRAM_COMMANDS.md`
 
 ## 2) 变更与复盘（history/review）
@@ -66,6 +69,10 @@ Last updated: 2026-03-02
 - 若是**技术实现细节**（市场解析/数据精度/渲染）：
   1) 改 `TECHNICAL_IMPLEMENTATION_NOTES.md`
   2) 如影响用户输出，再补 `LOOK_OUTPUT_CONTRACT.md`
+  3) 在 REGISTRY 记变更
+- 若是**日志/归档治理**（留存周期、归档目录、审计字段）：
+  1) 改 `LOG_ARCHIVE_POLICY.md`
+  2) 如涉及输出或调试口径，再同步 TECHNICAL/CONTRACT
   3) 在 REGISTRY 记变更
 - 任何“仅临时实验”结论，不写进 CONTRACT；只写入 REGISTRY 并标注 `trial`。
 - 同一主题只保留一个“真源文档”（single source of truth）。
