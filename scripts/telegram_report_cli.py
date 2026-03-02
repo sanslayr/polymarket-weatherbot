@@ -3821,7 +3821,8 @@ def choose_section_text(
     lo = center - left_hw
     hi = center + right_hw
     if obs_max is not None:
-        lo = max(lo, float(obs_max) - 0.25)
+        # Physical consistency: daily maximum cannot be below already-observed daily maximum.
+        lo = max(lo, float(obs_max))
 
     # anti-collapse guard near peak: avoid over-compressing main band when warm-support evidence is aligned.
     sf_local = _sounding_factor_pack()
@@ -4227,6 +4228,38 @@ def choose_section_text(
     lo = _soft_snap(lo)
     hi = _soft_snap(max(hi, lo + 0.2))
 
+    # Compact settled-post mode:
+    # when peak window is clearly over and re-heating evidence is weak, output a concise
+    # observed-max-anchored range (instead of extended conditional branching).
+    compact_settled_mode = False
+    h_after_end_compact = None
+    try:
+        latest_local_txt = str(metar_diag.get("latest_report_local") or "")
+        end_local_txt = str(primary_window.get("end_local") or "")
+        latest_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
+        end_dt = datetime.fromisoformat(end_local_txt) if end_local_txt else None
+        if latest_dt is not None and end_dt is not None:
+            if latest_dt.tzinfo is not None and end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=latest_dt.tzinfo)
+            elif latest_dt.tzinfo is None and end_dt.tzinfo is not None:
+                latest_dt = latest_dt.replace(tzinfo=end_dt.tzinfo)
+        h_after_end_compact = ((latest_dt - end_dt).total_seconds() / 3600.0) if (latest_dt and end_dt) else None
+    except Exception:
+        h_after_end_compact = None
+
+    warm_reheat_hint = bool(("暖平流" in line850) and (b_cons >= 0.75) and (t_cons >= 0.30))
+    if (
+        obs_max is not None
+        and h_after_end_compact is not None
+        and h_after_end_compact >= 0.6
+        and t_cons <= rt_weak
+        and (t_acc is None or t_acc <= 0.05)
+        and (not bool(metar_diag.get("nocturnal_reheat_signal")))
+        and (not warm_reheat_hint)
+        and precip_state not in {"moderate", "heavy", "convective"}
+    ):
+        compact_settled_mode = True
+
     peak_range_block = ["🌡️ **可能最高温区间（仅供参考）**"]
 
     if bool(metar_diag.get("post_focus_window_active")) and syn_w:
@@ -4272,6 +4305,19 @@ def choose_section_text(
         )
     else:
         peak_range_block.append(f"- **{_fmt_range(disp_lo, disp_hi)}**（{window_label} {window_txt}）")
+    if compact_settled_mode and obs_max is not None:
+        settle_lo = _soft_snap(max(float(obs_max), lo))
+        settle_up = 0.25
+        if ("暖平流" in line850) and b_cons >= 0.55:
+            settle_up = 0.35
+        if bool(metar_diag.get("nocturnal_reheat_signal")):
+            settle_up = max(settle_up, 0.40)
+        settle_hi = _soft_snap(min(hi, max(settle_lo + 0.10, float(obs_max) + settle_up)))
+        peak_range_block = [
+            "🌡️ **可能最高温区间（仅供参考）**",
+            f"- **{_fmt_range(settle_lo, settle_hi)}**（按已观测最高温锚定；峰值窗已过）",
+        ]
+
     if bool(metar_diag.get("obs_correction_applied")):
         peak_range_block.append("- 注：已应用实况纠偏（模型峰值偏低，窗口锚定到当日实况峰值时段）。")
 
@@ -4478,6 +4524,12 @@ def choose_section_text(
             vars_block = vars_block[:1] + [
                 "• 临窗前继续跟踪温度斜率与风向节奏，必要时再改判。"
             ]
+
+    if compact_settled_mode and obs_max is not None:
+        vars_block = [
+            "⚠️ **关注变量**（窗口后）",
+            f"• 峰值窗基本已过，最高温大概率在已观测高点附近收敛（当前锚点 {_fmt_temp(float(obs_max))}）。",
+        ]
 
     # 低置信度时不打“最有可能”标签，避免误导
     allow_best_label = True
