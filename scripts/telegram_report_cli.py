@@ -842,7 +842,7 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         if not pairs:
             return str(obs.get("cover") or "N/A")
         if len(pairs) == 1 and pairs[0][0] in {"CAVOK", "CLR"}:
-            return pairs[0][0]
+            return {"CAVOK": "晴天", "CLR": "晴空"}.get(pairs[0][0], pairs[0][0])
         toks: list[str] = []
         for code, ft in pairs:
             if ft is None:
@@ -870,7 +870,7 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         if not pairs:
             return str(obs.get("cover") or "N/A")
         if len(pairs) == 1 and pairs[0][0] in {"CAVOK", "CLR"}:
-            return pairs[0][0]
+            return {"CAVOK": "晴天", "CLR": "晴空"}.get(pairs[0][0], pairs[0][0])
 
         code_meaning = {
             "FEW": "少云",
@@ -1624,6 +1624,7 @@ def _build_polymarket_section(
     primary_window: dict[str, Any],
     metar_diag: dict[str, Any] | None = None,
     range_hint: dict[str, float] | None = None,
+    allow_best_label: bool = True,
 ) -> str:
     slug = polymarket_event_url.rstrip('/').split('/')[-1]
     r = requests.get("https://gamma-api.polymarket.com/events", params={"limit": 1, "slug": slug}, timeout=5)
@@ -1922,7 +1923,7 @@ def _build_polymarket_section(
 
     # “最有可能”以天气预测一致性为主，市场强度仅作并列裁决。
     best_label = None
-    if focus:
+    if allow_best_label and focus:
         core_bins = [r for r in focus if (r[5] >= core_lo and r[4] <= core_hi)]
         pick_pool = core_bins if core_bins else focus
 
@@ -3440,6 +3441,18 @@ def choose_section_text(
                 "• 临窗前继续跟踪温度斜率与风向节奏，必要时再改判。"
             ]
 
+    # 低置信度时不打“最有可能”标签，避免误导
+    allow_best_label = True
+    try:
+        q_cov = float((quality or {}).get("synoptic_coverage")) if (quality or {}).get("synoptic_coverage") is not None else None
+    except Exception:
+        q_cov = None
+    obj_conf = str((obj or {}).get("confidence") or "").lower()
+    if obj_conf in {"low", ""}:
+        allow_best_label = False
+    if q_cov is not None and q_cov < 0.6:
+        allow_best_label = False
+
     try:
         poly_block = _build_polymarket_section(
             polymarket_event_url,
@@ -3451,6 +3464,7 @@ def choose_section_text(
                 "core_lo": float(core_lo),
                 "core_hi": float(core_hi),
             },
+            allow_best_label=allow_best_label,
         )
     except Exception:
         poly_block = "📈 **Polymarket 盘口与博弈**\n盘口读取异常，请稍后重试。"
