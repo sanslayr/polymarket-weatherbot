@@ -56,6 +56,17 @@ _DEFAULTS: dict[str, Any] = {
         "rad_recover_threshold": 0.72,
         "rad_recover_trend": 0.025,
     },
+    "nocturnal_rewarm": {
+        "night_solar_max": 0.08,
+        "night_hour_start": 17.5,
+        "night_hour_end": 7.0,
+        "warm_advection_bias_min": 0.45,
+        "wind_speed_jump_kt": 3.0,
+        "wind_speed_mix_min_kt": 7.0,
+        "dewpoint_rise_min_c": 0.8,
+        "pressure_fall_min_hpa": -0.6,
+        "score_min": 1.5,
+    },
 }
 
 _CACHE_LOCK = Lock()

@@ -18,6 +18,7 @@ Last updated: 2026-03-02
 - 临近窗口结束时限制“单报跳变”造成的过度上修。
 - 云层字段合并：`rawOb + clouds[] + cover`（技术实现层）。
 - 新增两步温度加速度信号（`temp_accel_2step_c`）用于识别“升温减速/圆弧顶”。
+- 新增夜间增温辅助信号：`wind_speed_trend_1step_kt`、`dewpoint_trend_1step_c`，用于 after-sunset reheat 组合判定。
 - 相关阈值参数已外置到 `config/tmax_learning_params.json`，由 `scripts/param_store.py` 统一加载。
 
 ## 3.1 太阳辐射简化曲线（清空日）
@@ -28,6 +29,17 @@ Last updated: 2026-03-02
   - 与“晴空 + 斜率走平/减速”联合触发 rounded-top 锁高约束
   - 太阳高度较低且 `solar_slope_next` 走平/转弱时，进一步抑制惯性高估
   - 若 `solar_slope_next` 明显上升，避免过早压死末段冲高空间
+
+## 3.2 夜间增温组合门控（nocturnal_rewarm）
+- 参数组：`nocturnal_rewarm`。
+- 目标：避免“窗口后一刀切压顶”漏掉少数夜间小幅回升场景。
+- 触发结构：
+  - 夜间背景（低太阳辐射或本地时刻进入夜段）
+  - 证据组合（暖平流 + 混合/云被/露点/气压）达到最小分值
+  - 降水中高强度在场时自动失效
+- 作用方式：
+  - 抑制窗口后惯性压顶仅在“无夜间回升证据”时生效
+  - `post` 反超评估中，夜间证据仅提供“有限上修”而非白天级别上冲空间
 
 ## 4) 输出渲染技术增强
 - 最新报标题内嵌上一报时间。

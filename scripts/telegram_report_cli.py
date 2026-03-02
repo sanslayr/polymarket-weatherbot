@@ -1645,6 +1645,8 @@ def metar_observation_block(
     lines.append(f"• 最近两小时实况趋势：{'，'.join(merged_bits)}。")
 
     wind_dir_change = None
+    wind_speed_step = None
+    dewpoint_step = None
     pressure_step = None
     if prev is not None:
         try:
@@ -1655,6 +1657,15 @@ def metar_observation_block(
                 wind_dir_change = min(a, 360.0 - a)
         except Exception:
             wind_dir_change = None
+        try:
+            if latest.get("wspd") not in (None, "") and prev.get("wspd") not in (None, ""):
+                wind_speed_step = float(latest.get("wspd", 0)) - float(prev.get("wspd", 0))
+        except Exception:
+            wind_speed_step = None
+        try:
+            dewpoint_step = float(latest.get("dewp", 0)) - float(prev.get("dewp", 0))
+        except Exception:
+            dewpoint_step = None
         try:
             pressure_step = float(latest.get("altim", 0)) - float(prev.get("altim", 0))
         except Exception:
@@ -1739,6 +1750,7 @@ def metar_observation_block(
         "latest_wspd": latest.get("wspd"),
         "latest_temp": latest.get("temp"),
         "latest_dewpoint": latest.get("dewp"),
+        "dewpoint_trend_1step_c": dewpoint_step,
         "latest_cloud_code": latest_cloud_code,
         "latest_wx": latest.get("wxString") or latest.get("wx") or "",
         "latest_precip_state": wx_state_now,
@@ -1757,6 +1769,7 @@ def metar_observation_block(
         "metar_temp_quantized": _is_intish(latest.get("temp")) and (prev is None or _is_intish(prev.get("temp"))),
         "pressure_trend_1step_hpa": pressure_step,
         "wind_dir_change_deg": wind_dir_change,
+        "wind_speed_trend_1step_kt": wind_speed_step,
         "peak_lock_confirmed": peak_lock_confirmed,
         "observed_max_temp_c": obs_max_temp,
         "observed_max_time_local": obs_max_time_local.isoformat() if obs_max_time_local else None,
@@ -2638,6 +2651,17 @@ def choose_section_text(
     rt_rad_low = float(lp_rt.get("rad_low_threshold", 0.55))
     rt_rad_recover = float(lp_rt.get("rad_recover_threshold", 0.72))
     rt_rad_recover_tr = float(lp_rt.get("rad_recover_trend", 0.025))
+
+    lp_night = (lp.get("nocturnal_rewarm") or {}) if isinstance(lp, dict) else {}
+    rt_night_solar = float(lp_night.get("night_solar_max", 0.08))
+    rt_night_hour_start = float(lp_night.get("night_hour_start", 17.5))
+    rt_night_hour_end = float(lp_night.get("night_hour_end", 7.0))
+    rt_night_warm_bias = float(lp_night.get("warm_advection_bias_min", 0.45))
+    rt_night_wind_jump = float(lp_night.get("wind_speed_jump_kt", 3.0))
+    rt_night_wind_mix_min = float(lp_night.get("wind_speed_mix_min_kt", 7.0))
+    rt_night_dp_rise = float(lp_night.get("dewpoint_rise_min_c", 0.8))
+    rt_night_pres_fall = float(lp_night.get("pressure_fall_min_hpa", -0.6))
+    rt_night_score_min = float(lp_night.get("score_min", 1.5))
 
     def _to_unit(c: float) -> float:
         return (c * 9.0 / 5.0 + 32.0) if unit == "F" else c
@@ -3597,6 +3621,7 @@ def choose_section_text(
     solar_prev = None
     solar_next = None
     solar_slope_next = None
+    latest_local_dt = None
     try:
         lat_s = float(metar_diag.get("station_lat")) if metar_diag.get("station_lat") is not None else None
         lon_s = float(metar_diag.get("station_lon")) if metar_diag.get("station_lon") is not None else None
@@ -3612,6 +3637,7 @@ def choose_section_text(
         solar_prev = None
         solar_next = None
         solar_slope_next = None
+        latest_local_dt = None
 
     rad_eff = None
     rad_eff_tr = None
@@ -3625,6 +3651,94 @@ def choose_section_text(
     except Exception:
         rad_eff = None
         rad_eff_tr = None
+
+    # Night-time residual warming factors (for post-peak / after-sunset reheat feasibility):
+    # 1) warm advection still landing, 2) wind mixing strengthens, 3) cloud blanket rebuild,
+    # 4) dewpoint rises (air-mass/moist advection), 5) pressure falls.
+    try:
+        latest_wspd = float(metar_diag.get("latest_wspd")) if metar_diag.get("latest_wspd") is not None else None
+    except Exception:
+        latest_wspd = None
+    try:
+        ws_step = float(metar_diag.get("wind_speed_trend_1step_kt")) if metar_diag.get("wind_speed_trend_1step_kt") is not None else None
+    except Exception:
+        ws_step = None
+    try:
+        dp_step = float(metar_diag.get("dewpoint_trend_1step_c")) if metar_diag.get("dewpoint_trend_1step_c") is not None else None
+    except Exception:
+        dp_step = None
+    try:
+        p_step = float(metar_diag.get("pressure_trend_1step_hpa")) if metar_diag.get("pressure_trend_1step_hpa") is not None else None
+    except Exception:
+        p_step = None
+
+    hour_local_float = None
+    if latest_local_dt is not None:
+        try:
+            hour_local_float = float(latest_local_dt.hour + latest_local_dt.minute / 60.0)
+        except Exception:
+            hour_local_float = None
+
+    nighttime_active = False
+    try:
+        if solar_now is not None:
+            nighttime_active = bool(solar_now <= rt_night_solar)
+        elif hour_local_float is not None:
+            nighttime_active = bool((hour_local_float >= rt_night_hour_start) or (hour_local_float <= rt_night_hour_end))
+    except Exception:
+        nighttime_active = False
+
+    warm_adv_signal = bool(("暖平流" in line850) and (b_cons >= rt_night_warm_bias))
+    mix_signal = bool(
+        ws_step is not None
+        and latest_wspd is not None
+        and ws_step >= rt_night_wind_jump
+        and latest_wspd >= rt_night_wind_mix_min
+    )
+    cloud_trend_for_night = str(metar_diag.get("cloud_trend") or "")
+    cloud_blanket_signal = bool(
+        cloud_code_now in {"SCT", "BKN", "OVC", "VV"}
+        and (("回补" in cloud_trend_for_night) or ("增加" in cloud_trend_for_night))
+        and precip_state in {"none", "light"}
+    )
+    moist_adv_signal = bool(dp_step is not None and dp_step >= rt_night_dp_rise)
+    pressure_fall_signal = bool(p_step is not None and p_step <= rt_night_pres_fall)
+
+    nocturnal_score = 0.0
+    if warm_adv_signal:
+        nocturnal_score += 0.95
+    if mix_signal:
+        nocturnal_score += 0.80
+    if cloud_blanket_signal:
+        nocturnal_score += 0.65
+    if moist_adv_signal:
+        nocturnal_score += 0.55
+    if pressure_fall_signal:
+        nocturnal_score += 0.45
+
+    nocturnal_gate = warm_adv_signal or (mix_signal and moist_adv_signal and pressure_fall_signal)
+    nocturnal_reheat_signal = bool(
+        nighttime_active
+        and nocturnal_gate
+        and nocturnal_score >= rt_night_score_min
+        and precip_state not in {"moderate", "heavy", "convective"}
+    )
+
+    if nocturnal_reheat_signal:
+        rs: list[str] = []
+        if warm_adv_signal:
+            rs.append("暖平流")
+        if mix_signal:
+            rs.append("混合作用")
+        if cloud_blanket_signal:
+            rs.append("云被回补")
+        if moist_adv_signal:
+            rs.append("露点回升")
+        if pressure_fall_signal:
+            rs.append("气压走低")
+        metar_diag["nocturnal_reheat_reasons"] = "、".join(rs[:3])
+    metar_diag["nocturnal_reheat_signal"] = nocturnal_reheat_signal
+    metar_diag["nocturnal_reheat_score"] = round(nocturnal_score, 2)
 
     dir_delta = up_s - down_s
     consistency_shift = 0.0
@@ -3975,6 +4089,7 @@ def choose_section_text(
             and decel_or_flat
             and (not rad_reheat)
             and (not dyn_reheat)
+            and (not nocturnal_reheat_signal)
         ):
             end_add = 0.35
             if "暖平流" in line850 and b_cons >= 0.6:
@@ -4023,9 +4138,19 @@ def choose_section_text(
             and b_cons >= 0.4
             and ((h_since_obs_peak is None) or (h_since_obs_peak <= 2.0))
         )
+        nocturnal_rebreak_ok = (
+            bool(nocturnal_reheat_signal)
+            and (not wet_now)
+            and t_cons >= -0.05
+            and b_cons >= 0.15
+            and ((h_since_obs_peak is None) or (h_since_obs_peak <= 3.5))
+        )
 
         if rebound_ok:
             post_add = 1.15
+        elif nocturnal_rebreak_ok:
+            # Night-time reheat usually supports only modest re-break space.
+            post_add = 0.70
         else:
             post_add = 0.55
             if h_since_obs_peak is not None and h_since_obs_peak >= 4.0:
@@ -4184,6 +4309,11 @@ def choose_section_text(
     # 窗口已过后的惯性上冲抑制信号
     if bool(metar_diag.get("late_end_cap_applied")):
         focus.append((1.01, "• 峰值窗已过且斜率未再放大 → 继续上冲概率偏低。"))
+
+    # 夜间增温复核：暖平流+混合/云被/露点/气压组合触发时，保留小幅回升可能
+    if bool(metar_diag.get("nocturnal_reheat_signal")):
+        rs = str(metar_diag.get("nocturnal_reheat_reasons") or "暖平流与边界层信号")
+        focus.append((0.90, f"• 夜间增温触发（{rs}）→ 后段仍有小幅回升可能。"))
 
     # 基于METAR多层云量 + 天气现象的有效辐射因子（0~1）
     if phase_now in {"near_window", "in_window"}:
