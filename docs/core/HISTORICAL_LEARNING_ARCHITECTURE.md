@@ -2,6 +2,8 @@
 
 Last updated: 2026-03-02
 
+> 执行草案见：`docs/operations/HISTORICAL_DATA_ANALYSIS_DRAFT.md`
+
 ## 1) 目标
 - 让 Tmax 判断参数可从历史数据学习，而不是长期手工拍脑袋。
 - 支持“离线回放学习 + 在线实况小步更新”。
