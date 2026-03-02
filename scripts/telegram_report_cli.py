@@ -2716,7 +2716,7 @@ def choose_section_text(
     precip_state = str(metar_diag.get("latest_precip_state") or "none").lower()
     precip_trend = str(metar_diag.get("precip_trend") or "none").lower()
 
-    syn_lines = ["🧭 **环流背景**"]
+    syn_lines = ["🧭 **环流形势对最高温影响**"]
 
     raw_obj = (d.get("object_3d_main") or {}) if isinstance(d, dict) else {}
 
@@ -3416,7 +3416,7 @@ def choose_section_text(
 
         tail = f"；{thermal_txt}" if thermal_txt else ""
         syn_lines = [
-            "🧭 **今日最高温影响（一句话）**",
+            "🧭 **环流形势对最高温影响**",
             f"- {direction_txt}；{short_cue}，{trigger_txt}{tail}{precip_tail}。",
         ]
 
