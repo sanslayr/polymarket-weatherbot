@@ -2549,6 +2549,9 @@ def choose_section_text(
     up_s, down_s, _ = _signal_scores()
     denom = max(1e-6, up_s + down_s)
     skew = max(-0.8, min(0.8, (up_s - down_s) / denom))
+    if phase_now == "post":
+        # Post-window: suppress aggressive one-sided skew tails unless strong rebound is observed in real time.
+        skew = max(-0.12, min(0.12, skew))
 
     # Direction-range consistency correction:
     # when directional evidence is strongly one-sided, interval center should follow with higher weight.
@@ -2793,6 +2796,61 @@ def choose_section_text(
             hi = min(hi, q_cap)
             lo = min(lo, hi - 0.2)
             strict_late_cap = True
+
+    # Post-window realized-peak guard:
+    # once peak window is over, avoid optimistic "new high" tails unless there is clear rebound evidence.
+    if phase_now == "post" and obs_max is not None:
+        try:
+            latest_local_txt = str(metar_diag.get("latest_report_local") or "")
+            obs_peak_local_txt = str(metar_diag.get("observed_max_time_local") or "")
+            latest_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
+            obs_peak_dt = datetime.fromisoformat(obs_peak_local_txt) if obs_peak_local_txt else None
+            if latest_dt is not None and obs_peak_dt is not None:
+                if latest_dt.tzinfo is not None and obs_peak_dt.tzinfo is None:
+                    obs_peak_dt = obs_peak_dt.replace(tzinfo=latest_dt.tzinfo)
+                elif latest_dt.tzinfo is None and obs_peak_dt.tzinfo is not None:
+                    latest_dt = latest_dt.replace(tzinfo=obs_peak_dt.tzinfo)
+            h_since_obs_peak = max(0.0, (latest_dt - obs_peak_dt).total_seconds() / 3600.0) if (latest_dt and obs_peak_dt) else None
+        except Exception:
+            h_since_obs_peak = None
+
+        try:
+            t_now = float(metar_diag.get("latest_temp"))
+        except Exception:
+            t_now = None
+
+        wet_now = (precip_state in {"light", "moderate", "heavy", "convective"}) or (precip_trend in {"new", "intensify", "steady", "end"})
+        cloudy_now = cloud_code_now in {"BKN", "OVC", "VV"}
+
+        rebound_ok = (
+            clear_sky_stable
+            and (not wet_now)
+            and (not cloudy_now)
+            and t_cons >= 0.45
+            and b_cons >= 0.4
+            and ((h_since_obs_peak is None) or (h_since_obs_peak <= 2.0))
+        )
+
+        if rebound_ok:
+            post_add = 1.15
+        else:
+            post_add = 0.55
+            if h_since_obs_peak is not None and h_since_obs_peak >= 4.0:
+                post_add = 0.35
+            if cloudy_now:
+                post_add -= 0.10
+            if wet_now:
+                post_add -= 0.10
+            if t_cons <= 0.05:
+                post_add -= 0.05
+            post_add = max(0.20, post_add)
+
+        post_cap_hi = float(obs_max) + post_add
+        if t_now is not None:
+            post_cap_hi = max(post_cap_hi, t_now + 0.15)
+
+        hi = min(hi, post_cap_hi)
+        lo = min(lo, hi - 0.2)
 
     # Far-window cold-advection sanity cap: avoid over-projecting rapid afternoon rebound
     # when low-level northerly cold feed persists.
