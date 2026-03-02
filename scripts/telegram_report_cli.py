@@ -1146,10 +1146,10 @@ def metar_observation_block(
             except Exception:
                 pass
 
-        latest_hdr = f"• **最新报：{local.strftime('%H:%M')} {time_label}**"
+        latest_hdr = f"**最新报：{local.strftime('%H:%M')} {time_label}**"
         if prev_x:
             prev_local = _metar_obs_time_utc(prev_x).astimezone(tz)
-            latest_hdr = f"• **最新报：{local.strftime('%H:%M')} {time_label}**（上一报 {prev_local.strftime('%H:%M')}）"
+            latest_hdr = f"**最新报：{local.strftime('%H:%M')} {time_label}**（上一报 {prev_local.strftime('%H:%M')}）"
 
         wind_line = fmt_wind(x)
         wind_cmp = _wind_change_text(x, prev_x)
@@ -1173,17 +1173,17 @@ def metar_observation_block(
 
         lines = [
             latest_hdr,
-            f"  ↳ 🌡️ 气温：{_fmt_temp_value(x.get('temp'))}（{_delta_temp_text(dt)}）",
-            f"  ↳ 💧 露点：{_fmt_temp_value(x.get('dewp'))}（{_delta_temp_text(dp)}）",
-            f"  ↳ 📊 气压：{x.get('altim')} hPa（{_delta_text(dpres, ' hPa')}）",
-            f"  ↳ 💨 风：{wind_line}",
-            f"  ↳ ☁️ 云层：{cloud_line}",
+            f"• **🌡️ 气温**：{_fmt_temp_value(x.get('temp'))}（{_delta_temp_text(dt)}）",
+            f"• **💧 露点**：{_fmt_temp_value(x.get('dewp'))}（{_delta_temp_text(dp)}）",
+            f"• **📊 气压**：{x.get('altim')} hPa（{_delta_text(dpres, ' hPa')}）",
+            f"• **💨 风**：{wind_line}",
+            f"• **☁️ 云层**：{cloud_line}",
         ]
         if wx and wx != "无降水天气现象":
             if wx_desc:
-                lines.append(f"  ↳ 🌦️ 天气现象：{wx}（{wx_desc}）")
+                lines.append(f"• **🌦️ 天气现象**：{wx}（{wx_desc}）")
             else:
-                lines.append(f"  ↳ 🌦️ 天气现象：{wx}")
+                lines.append(f"• **🌦️ 天气现象**：{wx}")
         return lines
 
     def _cloud_code(x: dict[str, Any] | None) -> str:
@@ -1293,7 +1293,7 @@ def metar_observation_block(
     p_bias = None if fc_p is None else round(float(latest.get("altim", 0)) - float(fc_p), 2)
     if bias is not None and p_bias is not None:
         b_disp = (_to_temp_unit(float(bias)) - _to_temp_unit(0.0))
-        lines.append(f"  ↳ 同小时模式偏差：温度 {b_disp:+.1f}°{unit}；气压 {p_bias:+.1f}hPa")
+        lines.append(f"同小时模式偏差：温度 {b_disp:+.1f}°{unit}；气压 {p_bias:+.1f}hPa")
 
     t_trend = None
     if prev is not None:
