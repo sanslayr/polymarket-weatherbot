@@ -20,6 +20,7 @@ Last updated: 2026-03-02
 - `docs/core/FORECAST_3D_STORAGE.md`
 - `docs/core/LOOK_OUTPUT_CONTRACT.md`
 - `docs/core/SPECIAL_CASE_PLAYBOOK.md`
+- `docs/core/CIRCULATION_SOUNDING_REQUIREMENTS.md`
 - `docs/core/TECHNICAL_IMPLEMENTATION_NOTES.md`
 - `docs/core/TELEGRAM_COMMANDS.md`
 
@@ -30,7 +31,14 @@ Last updated: 2026-03-02
 ### C. Reviews（历史复盘）
 - `docs/reviews/FORECAST_MODULE_REVIEW_2026-03-01.md`
 - `docs/reviews/FORECAST_PIPELINE_REVIEW_2026-03-01.md`
+- `docs/reviews/FORECAST_PIPELINE_REVIEW_2026-02-28.md`
 - `docs/reviews/P2_P3_REVIEW_2026-03-01.md`
+
+### D. Archive（旧规划/模板，非当前真源）
+- `docs/archive/City_Tmax_Analysis_Skill_Planning.md`
+- `docs/archive/LOOK_MD_TEMPLATE.md`
+- `docs/archive/PROBABILITY_LIBRARY.md`
+- `docs/archive/SCENARIO_QUANT_FEATURES.md`
 
 ---
 
