@@ -922,41 +922,95 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         return f"较上一报 {v:+.1f}{unit}"
 
     def _wx_human_desc(wx_raw: Any) -> str:
-        t = str(wx_raw or "").upper().strip()
+        t = str(wx_raw or "").upper().strip().replace(" ", "")
         if not t or t == "无降水天气现象":
             return ""
 
         parts: list[str] = []
+
         intensity = ""
-        if "+" in t:
+        if t.startswith("+"):
             intensity = "强"
-        elif "-" in t:
+        elif t.startswith("-"):
             intensity = "小"
 
+        def _i(base: str) -> str:
+            return f"{intensity}{base}" if intensity else base
+
+        # vicinity / descriptors
+        if "VC" in t:
+            parts.append("附近")
+        if "MI" in t:
+            parts.append("浅层")
+        if "BC" in t:
+            parts.append("片状")
+        if "PR" in t:
+            parts.append("部分")
+
+        # convective / severe
         if "TS" in t:
             parts.append("雷暴")
-        if "SH" in t:
-            parts.append("阵性")
+        if "SQ" in t:
+            parts.append("飑")
+        if "FC" in t:
+            parts.append("漏斗云/龙卷")
+        if "DS" in t:
+            parts.append("沙尘暴")
+        elif "SS" in t:
+            parts.append("沙暴")
+        if "PO" in t:
+            parts.append("尘旋/沙旋")
 
+        # precipitation (long tokens first)
         if "FZRA" in t:
-            parts.append("冻雨")
-        elif "DZ" in t:
-            parts.append((intensity or "毛毛") + "雨")
-        elif "RA" in t:
-            parts.append((intensity + "雨") if intensity else "雨")
-        elif "SN" in t:
-            parts.append((intensity + "雪") if intensity else "雪")
+            parts.append(_i("冻雨"))
+        elif "FZDZ" in t:
+            parts.append(_i("冻毛毛雨"))
+        else:
+            if "DZ" in t:
+                parts.append(_i("毛毛雨"))
+            if "RA" in t:
+                parts.append(_i("雨"))
+            if "SN" in t:
+                parts.append(_i("雪"))
+            if "SG" in t:
+                parts.append(_i("米雪"))
+            if "PL" in t:
+                parts.append(_i("冰粒"))
+            if "GR" in t:
+                parts.append(_i("冰雹"))
+            elif "GS" in t:
+                parts.append(_i("小冰雹"))
+            if "UP" in t:
+                parts.append("未知降水")
 
+        if "SH" in t and any(k in t for k in ["RA", "SN", "GS", "GR", "PL", "DZ"]):
+            parts.append("阵性")
+        if "FZ" in t and ("FZRA" not in t) and ("FZDZ" not in t):
+            parts.append("冻性")
+        if "BL" in t:
+            parts.append("吹雪/吹尘")
+        if "DR" in t:
+            parts.append("低吹")
+
+        # obscuration / particulates
         if "FG" in t:
             parts.append("雾")
-        elif "BR" in t:
+        if "BR" in t:
             parts.append("轻雾")
-        elif "HZ" in t:
+        if "HZ" in t:
             parts.append("霾")
+        if "FU" in t:
+            parts.append("烟")
+        if "DU" in t:
+            parts.append("扬尘")
+        if "SA" in t:
+            parts.append("沙")
+        if "VA" in t:
+            parts.append("火山灰")
 
         if not parts:
             return ""
-        # de-duplicate while preserving order
         uniq = list(dict.fromkeys(parts))
         return "、".join(uniq)
 
