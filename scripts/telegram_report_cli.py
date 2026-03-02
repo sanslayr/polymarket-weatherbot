@@ -2113,10 +2113,10 @@ def _build_polymarket_section(
                 m_u = _to_unit(m_center)
                 q25_u = _to_unit(q25)
                 q75_u = _to_unit(q75)
-                if edge_share <= 0.55:
-                    lines.append(f"  • 市场隐含期望约 {m_u:.1f}{sym}，隐含主带约 {q25_u:.1f}~{q75_u:.1f}{sym}。")
-                else:
-                    lines.append(f"  • 注：边缘档位占比较高（约 {edge_share*100:.0f}%），市场隐含期望参考性偏弱。")
+                # Always show market implied expectation/range (normalized display).
+                lines.append(f"  • 市场隐含期望约 {m_u:.1f}{sym}，隐含主带约 {q25_u:.1f}~{q75_u:.1f}{sym}。")
+                if edge_share > 0.55:
+                    lines.append(f"  • 注：边缘档位占比较高（约 {edge_share*100:.0f}%），上述隐含期望参考性偏弱。")
 
                 fc_lo = float(core_lo)
                 fc_hi = float(core_hi)
@@ -2124,10 +2124,15 @@ def _build_polymarket_section(
                 gap = m_center - fc_center
 
                 ov = max(0.0, min(q75, fc_hi) - max(q25, fc_lo))
-                base = max(0.3, q75 - q25)
+                spread_m = max(0.0, q75 - q25)
+                base = max(0.3, spread_m)
                 ov_ratio = ov / base
 
-                if abs(gap) >= 1.0 or ov_ratio < 0.25:
+                # Avoid false divergence alert when market is tightly concentrated
+                # near forecast center (single-bin dominated, low spread).
+                div_by_gap = abs(gap) >= 1.0
+                div_by_overlap = (ov_ratio < 0.25) and (spread_m >= 0.35)
+                if div_by_gap or div_by_overlap:
                     fc_u = _to_unit(fc_center)
                     lines.append(
                         f"  • 提示：市场定价重心约 {m_u:.1f}{sym}（主带 {q25_u:.1f}~{q75_u:.1f}{sym}），"
