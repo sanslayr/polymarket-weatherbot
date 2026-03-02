@@ -1096,17 +1096,17 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
 
         lines = [
             latest_hdr,
-            f"• **气温**：{x.get('temp')}°C（{_delta_text(dt, '°C')}）",
-            f"• **露点**：{x.get('dewp')}°C（{_delta_text(dp, '°C')}）",
-            f"• **气压**：{x.get('altim')} hPa（{_delta_text(dpres, ' hPa')}）",
-            f"• **风**：{wind_line}",
-            f"• **云层**：{cloud_line}",
+            f"• **🌡️ 气温**：{x.get('temp')}°C（{_delta_text(dt, '°C')}）",
+            f"• **💧 露点**：{x.get('dewp')}°C（{_delta_text(dp, '°C')}）",
+            f"• **📊 气压**：{x.get('altim')} hPa（{_delta_text(dpres, ' hPa')}）",
+            f"• **💨 风**：{wind_line}",
+            f"• **☁️ 云层**：{cloud_line}",
         ]
         if wx and wx != "无降水天气现象":
             if wx_desc:
-                lines.append(f"• **天气现象**：{wx}（{wx_desc}）")
+                lines.append(f"• **🌦️ 天气现象**：{wx}（{wx_desc}）")
             else:
-                lines.append(f"• **天气现象**：{wx}")
+                lines.append(f"• **🌦️ 天气现象**：{wx}")
         return lines
 
     def _cloud_code(x: dict[str, Any] | None) -> str:
