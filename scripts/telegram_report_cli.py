@@ -842,7 +842,7 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         if not pairs:
             return str(obs.get("cover") or "N/A")
         if len(pairs) == 1 and pairs[0][0] in {"CAVOK", "CLR"}:
-            return {"CAVOK": "晴天", "CLR": "晴空"}.get(pairs[0][0], pairs[0][0])
+            return {"CAVOK": "晴天", "CLR": "晴天"}.get(pairs[0][0], pairs[0][0])
         toks: list[str] = []
         for code, ft in pairs:
             if ft is None:
@@ -870,7 +870,7 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
         if not pairs:
             return str(obs.get("cover") or "N/A")
         if len(pairs) == 1 and pairs[0][0] in {"CAVOK", "CLR"}:
-            return {"CAVOK": "晴天", "CLR": "晴空"}.get(pairs[0][0], pairs[0][0])
+            return {"CAVOK": "晴天", "CLR": "晴天"}.get(pairs[0][0], pairs[0][0])
 
         code_meaning = {
             "FEW": "少云",
