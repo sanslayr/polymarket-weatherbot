@@ -1821,14 +1821,19 @@ def _build_polymarket_section(
 
     filtered = []
     for center, label, bid, ask, lo, hi in parsed:
-        # 硬性剔除：已低于实况录得最高温的区间，不再可能结算命中。
-        if obs_max is not None and hi < obs_max:
+        # User policy: ignore bins whose label-center is below observed daily max.
+        # (stricter than thermal-overlap rule)
+        if obs_max is not None and center < float(obs_max):
             continue
-        # keep all still-feasible bins based on observed daily max (no extra trim by latest instant temp)
         filtered.append((center, label, bid, ask, lo, hi))
 
     if not filtered:
-        filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed]
+        if obs_max is not None:
+            filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed if c >= float(obs_max)]
+        else:
+            filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed]
+    if not filtered:
+        return "Polymarket：当前无可用盘口。"
 
     likely_lo = peak - 0.8
     likely_hi = peak + 0.8
@@ -2129,7 +2134,7 @@ def _build_polymarket_section(
     # forecast core range + major market range (mid-weighted).
     display_rows = sorted(list(focus), key=lambda x: x[0])
     try:
-        feasible_rows = [r for r in filtered if (obs_max is None or r[5] >= float(obs_max))]
+        feasible_rows = [r for r in filtered if (obs_max is None or r[0] >= float(obs_max))]
         if feasible_rows:
             pts_disp: list[tuple[float, str, float, bool]] = []
             for c, lbl, b, a, lo_i, hi_i in feasible_rows:
@@ -2327,6 +2332,10 @@ def _build_polymarket_section(
                     fit_ok = False
 
                 cov_pct = int(round(cov_target * 100.0))
+                feasible_floor = min(c for c, _l, _p, _lo, _hi, _e in wpts)
+                if obs_max is not None:
+                    feasible_floor = max(feasible_floor, float(obs_max))
+
                 if fit_ok:
                     # convert target central coverage -> z via binary search (erf-based CDF)
                     z_lo_b, z_hi_b = 0.5, 2.2
@@ -2339,14 +2348,20 @@ def _build_polymarket_section(
                             z_hi_b = z_mid
                     z_cov = 0.5 * (z_lo_b + z_hi_b)
 
-                    mu_u = _to_unit(fit_mu)
-                    lo_u = _to_unit(fit_mu - z_cov * fit_sigma)
-                    hi_u = _to_unit(fit_mu + z_cov * fit_sigma)
+                    mu_c = max(fit_mu, feasible_floor)
+                    lo_c = max(mu_c - z_cov * fit_sigma, feasible_floor)
+                    hi_c = max(mu_c + z_cov * fit_sigma, lo_c)
+                    mu_u = _to_unit(mu_c)
+                    lo_u = _to_unit(lo_c)
+                    hi_u = _to_unit(hi_c)
                     expectation_lines.append(f"    ↳ {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（{cov_pct}%范围）")
                 else:
-                    mu_u = _to_unit(emp_mu)
-                    lo_u = _to_unit(emp_qlo)
-                    hi_u = _to_unit(emp_qhi)
+                    mu_c = max(emp_mu, feasible_floor)
+                    lo_c = max(emp_qlo, feasible_floor)
+                    hi_c = max(emp_qhi, lo_c)
+                    mu_u = _to_unit(mu_c)
+                    lo_u = _to_unit(lo_c)
+                    hi_u = _to_unit(hi_c)
                     expectation_lines.append(f"    ↳ {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（{cov_pct}%范围）")
 
                 if edge_share > 0.55:
