@@ -1269,7 +1269,7 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
     bias = None if fc_t is None else round(float(latest.get("temp", 0)) - float(fc_t), 2)
     p_bias = None if fc_p is None else round(float(latest.get("altim", 0)) - float(fc_p), 2)
     if bias is not None and p_bias is not None:
-        lines.append(f"同小时模式偏差：Temp {bias:+.2f}°C, Pressure {p_bias:+.2f}hPa")
+        lines.append(f"同小时模式偏差：温度 {bias:+.1f}°C；气压 {p_bias:+.1f}hPa")
 
     t_trend = None
     if prev is not None:
@@ -1388,16 +1388,14 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
     elif wx_trend == "end":
         wx_change_hint = "降水已结束"
 
-    lines.append("")
     summary_bits = [trend_hint, cloud_hint]
     if wx_hint:
         summary_bits.append(wx_hint)
     if wx_change_hint:
         summary_bits.append(wx_change_hint)
-    lines.append(f"• 最新实况简评：{'，'.join(summary_bits)}。")
 
-    # 追加“近两小时节奏”一句：把短样本变化压缩成可执行线索
-    rhythm_line = None
+    # 合并“简评 + 近两小时节奏”为单行趋势描述
+    rhythm_chunks: list[str] = []
     try:
         if prev is not None and prev2 is not None:
             t0 = float(latest.get("temp", 0.0))
@@ -1424,43 +1422,38 @@ def metar_observation_block(metar24: list[dict[str, Any]], hourly_local: dict[st
             wind_signal = dchg >= 35
             cloud_signal = ("回补" in cloud_txt) or ("开窗" in cloud_txt) or ("减少" in cloud_txt) or ("增加" in cloud_txt)
 
-            # No meaningful change -> skip this line to avoid mechanical noise.
-            if not (temp_signal or press_signal or wind_signal or cloud_signal):
-                rhythm_line = None
-            else:
-                chunks: list[str] = []
+            if temp_signal or press_signal or wind_signal or cloud_signal:
                 if dt_now >= 0.5 and dt_prev >= 0.2:
-                    chunks.append("温度仍在上行")
+                    rhythm_chunks.append("温度仍在上行")
                 elif dt_now <= -0.5 and dt_prev <= -0.2:
-                    chunks.append("温度有回落迹象")
+                    rhythm_chunks.append("温度有回落迹象")
                 elif temp_signal:
-                    chunks.append("温度在窄幅震荡")
+                    rhythm_chunks.append("温度在窄幅震荡")
 
                 if press_signal:
                     if dp2h <= -1.2:
-                        chunks.append("气压继续走低")
+                        rhythm_chunks.append("气压继续走低")
                     elif dp2h >= 1.2:
-                        chunks.append("气压明显回升")
+                        rhythm_chunks.append("气压明显回升")
 
                 if wind_signal:
-                    chunks.append("风向正在重排")
+                    rhythm_chunks.append("风向正在重排")
 
                 if cloud_signal:
-                    # compress cloud phrase into plain short cue
                     if "回补" in cloud_txt or "增加" in cloud_txt:
-                        chunks.append("云量有回补")
+                        rhythm_chunks.append("云量有回补")
                     elif "开窗" in cloud_txt or "减少" in cloud_txt:
-                        chunks.append("云量在转疏")
-
-                if chunks:
-                    rhythm_line = f"• 近两小时节奏：{'，'.join(chunks)}。"
-                else:
-                    rhythm_line = None
+                        rhythm_chunks.append("云量在转疏")
     except Exception:
-        rhythm_line = None
+        rhythm_chunks = []
 
-    if rhythm_line:
-        lines.append(rhythm_line)
+    merged_bits = list(summary_bits)
+    for c in rhythm_chunks:
+        if c not in merged_bits:
+            merged_bits.append(c)
+
+    lines.append("")
+    lines.append(f"• 最近两小时实况趋势：{'，'.join(merged_bits)}。")
 
     wind_dir_change = None
     pressure_step = None
