@@ -2273,6 +2273,9 @@ def _build_polymarket_section(
     except Exception:
         pass
 
+    if display_rows:
+        lines.append("")
+
     for _c, label, bid, ask, _lo, _hi in display_rows:
         bid_txt = "None" if bid in (None, "") else str(bid)
         ask_txt = "None" if ask in (None, "") else str(ask)
