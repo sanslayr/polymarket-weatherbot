@@ -3729,6 +3729,7 @@ def choose_section_text(
 
     allow_alpha_label = bool(allow_best_label)
 
+    poly_block = ""
     try:
         poly_block = _build_polymarket_section(
             polymarket_event_url,
@@ -3743,16 +3744,21 @@ def choose_section_text(
             allow_best_label=allow_best_label,
             allow_alpha_label=allow_alpha_label,
         )
+        # if market is unavailable (no event / no tradable ladder), omit whole section
+        if str(poly_block).startswith("Polymarket："):
+            poly_block = ""
     except Exception:
-        poly_block = "📈 **Polymarket 盘口与博弈**\n盘口读取异常，请稍后重试。"
+        poly_block = ""
 
-    return "\n\n".join([
+    parts = [
         "\n".join(syn_lines),
         metar_block,
         "\n".join(peak_range_block),
         "\n".join(vars_block),
-        poly_block,
-    ])
+    ]
+    if poly_block:
+        parts.append(poly_block)
+    return "\n\n".join(parts)
 
 def _is_openmeteo_rate_limited_error(exc: Exception) -> bool:
     msg = str(exc)
@@ -3790,17 +3796,22 @@ def _render_metar_only_report(st: Station, model: str, links_payload: dict[str, 
         "start_local": now_utc.strftime("%Y-%m-%dT%H:%M"),
         "end_local": now_utc.strftime("%Y-%m-%dT%H:%M"),
     }
+    poly_block = ""
     try:
         poly_block = _build_polymarket_section(links_payload["links"]["polymarket_event"], pseudo_window, metar_diag=_metar_diag)
+        if str(poly_block).startswith("Polymarket："):
+            poly_block = ""
     except Exception:
-        poly_block = "📈 **Polymarket 盘口与博弈**\n盘口读取异常，请稍后重试。"
+        poly_block = ""
 
     body = (
         "📡 **最新实况分析（METAR-only 降级）**\n"
         f"- 触发原因：{reason}\n"
         "- 说明：Open-Meteo 当前不可用，已降级为实况-only 输出；背景/窗口判断暂不展开。\n\n"
-        f"{metar_text}\n\n{poly_block}"
+        f"{metar_text}"
     )
+    if poly_block:
+        body += f"\n\n{poly_block}"
 
     links = links_payload["links"]
     footer = (

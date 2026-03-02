@@ -61,6 +61,7 @@ Last updated: 2026-03-02
 
 ## 8) Market rules
 - 市场日期按站点 local date 选取。
+- 若 Polymarket 盘口不可用（未拉到事件/无可交易梯度/请求失败），整个 Polymarket 板块（含提醒文案）不写入报告。
 - 档位解析必须兼容 F/C 与范围桶（如 `42-43F`）。
 - 标签规则 forecast-first：
   - `最有可能`：天气一致性优先
