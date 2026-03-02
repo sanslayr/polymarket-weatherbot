@@ -3824,7 +3824,7 @@ def _render_metar_only_report(st: Station, model: str, links_payload: dict[str, 
         f"📍 **{st.icao} ({st.city}) | {abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}**\n"
         f"判断时间: {now_utc.strftime('%Y-%m-%d %H:%M')} UTC | {now_local.strftime('%Y-%m-%d %H:%M')} Local ({format_utc_offset(now_local)})\n"
         f"分析基准模型: {model.upper()}（运行时次: {rt_fmt}）\n"
-        "\n**🦞龙虾学习中🦞不构成交易建议**"
+        "**🦞龙虾学习中，不提供交易建议🦞**"
     )
 
     pseudo_peak = float(_metar_diag.get("latest_temp") or 0.0)
@@ -4116,7 +4116,7 @@ def render_report(command_text: str) -> str:
     except Exception:
         pass
 
-    header_lines.append("\n**🦞龙虾学习中🦞不构成交易建议**")
+    header_lines.append("**🦞龙虾学习中，不提供交易建议🦞**")
 
     header = "\n".join(header_lines)
 
