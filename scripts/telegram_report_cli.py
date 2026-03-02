@@ -1992,8 +1992,7 @@ def _build_polymarket_section(
             return "😇潜在Alpha"
         return ""
 
-    if any(_row_tag(r) for r in focus):
-        lines.append("**🦞 别让龙虾替你下单——真要准到离谱，这报告你也看不到🦞**")
+    show_lobster_reminder = any(_row_tag(r) for r in focus)
 
     lines.append("**博弈区间**")
 
@@ -2015,6 +2014,11 @@ def _build_polymarket_section(
             lines.append(f"  • **{label}（{tag}）：Bid {bid_txt} | Ask {ask_txt}**")
         else:
             lines.append(f"  • {label}：Bid {bid_txt} | Ask {ask_txt}")
+
+    if show_lobster_reminder:
+        lines.append("")
+        lines.append("**🦞 别让龙虾替你下单——真要准到离谱，这报告你也看不到🦞**")
+
     return "\n".join(lines)
 
 
