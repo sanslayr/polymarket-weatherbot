@@ -1730,21 +1730,11 @@ def metar_observation_block(
         if cands:
             obs_max_time_local = max(cands)
 
-    obs_max_interval_lo = obs_max_temp
-    obs_max_interval_hi = obs_max_temp
-    try:
-        if obs_max_temp is not None and unit == "C" and _is_intish(obs_max_temp):
-            # Non-US METAR temperatures are commonly integer °C reports; treat as quantized bin.
-            obs_max_interval_lo = float(obs_max_temp) - 0.50
-            obs_max_interval_hi = float(obs_max_temp) + 0.49
-        elif obs_max_temp is not None and unit == "F":
-            # US display path: apply ±0.5°F quantized interval around observed value.
-            obs_f = float(obs_max_temp) * 9.0 / 5.0 + 32.0
-            obs_max_interval_lo = (obs_f - 0.50 - 32.0) * 5.0 / 9.0
-            obs_max_interval_hi = (obs_f + 0.50 - 32.0) * 5.0 / 9.0
-    except Exception:
-        obs_max_interval_lo = obs_max_temp
-        obs_max_interval_hi = obs_max_temp
+    obs_max_interval_lo, obs_max_interval_hi = _observed_max_interval_c(
+        obs_max_temp,
+        unit,
+        c_quantized=_is_intish(obs_max_temp) if obs_max_temp is not None else None,
+    )
 
     cloud_tr = _cloud_trend(latest, prev) if prev else ""
     peak_lock_confirmed = False
@@ -1792,6 +1782,44 @@ def metar_observation_block(
         "observed_max_interval_hi_c": obs_max_interval_hi,
         "observed_max_time_local": obs_max_time_local.isoformat() if obs_max_time_local else None,
     }
+
+
+def _is_intish_value(v: Any) -> bool:
+    try:
+        return abs(float(v) - round(float(v))) < 0.05
+    except Exception:
+        return False
+
+
+def _observed_max_interval_c(
+    obs_max_c: Any,
+    display_unit: str,
+    c_quantized: bool | None = None,
+) -> tuple[float | None, float | None]:
+    """Return observed-max feasible interval in °C.
+
+    - Non-US integer °C METAR: [x-0.50, x+0.49]
+    - US display path (°F): ±0.5°F mapped back to °C
+    - Otherwise: exact point
+    """
+    try:
+        if obs_max_c is None:
+            return None, None
+        x = float(obs_max_c)
+    except Exception:
+        return None, None
+
+    u = str(display_unit or "").upper()
+    if u == "F":
+        xf = x * 9.0 / 5.0 + 32.0
+        lo_c = (xf - 0.50 - 32.0) * 5.0 / 9.0
+        hi_c = (xf + 0.50 - 32.0) * 5.0 / 9.0
+        return lo_c, hi_c
+
+    q = _is_intish_value(x) if c_quantized is None else bool(c_quantized)
+    if q:
+        return x - 0.50, x + 0.49
+    return x, x
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -2043,21 +2071,14 @@ def _build_polymarket_section(
         t_now = None
     peak = float(primary_window.get("peak_temp_c") or 0.0)
     obs_max = None
-    obs_floor = None
     if metar_diag:
         try:
             obs_max = float(metar_diag.get("observed_max_temp_c")) if metar_diag.get("observed_max_temp_c") is not None else None
         except Exception:
             obs_max = None
-        try:
-            obs_floor = float(metar_diag.get("observed_max_interval_lo_c")) if metar_diag.get("observed_max_interval_lo_c") is not None else None
-        except Exception:
-            obs_floor = None
-    if obs_floor is None:
-        obs_floor = obs_max
 
     # Market feasibility filtering uses observed realized value (not quantization interval).
-    market_floor = obs_max if obs_max is not None else obs_floor
+    market_floor = obs_max
 
     filtered = []
     for center, label, bid, ask, lo, hi in parsed:
@@ -2716,12 +2737,6 @@ def choose_section_text(
         lo_u = _to_unit(float(lo_c))
         hi_u = _to_unit(float(hi_c))
         return f"{lo_u:.1f}~{hi_u:.1f}°{unit}"
-
-    def _is_intish_local(v: Any) -> bool:
-        try:
-            return abs(float(v) - round(float(v))) < 0.05
-        except Exception:
-            return False
 
     def _solar_clear_score(lat_deg: float, lon_deg: float, dt_local: datetime) -> float:
         """Return simplified clear-sky radiation score in [0,1] from solar geometry.
@@ -3533,22 +3548,18 @@ def choose_section_text(
     except Exception:
         obs_max = None
 
-    obs_floor = obs_max
-    obs_ceil = obs_max
+    obs_floor = None
+    obs_ceil = None
     try:
         if metar_diag.get("observed_max_interval_lo_c") is not None and metar_diag.get("observed_max_interval_hi_c") is not None:
             obs_floor = float(metar_diag.get("observed_max_interval_lo_c"))
             obs_ceil = float(metar_diag.get("observed_max_interval_hi_c"))
     except Exception:
-        obs_floor = obs_max
-        obs_ceil = obs_max
+        obs_floor = None
+        obs_ceil = None
 
-    # Fallback: non-US stations usually report integer °C in METAR; treat observed integer as a bin.
     if obs_max is not None and (obs_floor is None or obs_ceil is None):
-        obs_floor, obs_ceil = obs_max, obs_max
-    if obs_max is not None and unit == "C" and _is_intish_local(obs_max) and obs_floor == obs_ceil:
-        obs_floor = float(obs_max) - 0.50
-        obs_ceil = float(obs_max) + 0.49
+        obs_floor, obs_ceil = _observed_max_interval_c(obs_max, unit)
     if obs_floor is not None and obs_ceil is not None and obs_floor > obs_ceil:
         obs_floor, obs_ceil = obs_ceil, obs_floor
 
