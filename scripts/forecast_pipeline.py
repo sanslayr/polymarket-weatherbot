@@ -372,7 +372,14 @@ def load_or_build_forecast_decision(
             perf_log(stage, time.perf_counter() - start)
 
     runtime = _runtime_tag(model, now_utc)
-    key_parts = (str(getattr(station, "icao", "")), target_date, model.lower(), str(synoptic_provider or ""), runtime)
+    key_parts = (
+        str(getattr(station, "icao", "")),
+        target_date,
+        model.lower(),
+        str(synoptic_provider or ""),
+        runtime,
+        str(primary_window.get("peak_local") or ""),
+    )
 
     t = time.perf_counter()
     cached = _read_cache(*key_parts)

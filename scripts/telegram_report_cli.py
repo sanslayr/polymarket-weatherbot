@@ -649,6 +649,62 @@ def detect_tmax_windows(hourly: dict[str, Any]) -> tuple[list[dict[str, Any]], d
     return windows, primary, candidates
 
 
+def _build_post_focus_window(hourly: dict[str, Any], metar_diag: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a prospective secondary-peak focus window after latest observation.
+
+    Used when current judged phase is post-window but we still need to analyze
+    whether a later re-break is meteorologically possible.
+    """
+    try:
+        times = list(hourly.get("time") or [])
+        t2m = list(hourly.get("temperature_2m") or [])
+        if not times or not t2m or len(times) != len(t2m):
+            return None
+
+        latest_local = datetime.fromisoformat(str(metar_diag.get("latest_report_local") or ""))
+        if latest_local.tzinfo is not None:
+            latest_local = latest_local.replace(tzinfo=None)
+
+        cands: list[int] = []
+        for i, ts in enumerate(times):
+            try:
+                dt = datetime.fromisoformat(str(ts))
+                if dt >= latest_local + timedelta(hours=1):
+                    cands.append(i)
+            except Exception:
+                continue
+
+        if not cands:
+            return None
+
+        k = max(cands, key=lambda i: float(t2m[i]))
+        # Post-focus window should be tight around candidate re-break timing,
+        # not the broad all-day warm band.
+        s = max(0, k - 1)
+        e = min(len(times) - 1, k + 1)
+        w = {
+            "start_local": times[s],
+            "end_local": times[e],
+            "peak_local": times[k],
+            "peak_temp_c": hourly["temperature_2m"][k],
+            "t850_c": hourly["temperature_850hPa"][k],
+            "w850_kmh": hourly["wind_speed_850hPa"][k],
+            "wd850_deg": hourly["wind_direction_850hPa"][k],
+            "low_cloud_pct": hourly["cloud_cover_low"][k],
+            "pmsl_hpa": hourly["pressure_msl"][k],
+        }
+        try:
+            obs_max = float(metar_diag.get("observed_max_temp_c")) if metar_diag.get("observed_max_temp_c") is not None else None
+        except Exception:
+            obs_max = None
+        if obs_max is not None:
+            w["rebreak_gap_c"] = round(float(obs_max) - float(w.get("peak_temp_c") or 0.0), 2)
+        w["window_role"] = "post_focus_secondary"
+        return w
+    except Exception:
+        return None
+
+
 def fetch_metar_24h(icao: str) -> list[dict[str, Any]]:
     # Always prefer live METAR, with retries and short backoff.
     url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=json&hours=24"
@@ -1905,6 +1961,7 @@ def choose_section_text(
     forecast_decision: dict[str, Any] | None = None,
     compact_synoptic: bool = False,
     temp_unit: str = "C",
+    synoptic_window: dict[str, Any] | None = None,
 ) -> str:
     """Render-only section builder.
 
@@ -1937,6 +1994,14 @@ def choose_section_text(
     d = (fdec.get("decision") or {}) if isinstance(fdec, dict) else {}
     bg = (d.get("background") or fdec.get("background") or {}) if isinstance(fdec, dict) else {}
     quality = (fdec.get("quality") or {}) if isinstance(fdec, dict) else {}
+
+    meta_window = (((fdec.get("meta") or {}).get("window")) if isinstance(fdec, dict) else {}) or {}
+    if isinstance(synoptic_window, dict) and synoptic_window.get("start_local") and synoptic_window.get("end_local"):
+        syn_w = synoptic_window
+    elif isinstance(meta_window, dict) and meta_window.get("start_local") and meta_window.get("end_local"):
+        syn_w = meta_window
+    else:
+        syn_w = primary_window
 
     phase_mode = str(bg.get("phase_mode") or "实况主导")
     line500 = str(bg.get("line_500") or "高空背景信号有限。")
@@ -2544,8 +2609,12 @@ def choose_section_text(
             cov_txt = ""
         syn_lines.append(f"- **数据状态**：环流链路降级（结论偏保守{cov_txt}）。")
 
+    phase_for_syn = str(classify_window_phase(primary_window, metar_diag).get("phase") or "unknown")
+    syn_win_label = "峰值窗口"
+    if phase_for_syn == "post" and bool(metar_diag.get("post_focus_window_active")):
+        syn_win_label = "潜在反超窗口"
     syn_lines.append(
-        f"- **峰值窗口**：{_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local。"
+        f"- **{syn_win_label}**：{_hm(syn_w.get('start_local'))}~{_hm(syn_w.get('end_local'))} Local。"
     )
 
     if compact_synoptic:
@@ -3056,7 +3125,12 @@ def choose_section_text(
 
     peak_range_block = ["🌡️ **可能最高温区间**"]
 
-    window_txt = f"{_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local"
+    if bool(metar_diag.get("post_focus_window_active")) and syn_w:
+        window_label = "潜在二峰窗"
+        window_txt = f"{_hm(syn_w.get('start_local'))}~{_hm(syn_w.get('end_local'))} Local"
+    else:
+        window_label = "峰值窗"
+        window_txt = f"{_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local"
     cloud_code = str(metar_diag.get("latest_cloud_code") or "").upper()
     if cloud_code in {"CLR", "CAVOK"}:
         tail_up_cond = "若晴空维持且升温斜率延续"
@@ -3083,16 +3157,16 @@ def choose_section_text(
         tail_hi = _soft_snap(hi + tail_ext)
         disp_hi = tail_hi
         peak_range_block.append(
-            f"- **{_fmt_range(disp_lo, disp_hi)}**（主看 {_fmt_range(core_lo, core_hi)}；峰值窗 {window_txt}；{tail_up_cond}）"
+            f"- **{_fmt_range(disp_lo, disp_hi)}**（主看 {_fmt_range(core_lo, core_hi)}；{window_label} {window_txt}；{tail_up_cond}）"
         )
     elif skew <= -0.20:
         tail_lo = _soft_snap(max(lo - min(0.8, 0.4 + 0.3 * max(0.0, -skew)), lo - 1.0))
         disp_lo = tail_lo
         peak_range_block.append(
-            f"- **{_fmt_range(disp_lo, disp_hi)}**（主看 {_fmt_range(core_lo, core_hi)}；峰值窗 {window_txt}；若云量回补并伴随偏冷来流增强）"
+            f"- **{_fmt_range(disp_lo, disp_hi)}**（主看 {_fmt_range(core_lo, core_hi)}；{window_label} {window_txt}；若云量回补并伴随偏冷来流增强）"
         )
     else:
-        peak_range_block.append(f"- **{_fmt_range(disp_lo, disp_hi)}**（峰值窗 {window_txt}）")
+        peak_range_block.append(f"- **{_fmt_range(disp_lo, disp_hi)}**（{window_label} {window_txt}）")
     if bool(metar_diag.get("obs_correction_applied")):
         peak_range_block.append("- 注：已应用实况纠偏（模型峰值偏低，窗口锚定到当日实况峰值时段）。")
 
@@ -3396,7 +3470,23 @@ def render_report(command_text: str) -> str:
         primary["peak_temp_c"] = max(model_peak, obs_max)
         metar_diag["obs_correction_applied"] = True
 
-    peak_local_dt = datetime.strptime(primary["peak_local"], "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
+    analysis_window = dict(primary)
+    try:
+        gate_pre = classify_window_phase(primary, metar_diag)
+        if str(gate_pre.get("phase") or "") == "post":
+            post_focus = _build_post_focus_window(hourly_day, metar_diag)
+            if isinstance(post_focus, dict) and post_focus.get("peak_local"):
+                analysis_window = post_focus
+                metar_diag["post_focus_window_active"] = True
+                metar_diag["post_focus_peak_local"] = str(post_focus.get("peak_local") or "")
+                try:
+                    metar_diag["post_focus_peak_temp_c"] = float(post_focus.get("peak_temp_c"))
+                except Exception:
+                    pass
+    except Exception:
+        analysis_window = dict(primary)
+
+    peak_local_dt = datetime.strptime(analysis_window["peak_local"], "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
     peak_utc = peak_local_dt.astimezone(timezone.utc)
 
     analysis_model = model
@@ -3422,7 +3512,7 @@ def render_report(command_text: str) -> str:
         now_local=now_local,
         station_lat=st.lat,
         station_lon=st.lon,
-        primary_window=primary,
+        primary_window=analysis_window,
         tz_name=tz_name,
         run_synoptic_fn=run_synoptic_section,
         perf_log=_mark,
@@ -3507,6 +3597,7 @@ def render_report(command_text: str) -> str:
         forecast_decision=forecast_decision,
         compact_synoptic=compact_synoptic,
         temp_unit=unit_pref,
+        synoptic_window=analysis_window,
     )
     _mark("render_body", time.perf_counter() - t0)
 
