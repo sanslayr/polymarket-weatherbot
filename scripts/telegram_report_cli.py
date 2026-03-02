@@ -2003,6 +2003,9 @@ def choose_section_text(
     else:
         syn_w = primary_window
 
+    post_focus_active = bool(metar_diag.get("post_focus_window_active"))
+    calc_window = syn_w if post_focus_active else primary_window
+
     phase_mode = str(bg.get("phase_mode") or "实况主导")
     line500 = str(bg.get("line_500") or "高空背景信号有限。")
     line850 = str(bg.get("line_850") or "低层输送信号一般。")
@@ -2237,8 +2240,8 @@ def choose_section_text(
             except Exception:
                 return None
 
-        low_cloud = _f(primary_window.get("low_cloud_pct"))
-        w850 = _f(primary_window.get("w850_kmh"))
+        low_cloud = _f(calc_window.get("low_cloud_pct"))
+        w850 = _f(calc_window.get("w850_kmh"))
         wind_chg = _f(metar_diag.get("wind_dir_change_deg"))
         t_now = _f(metar_diag.get("latest_temp"))
         td_now = _f(metar_diag.get("latest_dewpoint"))
@@ -2633,11 +2636,11 @@ def choose_section_text(
         except Exception:
             ph = -1
         try:
-            lowc = float(primary_window.get("low_cloud_pct") or 0.0)
+            lowc = float(calc_window.get("low_cloud_pct") or 0.0)
         except Exception:
             lowc = 0.0
         try:
-            w850 = float(primary_window.get("w850_kmh") or 0.0)
+            w850 = float(calc_window.get("w850_kmh") or 0.0)
         except Exception:
             w850 = 0.0
 
@@ -2688,7 +2691,7 @@ def choose_section_text(
         pass
     metar_block = "📡 **最新实况分析（METAR）**\n" + ("\n".join(metar_prefix + [metar_text]) if metar_prefix else metar_text)
 
-    peak_c = float(primary_window.get('peak_temp_c') or 0.0)
+    peak_c = float(calc_window.get('peak_temp_c') or 0.0)
     obs_max = None
     try:
         obs_max = float(metar_diag.get('observed_max_temp_c')) if metar_diag.get('observed_max_temp_c') is not None else None
@@ -2877,11 +2880,11 @@ def choose_section_text(
     sf_local = _sounding_factor_pack()
 
     try:
-        low_cloud_peak = float(primary_window.get("low_cloud_pct") or 0.0)
+        low_cloud_peak = float(calc_window.get("low_cloud_pct") or 0.0)
     except Exception:
         low_cloud_peak = 0.0
     try:
-        w850_peak = float(primary_window.get("w850_kmh") or 0.0)
+        w850_peak = float(calc_window.get("w850_kmh") or 0.0)
     except Exception:
         w850_peak = 0.0
     if cloud_code_now in {"BKN", "OVC", "VV"}:
@@ -3078,6 +3081,19 @@ def choose_section_text(
             post_add = max(0.20, post_add)
 
         post_cap_hi = float(obs_max) + post_add
+
+        # Programmatic re-break feasibility gate:
+        # when the prospective secondary-peak model itself does not challenge obs max,
+        # or current weather remains wet/cloudy with weak slope, cap aggressively.
+        try:
+            pf_peak = float(metar_diag.get("post_focus_peak_temp_c")) if metar_diag.get("post_focus_peak_temp_c") is not None else None
+        except Exception:
+            pf_peak = None
+        if pf_peak is not None and pf_peak <= float(obs_max) - 0.4:
+            post_cap_hi = min(post_cap_hi, float(obs_max) + 0.25)
+        if bool(metar_diag.get("post_focus_window_active")) and (wet_now or cloudy_now) and t_cons <= 0.2:
+            post_cap_hi = min(post_cap_hi, float(obs_max) + 0.25)
+
         if t_now is not None:
             post_cap_hi = max(post_cap_hi, t_now + 0.15)
 
@@ -3113,6 +3129,11 @@ def choose_section_text(
                     far_cap_hi = max(far_cap_hi, float(obs_max) + 0.3)
                 hi = min(hi, far_cap_hi)
                 lo = min(lo, hi - 0.2)
+
+    # Physical consistency: daily Tmax cannot be below already observed daily max.
+    if obs_max is not None:
+        lo = max(lo, float(obs_max) - 0.05)
+        hi = max(hi, lo + 0.2)
 
     def _soft_snap(v: float) -> float:
         iv = round(v)
