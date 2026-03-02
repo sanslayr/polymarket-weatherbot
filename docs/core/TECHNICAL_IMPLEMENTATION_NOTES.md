@@ -22,6 +22,7 @@ Last updated: 2026-03-02
 - 云层字段合并：`rawOb + clouds[] + cover`（技术实现层）。
 - 新增两步温度加速度信号（`temp_accel_2step_c`）用于识别“升温减速/圆弧顶”。
 - 新增夜间增温辅助信号：`wind_speed_trend_1step_kt`、`dewpoint_trend_1step_c`，用于 after-sunset reheat 组合判定。
+- 新增 METAR 采样节律识别：`metar_routine_cadence_min`、`metar_recent_interval_min`、`metar_speci_active`，用于动态调整短时判读窗口（半小时站/整点站/SPECI 加密采样）。
 - 相关阈值参数已外置到 `config/tmax_learning_params.json`，由 `scripts/param_store.py` 统一加载。
 
 ## 3.1 太阳辐射简化曲线（清空日）

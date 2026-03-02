@@ -1736,6 +1736,43 @@ def metar_observation_block(
         c_quantized=_is_intish(obs_max_temp) if obs_max_temp is not None else None,
     )
 
+    routine_cadence_min = None
+    recent_interval_min = None
+    speci_active = False
+    try:
+        obs_local: list[tuple[datetime, str]] = []
+        for x in series:
+            obs_local.append((_metar_obs_time_utc(x).astimezone(tz), str(x.get("rawOb") or "")))
+
+        diffs_min: list[float] = []
+        for i in range(1, len(obs_local)):
+            dmin = (obs_local[i][0] - obs_local[i - 1][0]).total_seconds() / 60.0
+            if 8.0 <= dmin <= 130.0:
+                diffs_min.append(dmin)
+
+        routine_pool = [d for d in diffs_min if d >= 20.0]
+        if routine_pool:
+            srt = sorted(routine_pool)
+            m = len(srt) // 2
+            med = srt[m] if len(srt) % 2 == 1 else 0.5 * (srt[m - 1] + srt[m])
+            routine_cadence_min = float(int(round(med / 5.0)) * 5)
+
+        if len(obs_local) >= 2:
+            recent_interval_min = round((obs_local[-1][0] - obs_local[-2][0]).total_seconds() / 60.0, 1)
+
+        raw_speci = any(str(raw).upper().startswith("SPECI ") for _dt, raw in obs_local[-3:])
+        short_interval = False
+        if recent_interval_min is not None:
+            if routine_cadence_min is not None:
+                short_interval = bool(recent_interval_min <= max(15.0, 0.70 * routine_cadence_min))
+            else:
+                short_interval = bool(recent_interval_min <= 20.0)
+        speci_active = bool(raw_speci or short_interval)
+    except Exception:
+        routine_cadence_min = None
+        recent_interval_min = None
+        speci_active = False
+
     cloud_tr = _cloud_trend(latest, prev) if prev else ""
     peak_lock_confirmed = False
     try:
@@ -1776,6 +1813,9 @@ def metar_observation_block(
         "pressure_trend_1step_hpa": pressure_step,
         "wind_dir_change_deg": wind_dir_change,
         "wind_speed_trend_1step_kt": wind_speed_step,
+        "metar_routine_cadence_min": routine_cadence_min,
+        "metar_recent_interval_min": recent_interval_min,
+        "metar_speci_active": speci_active,
         "peak_lock_confirmed": peak_lock_confirmed,
         "observed_max_temp_c": obs_max_temp,
         "observed_max_interval_lo_c": obs_max_interval_lo,
@@ -4220,10 +4260,18 @@ def choose_section_text(
         )
         dyn_reheat = bool(("暖平流" in line850) and (b_cons >= 0.8) and (t_cons >= 0.40))
 
+        cadence_wait_h = 0.5
+        try:
+            cad_min = float(metar_diag.get("metar_routine_cadence_min")) if metar_diag.get("metar_routine_cadence_min") is not None else None
+        except Exception:
+            cad_min = None
+        if cad_min is not None and cad_min > 0:
+            cadence_wait_h = max(0.35, min(0.80, (cad_min / 60.0) * 0.75))
+
         if (
             t_now_end is not None
             and h_after_end is not None
-            and h_after_end >= 0.5
+            and h_after_end >= cadence_wait_h
             and decel_or_flat
             and (not rad_reheat)
             and (not dyn_reheat)
@@ -4385,10 +4433,18 @@ def choose_section_text(
         h_after_end_compact = None
 
     warm_reheat_hint = bool(("暖平流" in line850) and (b_cons >= 0.75) and (t_cons >= 0.30))
+    compact_wait_h = 0.6
+    try:
+        cad_min = float(metar_diag.get("metar_routine_cadence_min")) if metar_diag.get("metar_routine_cadence_min") is not None else None
+    except Exception:
+        cad_min = None
+    if cad_min is not None and cad_min > 0:
+        compact_wait_h = max(0.40, min(0.95, (cad_min / 60.0) * 0.90))
+
     if (
         obs_max is not None
         and h_after_end_compact is not None
-        and h_after_end_compact >= 0.6
+        and h_after_end_compact >= compact_wait_h
         and t_cons <= rt_weak
         and (t_acc is None or t_acc <= 0.05)
         and (not bool(metar_diag.get("nocturnal_reheat_signal")))
@@ -4476,13 +4532,45 @@ def choose_section_text(
     cloud_tr = str(metar_diag.get("cloud_trend") or "")
     focus: list[tuple[float, str]] = []
 
+    def _trend_horizon_phrase() -> str:
+        try:
+            cad = float(metar_diag.get("metar_routine_cadence_min")) if metar_diag.get("metar_routine_cadence_min") is not None else None
+        except Exception:
+            cad = None
+        try:
+            recent = float(metar_diag.get("metar_recent_interval_min")) if metar_diag.get("metar_recent_interval_min") is not None else None
+        except Exception:
+            recent = None
+        speci = bool(metar_diag.get("metar_speci_active"))
+
+        base = None
+        if recent is not None and 8.0 <= recent <= 90.0:
+            base = recent
+        elif cad is not None and 15.0 <= cad <= 90.0:
+            base = cad
+        else:
+            base = 45.0
+
+        if speci:
+            lo = max(10, int(round(max(10.0, base * 0.45) / 5.0) * 5))
+            hi = max(lo + 10, int(round(min(45.0, base * 1.10) / 5.0) * 5))
+        elif base <= 35.0:
+            lo, hi = 20, 40
+        elif base <= 50.0:
+            lo, hi = 25, 50
+        else:
+            lo, hi = 35, 70
+        return f"未来{lo}-{hi}分钟"
+
+    trend_horizon = _trend_horizon_phrase()
+
     # 温度趋势（优先）
     try:
         tv = float(t_tr or 0.0)
         if tv >= 0.6:
-            focus.append((1.0, "• 未来30-60分钟升温斜率若继续维持正值 → 最高温上沿仍可上修。"))
+            focus.append((1.0, f"• {trend_horizon}升温斜率若继续维持正值 → 最高温上沿仍可上修。"))
         elif tv <= -0.6:
-            focus.append((1.0, "• 短时斜率若持续转负 → 峰值可能提前锁定并压低上沿。"))
+            focus.append((1.0, f"• {trend_horizon}斜率若持续转负 → 峰值可能提前锁定并压低上沿。"))
         else:
             focus.append((0.55, "• 先盯温度斜率是否重新放大，这是临窗改判的最快信号。"))
     except Exception:
