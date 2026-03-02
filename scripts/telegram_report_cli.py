@@ -2181,7 +2181,7 @@ def _build_polymarket_section(
         if settled_single and settled_center is not None:
             s_u = _to_unit(settled_center)
             lines.append("  • 市场定价期望：")
-            lines.append(f"    {s_u:.1f}{sym}｜{s_u:.1f}~{s_u:.1f}{sym}（近似定局）。")
+            lines.append(f"    ↳ {s_u:.1f}{sym}｜{s_u:.1f}~{s_u:.1f}{sym}（近似定局）")
         pts_full: list[tuple[float, str, float, float, float, bool]] = []
         for c, lbl, b, a, lo_i, hi_i in filtered:
             bidv = _px(b)
@@ -2282,13 +2282,13 @@ def _build_polymarket_section(
                     lo_u = _to_unit(fit_mu - z_cov * fit_sigma)
                     hi_u = _to_unit(fit_mu + z_cov * fit_sigma)
                     lines.append("  • 市场定价期望：")
-                    lines.append(f"    {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（{cov_pct}%范围）。")
+                    lines.append(f"    ↳ {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（{cov_pct}%范围）")
                 else:
                     mu_u = _to_unit(emp_mu)
                     lo_u = _to_unit(emp_qlo)
                     hi_u = _to_unit(emp_qhi)
                     lines.append("  • 市场定价期望：")
-                    lines.append(f"    {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（{cov_pct}%范围）。")
+                    lines.append(f"    ↳ {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（{cov_pct}%范围）")
 
                 if edge_share > 0.55:
                     edge_bins = sorted([(str(lbl), float(p)) for _c, lbl, p, _lo, _hi, e in wpts if e], key=lambda x: x[1], reverse=True)
