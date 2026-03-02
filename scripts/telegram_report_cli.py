@@ -67,6 +67,7 @@ STATION_TZ = {
     "KSEA": "America/Los_Angeles",
     "KMIA": "America/New_York",
     "SBSP": "America/Sao_Paulo",
+    "SBGR": "America/Sao_Paulo",
     "RKSI": "Asia/Seoul",
     "SAEZ": "America/Argentina/Buenos_Aires",
 }
