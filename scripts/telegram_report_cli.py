@@ -2055,9 +2055,9 @@ def _build_polymarket_section(
     if mismatch:
         lines.append("  • 注：市场档位与气象主带存在错位，已按最近 below/above 边缘区间回退展示。")
 
-    # Market-vs-forecast distribution divergence cue.
+    # Market-vs-forecast distribution cues (use full filtered market set, not only displayed bins).
     try:
-        unit_votes = ["F" if "°F" in str(r[1]) else ("C" if "°C" in str(r[1]) else "") for r in focus]
+        unit_votes = ["F" if "°F" in str(r[1]) else ("C" if "°C" in str(r[1]) else "") for r in filtered]
         use_unit = "F" if unit_votes.count("F") > unit_votes.count("C") else "C"
 
         def _to_unit(v_c: float) -> float:
@@ -2065,8 +2065,8 @@ def _build_polymarket_section(
 
         sym = "°F" if use_unit == "F" else "°C"
 
-        pts: list[tuple[float, float]] = []
-        for c, _lbl, b, a, _lo, _hi in focus:
+        pts_full: list[tuple[float, str, float]] = []
+        for c, lbl, b, a, _lo, _hi in filtered:
             bidv = _px(b)
             askv = _px(a)
             if bidv > 0 and askv > 0:
@@ -2074,17 +2074,23 @@ def _build_polymarket_section(
             else:
                 p = max(bidv, askv)
             if p > 0:
-                pts.append((float(c), float(p)))
+                pts_full.append((float(c), str(lbl), float(p)))
 
-        if len(pts) >= 2:
-            tot = sum(p for _c, p in pts)
+        if len(pts_full) >= 2:
+            tot = sum(p for _c, _l, p in pts_full)
             if tot > 0:
-                wpts = sorted([(c, p / tot) for c, p in pts], key=lambda z: z[0])
-                m_center = sum(c * p for c, p in wpts)
+                wpts = sorted([(c, l, p / tot) for c, l, p in pts_full], key=lambda z: z[0])
+                m_center = sum(c * p for c, _l, p in wpts)
+
+                # top priced bins by mid (helps explain 12/13+ style concentration)
+                top = sorted(wpts, key=lambda z: z[2], reverse=True)[:3]
+                if top:
+                    top_txt = " / ".join([f"{lbl}({w*100:.0f}%)" for _c, lbl, w in top])
+                    lines.append(f"  • 市场定价前列（按mid权重）：{top_txt}。")
 
                 def _wq(q: float) -> float:
                     acc = 0.0
-                    for c, p in wpts:
+                    for c, _l, p in wpts:
                         acc += p
                         if acc >= q:
                             return c
@@ -2110,6 +2116,11 @@ def _build_polymarket_section(
                         f"  • 提示：市场定价重心约 {m_u:.1f}{sym}（主带 {q25_u:.1f}~{q75_u:.1f}{sym}），"
                         f"与气象主看中心 {fc_u:.1f}{sym} 偏离较大。"
                     )
+
+                # explicit hot-tail cue above forecast core upper bound
+                hot_tail = sum(p for c, _l, p in wpts if c >= (fc_hi + 0.5))
+                if hot_tail >= 0.18:
+                    lines.append(f"  • 提示：市场对更高温尾部定价不低（≥{_to_unit(fc_hi + 0.5):.1f}{sym} 合计约 {hot_tail*100:.0f}%）。")
     except Exception:
         pass
 
