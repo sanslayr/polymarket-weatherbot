@@ -1993,7 +1993,7 @@ def _build_polymarket_section(
         return ""
 
     if any(_row_tag(r) for r in focus):
-        lines.append("🦞 友情提醒：下面的“最有可能/潜在Alpha”只是模型博弈视角，不是喊单，别让龙虾替你下单。")
+        lines.append("🦞 别让龙虾替你下单——真要准到离谱，这报告你大概也看不到了；仅供参考，非投资建议。")
 
     lines.append("**博弈区间**")
 
