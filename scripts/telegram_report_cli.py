@@ -2256,9 +2256,30 @@ def choose_section_text(
         idx = int(((deg % 360) + 22.5) // 45) % 8
         return dirs[idx]
 
+    def _front_evidence_ok(otype: str) -> bool:
+        score = 0.0
+        if ("front" in otype) or ("baroclinic" in otype):
+            score += 1.0
+        if _contains_any(str(line850) + str(extra), ["锋", "锋生", "斜压"]):
+            score += 0.8
+        if _contains_any(str(line850), ["暖平流", "冷平流"]):
+            score += 0.35
+        if obj:
+            try:
+                if _conf_ord((obj or {}).get("confidence")) >= 2:
+                    score += 0.45
+            except Exception:
+                pass
+            try:
+                dmin = float((obj or {}).get("distance_km_min") or 9999.0)
+                if dmin <= 800:
+                    score += 0.35
+            except Exception:
+                pass
+        return score >= 1.4
+
     def _front_plain_desc(otype: str) -> str | None:
-        is_front = ("front" in otype) or ("baroclinic" in otype) or ("锋" in str(line850)) or ("锋" in str(extra))
-        if not is_front:
+        if not _front_evidence_ok(otype):
             return None
 
         warm = "暖平流" in str(line850)
