@@ -817,6 +817,8 @@ def metar_observation_block(
             return [("CAVOK", None)]
         if " CLR" in raw_ob:
             return [("CLR", None)]
+        if " SKC" in raw_ob:
+            return [("SKC", None)]
 
         pairs: list[tuple[str, int | None]] = []
         seen: set[tuple[str, int | None]] = set()
@@ -848,7 +850,7 @@ def metar_observation_block(
 
         if not pairs:
             fallback_cover = str(obs.get("cover") or "").upper()
-            if fallback_cover in {"CAVOK", "CLR"}:
+            if fallback_cover in {"CAVOK", "CLR", "SKC"}:
                 return [(fallback_cover, None)]
             if fallback_cover in {"FEW", "SCT", "BKN", "OVC", "VV"}:
                 return [(fallback_cover, None)]
@@ -858,7 +860,7 @@ def metar_observation_block(
         pairs = _collect_cloud_pairs(obs)
         if not pairs:
             return str(obs.get("cover") or "N/A")
-        if len(pairs) == 1 and pairs[0][0] in {"CAVOK", "CLR"}:
+        if len(pairs) == 1 and pairs[0][0] in {"CAVOK", "CLR", "SKC"}:
             return f"{pairs[0][0]}(晴天)"
         toks: list[str] = []
         for code, ft in pairs:
@@ -872,7 +874,7 @@ def metar_observation_block(
         pairs = _collect_cloud_pairs(obs)
         if not pairs:
             return []
-        if len(pairs) == 1 and pairs[0][0] in {"CAVOK", "CLR"}:
+        if len(pairs) == 1 and pairs[0][0] in {"CAVOK", "CLR", "SKC"}:
             return [pairs[0][0]]
         toks: list[str] = []
         for code, ft in pairs:
@@ -886,7 +888,7 @@ def metar_observation_block(
         pairs = _collect_cloud_pairs(obs)
         if not pairs:
             return str(obs.get("cover") or "N/A")
-        if len(pairs) == 1 and pairs[0][0] in {"CAVOK", "CLR"}:
+        if len(pairs) == 1 and pairs[0][0] in {"CAVOK", "CLR", "SKC"}:
             return f"{pairs[0][0]}(晴天)"
 
         code_meaning = {
@@ -897,6 +899,7 @@ def metar_observation_block(
             "VV": "垂直能见度",
             "CAVOK": "能见良好",
             "CLR": "净空",
+            "SKC": "净空",
         }
         out = []
         for code, ft in pairs:
@@ -1007,7 +1010,7 @@ def metar_observation_block(
         pairs = _collect_cloud_pairs(obs)
         if not pairs:
             return 0.35
-        if len(pairs) == 1 and str(pairs[0][0]).upper() in {"CLR", "CAVOK"}:
+        if len(pairs) == 1 and str(pairs[0][0]).upper() in {"CLR", "CAVOK", "SKC"}:
             return 0.0
 
         layers: list[tuple[float, float]] = []
@@ -1307,8 +1310,10 @@ def metar_observation_block(
             return "CAVOK"
         if " CLR" in raw:
             return "CLR"
+        if " SKC" in raw:
+            return "SKC"
 
-        rank = {"CLR": 0, "CAVOK": 0, "FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4, "VV": 5}
+        rank = {"CLR": 0, "CAVOK": 0, "SKC": 0, "FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4, "VV": 5}
         codes: list[str] = []
 
         for c, _h in re.findall(r"\b(FEW|SCT|BKN|OVC|VV)(\d{3})\b", raw):
@@ -1338,8 +1343,10 @@ def metar_observation_block(
             return "CAVOK"
         if " CLR" in raw:
             return "CLR"
+        if " SKC" in raw:
+            return "SKC"
 
-        rank = {"CLR": 0, "CAVOK": 0, "FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4, "VV": 5}
+        rank = {"CLR": 0, "CAVOK": 0, "SKC": 0, "FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4, "VV": 5}
         toks: list[tuple[str, int | None]] = []
 
         for c, h in re.findall(r"\b(FEW|SCT|BKN|OVC|VV)(\d{3})\b", raw):
@@ -1372,7 +1379,7 @@ def metar_observation_block(
         return f"{c}{int(round(ft/100.0)):03d}"
 
     def _cloud_trend(cur: dict[str, Any], prev_x: dict[str, Any] | None) -> str:
-        rank = {"CLR": 0, "CAVOK": 0, "FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4, "VV": 5}
+        rank = {"CLR": 0, "CAVOK": 0, "SKC": 0, "FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4, "VV": 5}
         c1 = _cloud_code(cur)
         c0 = _cloud_code(prev_x)
         if not c0 or not c1:
@@ -1456,7 +1463,7 @@ def metar_observation_block(
 
     latest_cloud_code = _cloud_code(latest)
 
-    if str(latest_cloud_code or "").upper() in {"CLR", "CAVOK", "FEW", "SCT"}:
+    if str(latest_cloud_code or "").upper() in {"CLR", "CAVOK", "SKC", "FEW", "SCT"}:
         cloud_hint = "云量约束偏弱"
     elif str(latest_cloud_code or "").upper() in {"BKN", "OVC", "VV"}:
         cloud_hint = "低云约束仍在"
@@ -3022,7 +3029,7 @@ def choose_section_text(
         mid_dry = "干层" in h700_summary
         if mid_dry:
             profile_score += 0.45
-            if cloud_code_now in {"CLR", "CAVOK", "FEW", "SCT"}:
+            if cloud_code_now in {"CLR", "CAVOK", "SKC", "FEW", "SCT"}:
                 up_adj += 0.45
                 tags.append("中层偏干+云开（增温效率高）")
             else:
@@ -3646,7 +3653,7 @@ def choose_section_text(
     # near peak window, avoid inertial warm over-shift.
     cloud_trend_txt = str(metar_diag.get("cloud_trend") or "")
     clear_sky_stable = (
-        cloud_code_now in {"CLR", "CAVOK", "FEW", "SCT"}
+        cloud_code_now in {"CLR", "CAVOK", "SKC", "FEW", "SCT"}
         and ("回补" not in cloud_trend_txt)
         and ("增加" not in cloud_trend_txt)
     )
@@ -4105,7 +4112,7 @@ def choose_section_text(
         window_label = "峰值窗"
         window_txt = f"{_hm(primary_window.get('start_local'))}~{_hm(primary_window.get('end_local'))} Local"
     cloud_code = str(metar_diag.get("latest_cloud_code") or "").upper()
-    if cloud_code in {"CLR", "CAVOK"}:
+    if cloud_code in {"CLR", "CAVOK", "SKC"}:
         tail_up_cond = "若晴空维持且升温斜率延续"
     elif cloud_code in {"FEW", "SCT"}:
         tail_up_cond = "若少云继续维持且升温斜率延续"

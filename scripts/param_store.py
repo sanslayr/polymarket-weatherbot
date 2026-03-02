@@ -13,6 +13,7 @@ _DEFAULTS: dict[str, Any] = {
         "cloud_cover_map": {
             "CLR": 0.0,
             "CAVOK": 0.0,
+            "SKC": 0.0,
             "FEW": 0.20,
             "SCT": 0.45,
             "BKN": 0.75,
