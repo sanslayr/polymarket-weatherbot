@@ -650,11 +650,7 @@ def detect_tmax_windows(hourly: dict[str, Any]) -> tuple[list[dict[str, Any]], d
 
 
 def _build_post_focus_window(hourly: dict[str, Any], metar_diag: dict[str, Any]) -> dict[str, Any] | None:
-    """Build a prospective secondary-peak focus window after latest observation.
-
-    Used when current judged phase is post-window but we still need to analyze
-    whether a later re-break is meteorologically possible.
-    """
+    """Build a prospective secondary-peak focus window after latest observation."""
     try:
         times = list(hourly.get("time") or [])
         t2m = list(hourly.get("temperature_2m") or [])
@@ -678,8 +674,6 @@ def _build_post_focus_window(hourly: dict[str, Any], metar_diag: dict[str, Any])
             return None
 
         k = max(cands, key=lambda i: float(t2m[i]))
-        # Post-focus window should be tight around candidate re-break timing,
-        # not the broad all-day warm band.
         s = max(0, k - 1)
         e = min(len(times) - 1, k + 1)
         w = {
@@ -700,6 +694,54 @@ def _build_post_focus_window(hourly: dict[str, Any], metar_diag: dict[str, Any])
         if obs_max is not None:
             w["rebreak_gap_c"] = round(float(obs_max) - float(w.get("peak_temp_c") or 0.0), 2)
         w["window_role"] = "post_focus_secondary"
+        return w
+    except Exception:
+        return None
+
+
+def _build_post_eval_window(hourly: dict[str, Any], metar_diag: dict[str, Any]) -> dict[str, Any] | None:
+    """Fallback post window for 'verify no second peak' situations.
+
+    When no clear secondary peak candidate exists, still anchor links/analysis
+    to the next 1-2h period rather than stale first-peak time.
+    """
+    try:
+        times = list(hourly.get("time") or [])
+        t2m = list(hourly.get("temperature_2m") or [])
+        if not times or not t2m or len(times) != len(t2m):
+            return None
+
+        latest_local = datetime.fromisoformat(str(metar_diag.get("latest_report_local") or ""))
+        if latest_local.tzinfo is not None:
+            latest_local = latest_local.replace(tzinfo=None)
+
+        cands: list[int] = []
+        for i, ts in enumerate(times):
+            try:
+                dt = datetime.fromisoformat(str(ts))
+                if latest_local + timedelta(hours=1) <= dt <= latest_local + timedelta(hours=3):
+                    cands.append(i)
+            except Exception:
+                continue
+
+        if not cands:
+            return None
+
+        k = cands[0]
+        s = max(0, k - 1)
+        e = min(len(times) - 1, k + 1)
+        w = {
+            "start_local": times[s],
+            "end_local": times[e],
+            "peak_local": times[k],
+            "peak_temp_c": hourly["temperature_2m"][k],
+            "t850_c": hourly["temperature_850hPa"][k],
+            "w850_kmh": hourly["wind_speed_850hPa"][k],
+            "wd850_deg": hourly["wind_direction_850hPa"][k],
+            "low_cloud_pct": hourly["cloud_cover_low"][k],
+            "pmsl_hpa": hourly["pressure_msl"][k],
+            "window_role": "post_eval_no_rebreak",
+        }
         return w
     except Exception:
         return None
@@ -2613,9 +2655,10 @@ def choose_section_text(
         syn_lines.append(f"- **数据状态**：环流链路降级（结论偏保守{cov_txt}）。")
 
     phase_for_syn = str(classify_window_phase(primary_window, metar_diag).get("phase") or "unknown")
+    post_mode = str(metar_diag.get("post_window_mode") or "")
     syn_win_label = "峰值窗口"
     if phase_for_syn == "post" and bool(metar_diag.get("post_focus_window_active")):
-        syn_win_label = "潜在反超窗口"
+        syn_win_label = "潜在反超窗口" if post_mode != "no_rebreak_eval" else "后段验证窗口"
     syn_lines.append(
         f"- **{syn_win_label}**：{_hm(syn_w.get('start_local'))}~{_hm(syn_w.get('end_local'))} Local。"
     )
@@ -3147,7 +3190,8 @@ def choose_section_text(
     peak_range_block = ["🌡️ **可能最高温区间**"]
 
     if bool(metar_diag.get("post_focus_window_active")) and syn_w:
-        window_label = "潜在二峰窗"
+        post_mode = str(metar_diag.get("post_window_mode") or "")
+        window_label = "潜在二峰窗" if post_mode != "no_rebreak_eval" else "后段验证窗"
         window_txt = f"{_hm(syn_w.get('start_local'))}~{_hm(syn_w.get('end_local'))} Local"
     else:
         window_label = "峰值窗"
@@ -3499,11 +3543,25 @@ def render_report(command_text: str) -> str:
             if isinstance(post_focus, dict) and post_focus.get("peak_local"):
                 analysis_window = post_focus
                 metar_diag["post_focus_window_active"] = True
+                metar_diag["post_window_mode"] = "focus_rebreak"
                 metar_diag["post_focus_peak_local"] = str(post_focus.get("peak_local") or "")
                 try:
-                    metar_diag["post_focus_peak_temp_c"] = float(post_focus.get("peak_temp_c"))
+                    pf = float(post_focus.get("peak_temp_c"))
+                    metar_diag["post_focus_peak_temp_c"] = pf
+                    try:
+                        obs_mx = float(metar_diag.get("observed_max_temp_c")) if metar_diag.get("observed_max_temp_c") is not None else None
+                    except Exception:
+                        obs_mx = None
+                    if obs_mx is not None and pf <= obs_mx - 0.4:
+                        metar_diag["post_window_mode"] = "no_rebreak_eval"
                 except Exception:
                     pass
+            else:
+                post_eval = _build_post_eval_window(hourly_day, metar_diag)
+                if isinstance(post_eval, dict) and post_eval.get("peak_local"):
+                    analysis_window = post_eval
+                    metar_diag["post_focus_window_active"] = True
+                    metar_diag["post_window_mode"] = "no_rebreak_eval"
     except Exception:
         analysis_window = dict(primary)
 
