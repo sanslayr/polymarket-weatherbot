@@ -137,8 +137,26 @@ def select_realtime_triggers(primary_window: dict[str, Any], metar_diag: dict[st
             if peak_lock or t_tr <= 0:
                 out.append("• 窗口后阶段：高点大概率已定，后续以回落或横盘为主。")
     else:
-        # far/unknown: keep minimal
-        if shift and ("开窗" in cloud_tr or "回补" in cloud_tr):
-            out.append("• 临窗前提示：云量/风向节奏已变化，后续请重点盯窗口期触发。")
+        # far/unknown: lightweight dynamic cues (avoid rigid template outputs)
+        try:
+            latest_dt = _dt(metar_diag.get("latest_report_local"))
+            peak_dt = _dt(primary_window.get("peak_local"))
+            hleft = max(0.0, (peak_dt - latest_dt).total_seconds() / 3600.0) if (latest_dt and peak_dt) else None
+        except Exception:
+            hleft = None
+        htxt = f"{hleft:.1f}h" if hleft is not None else "数小时"
+
+        if phase == "far":
+            if t_tr >= 0.6 and bias >= 0.8:
+                out.append(f"• 距峰值约{htxt}：升温斜率与偏暖信号同向，若下一报继续转强，上沿可小幅上修。")
+            elif t_tr <= -0.6 and bias <= -0.8:
+                out.append(f"• 距峰值约{htxt}：降温斜率与偏冷信号同向，后段上沿需防回撤。")
+            elif shift and ("开窗" in cloud_tr or "回补" in cloud_tr):
+                out.append(f"• 距峰值约{htxt}：云量/风向节奏已变化，窗口前需先确认触发方向。")
+            elif abs(bias) >= 1.2 and abs(t_tr) < 0.3:
+                out.append(f"• 距峰值约{htxt}：当前偏差较大但斜率未放大，先等下一报确认方向。")
+        else:
+            if shift and ("开窗" in cloud_tr or "回补" in cloud_tr):
+                out.append("• 临窗前提示：云量/风向节奏已变化，后续请重点盯窗口期触发。")
 
     return out[:3]
