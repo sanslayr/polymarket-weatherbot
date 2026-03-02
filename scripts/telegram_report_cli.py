@@ -22,9 +22,11 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -74,6 +76,12 @@ PERF_LOG_ENABLED = os.getenv("LOOK_PERF_LOG", "0") == "1"
 OPENMETEO_BREAKER_SECONDS = int(os.getenv("OPENMETEO_BREAKER_SECONDS", "900") or "900")
 OPENMETEO_BREAKER_FILE = CACHE_DIR / "openmeteo_breaker.json"
 SYNOPTIC_PROVIDER = "gfs-grib2"
+POLYMARKET_TIMEOUT_SECONDS = float(os.getenv("POLYMARKET_TIMEOUT_SECONDS", "3") or "3")
+POLYMARKET_EVENT_CACHE_TTL_SECONDS = int(os.getenv("POLYMARKET_EVENT_CACHE_TTL_SECONDS", "90") or "90")
+
+_POLY_EVENT_CACHE: dict[str, tuple[float, bool, list[dict[str, Any]]]] = {}
+_POLY_EVENT_CACHE_LOCK = Lock()
+_POLY_PREFETCH_POOL = ThreadPoolExecutor(max_workers=2)
 
 
 def _perf_log(stage: str, seconds: float) -> None:
@@ -1703,6 +1711,52 @@ def _poly_label(slug: str) -> str:
     return slug
 
 
+def _poly_slug_from_url(polymarket_event_url: str) -> str:
+    return str(polymarket_event_url or "").rstrip('/').split('/')[-1]
+
+
+def _fetch_polymarket_event_markets(slug: str, timeout: float | None = None) -> tuple[bool, list[dict[str, Any]]]:
+    now_ts = time.time()
+    with _POLY_EVENT_CACHE_LOCK:
+        hit = _POLY_EVENT_CACHE.get(slug)
+        if hit and hit[0] > now_ts:
+            return hit[1], list(hit[2])
+
+    r = requests.get(
+        "https://gamma-api.polymarket.com/events",
+        params={"limit": 1, "slug": slug},
+        timeout=(POLYMARKET_TIMEOUT_SECONDS if timeout is None else timeout),
+    )
+    r.raise_for_status()
+    arr = r.json()
+    if not arr:
+        event_found = False
+        markets: list[dict[str, Any]] = []
+    else:
+        event_found = True
+        mk = arr[0].get("markets", [])
+        markets = [m for m in mk if isinstance(m, dict)]
+
+    with _POLY_EVENT_CACHE_LOCK:
+        _POLY_EVENT_CACHE[slug] = (
+            now_ts + POLYMARKET_EVENT_CACHE_TTL_SECONDS,
+            event_found,
+            list(markets),
+        )
+
+    return event_found, markets
+
+
+def _prefetch_polymarket_event(polymarket_event_url: str) -> tuple[bool, list[dict[str, Any]]] | None:
+    try:
+        slug = _poly_slug_from_url(polymarket_event_url)
+        if not slug:
+            return None
+        return _fetch_polymarket_event_markets(slug)
+    except Exception:
+        return None
+
+
 def _build_polymarket_section(
     polymarket_event_url: str,
     primary_window: dict[str, Any],
@@ -1710,16 +1764,20 @@ def _build_polymarket_section(
     range_hint: dict[str, float] | None = None,
     allow_best_label: bool = True,
     allow_alpha_label: bool = True,
+    prefetched_event: tuple[bool, list[dict[str, Any]]] | None = None,
 ) -> str:
-    slug = polymarket_event_url.rstrip('/').split('/')[-1]
-    r = requests.get("https://gamma-api.polymarket.com/events", params={"limit": 1, "slug": slug}, timeout=5)
-    r.raise_for_status()
-    arr = r.json()
-    if not arr:
+    slug = _poly_slug_from_url(polymarket_event_url)
+    if not slug:
         return "Polymarket：未找到对应市场。"
-    markets = arr[0].get("markets", [])
+    if prefetched_event is None:
+        event_found, markets = _fetch_polymarket_event_markets(slug)
+    else:
+        event_found, markets = prefetched_event
 
-    parsed: list[tuple[float, str, Any, Any]] = []
+    if not event_found:
+        return "Polymarket：未找到对应市场。"
+
+    parsed: list[tuple[float, str, Any, Any, float, float]] = []
     for m in markets:
         iv = _poly_parse_interval(str(m.get("slug", "")))
         if not iv:
@@ -1736,7 +1794,7 @@ def _build_polymarket_section(
             center = 999.0
         else:
             center = (lo + hi) / 2
-        parsed.append((center, _poly_label(str(m.get("slug", ""))), m.get("bestBid"), m.get("bestAsk")))
+        parsed.append((center, _poly_label(str(m.get("slug", ""))), m.get("bestBid"), m.get("bestAsk"), lo, hi))
 
     parsed.sort(key=lambda x: x[0])
     if not parsed:
@@ -1762,17 +1820,7 @@ def _build_polymarket_section(
             obs_max = None
 
     filtered = []
-    for center, label, bid, ask in parsed:
-        iv = None
-        for m in markets:
-            if _poly_label(str(m.get("slug", ""))) == label:
-                iv = _poly_parse_interval(str(m.get("slug", "")))
-                break
-        lo = iv[0] if iv else center - 0.5
-        hi = iv[1] if iv else center + 0.5
-        if iv and len(iv) >= 3 and str(iv[2]).upper() == "F":
-            lo = (lo - 32) * 5 / 9 if lo != -math.inf else -math.inf
-            hi = (hi - 32) * 5 / 9 if hi != math.inf else math.inf
+    for center, label, bid, ask, lo, hi in parsed:
         # 硬性剔除：已低于实况录得最高温的区间，不再可能结算命中。
         if obs_max is not None and hi < obs_max:
             continue
@@ -1780,7 +1828,7 @@ def _build_polymarket_section(
         filtered.append((center, label, bid, ask, lo, hi))
 
     if not filtered:
-        filtered = [(c, l, b, a, c - 0.5, c + 0.5) for c, l, b, a in parsed]
+        filtered = [(c, l, b, a, lo, hi) for c, l, b, a, lo, hi in parsed]
 
     likely_lo = peak - 0.8
     likely_hi = peak + 0.8
@@ -2352,6 +2400,7 @@ def choose_section_text(
     compact_synoptic: bool = False,
     temp_unit: str = "C",
     synoptic_window: dict[str, Any] | None = None,
+    polymarket_prefetched_event: tuple[bool, list[dict[str, Any]]] | None = None,
 ) -> str:
     """Render-only section builder.
 
@@ -3831,6 +3880,7 @@ def choose_section_text(
             },
             allow_best_label=allow_best_label,
             allow_alpha_label=allow_alpha_label,
+            prefetched_event=polymarket_prefetched_event,
         )
         # if market is unavailable (no event / no tradable ladder), omit whole section
         if str(poly_block).startswith("Polymarket："):
@@ -3888,7 +3938,14 @@ def _render_metar_only_report(st: Station, model: str, links_payload: dict[str, 
     }
     poly_block = ""
     try:
-        poly_block = _build_polymarket_section(links_payload["links"]["polymarket_event"], pseudo_window, metar_diag=_metar_diag)
+        purl = links_payload["links"]["polymarket_event"]
+        prefetched = _prefetch_polymarket_event(purl)
+        poly_block = _build_polymarket_section(
+            purl,
+            pseudo_window,
+            metar_diag=_metar_diag,
+            prefetched_event=prefetched,
+        )
         if str(poly_block).startswith("Polymarket："):
             poly_block = ""
     except Exception:
@@ -4083,6 +4140,14 @@ def render_report(command_text: str) -> str:
         target_date_utc=datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc),
     )
 
+    poly_prefetch_future = None
+    try:
+        purl = str((links_payload.get("links") or {}).get("polymarket_event") or "")
+        if purl:
+            poly_prefetch_future = _POLY_PREFETCH_POOL.submit(_prefetch_polymarket_event, purl)
+    except Exception:
+        poly_prefetch_future = None
+
     now_utc = datetime.now(timezone.utc)
     now_local = now_utc.astimezone(tz)
 
@@ -4173,6 +4238,15 @@ def render_report(command_text: str) -> str:
 
     header = "\n".join(header_lines)
 
+    poly_prefetched_event = None
+    if poly_prefetch_future is not None:
+        try:
+            poly_prefetched_event = poly_prefetch_future.result(timeout=0.05)
+        except FuturesTimeoutError:
+            poly_prefetched_event = None
+        except Exception:
+            poly_prefetched_event = None
+
     t0 = time.perf_counter()
     body = choose_section_text(
         primary,
@@ -4183,6 +4257,7 @@ def render_report(command_text: str) -> str:
         compact_synoptic=compact_synoptic,
         temp_unit=unit_pref,
         synoptic_window=analysis_window,
+        polymarket_prefetched_event=poly_prefetched_event,
     )
     _mark("render_body", time.perf_counter() - t0)
 

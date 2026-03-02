@@ -50,6 +50,10 @@ Last updated: 2026-03-02
   - commit: `114d3da`
 - 标签改为天气一致性优先（最有可能/alpha）并限制 cheap-but-off-range 误标  
   - commits: `4a19122`, `891b407`, `fb3c546`, `3443eec`
+- 性能优化（P1/P2/P3）：
+  - P1: Polymarket 事件短 TTL 缓存 + 请求超时收敛（默认 3s）
+  - P2: 去除盘口过滤阶段 O(n²) label 回查，改为单次解析复用
+  - P3: 主流程内提前并发预取 Polymarket 事件（与 forecast pipeline 重叠）
 
 ## 6) 相位判定与窗口行为
 
