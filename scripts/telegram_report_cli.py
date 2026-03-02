@@ -1928,6 +1928,18 @@ def _build_polymarket_section(
         except Exception:
             return 0.0
 
+    def _parse_poly_list(v: Any) -> list[Any]:
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            try:
+                x = json.loads(v)
+                if isinstance(x, list):
+                    return x
+            except Exception:
+                return []
+        return []
+
     parsed: list[tuple[float, str, Any, Any, float, float]] = []
     resolved_rows: list[tuple[float, tuple[float, str, Any, Any, float, float]]] = []
     for m in markets:
@@ -1950,15 +1962,19 @@ def _build_polymarket_section(
         parsed.append(row)
 
         closed_flag = bool(m.get("closed")) or (m.get("acceptingOrders") is False)
-        score_res = max(_num(m.get("bestBid")), _num(m.get("bestAsk")))
+        outcomes = _parse_poly_list(m.get("outcomes"))
+        prices = _parse_poly_list(m.get("outcomePrices"))
+        yes_score = None
         try:
-            op = m.get("outcomePrices")
-            if isinstance(op, list) and op:
-                score_res = max(score_res, _num(op[0]))
+            yes_idx = next((i for i, o in enumerate(outcomes) if str(o).strip().lower() == "yes"), None)
+            if yes_idx is not None and yes_idx < len(prices):
+                yes_score = _num(prices[yes_idx])
         except Exception:
-            pass
-        if closed_flag and score_res >= 0.98:
-            resolved_rows.append((score_res, row))
+            yes_score = None
+
+        # Only mark as resolved when explicit YES settlement is present.
+        if closed_flag and yes_score is not None and yes_score >= 0.98:
+            resolved_rows.append((yes_score, row))
 
     parsed.sort(key=lambda x: x[0])
     if not parsed:
