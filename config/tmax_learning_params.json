@@ -1,0 +1,48 @@
+{
+  "metar_radiation": {
+    "cloud_cover_map": {
+      "CLR": 0.0,
+      "CAVOK": 0.0,
+      "FEW": 0.2,
+      "SCT": 0.45,
+      "BKN": 0.75,
+      "OVC": 1.0,
+      "VV": 1.0,
+      "UNKNOWN": 0.45
+    },
+    "cloud_base_weight": {
+      "lt_2500": 1.0,
+      "lt_7000": 0.75,
+      "lt_15000": 0.45,
+      "ge_15000": 0.25,
+      "unknown": 0.65
+    },
+    "layer_gamma": [1.0, 0.55, 0.30, 0.20],
+    "transmittance": {
+      "factor": 0.85,
+      "power": 1.2,
+      "floor": 0.12
+    },
+    "wx_transmittance": {
+      "TS": 0.45,
+      "FG": 0.60,
+      "OBSCURATION": 0.90,
+      "HEAVY_PRECIP": 0.55,
+      "LIGHT_PRECIP": 0.75,
+      "PRECIP": 0.60,
+      "DEFAULT": 1.00
+    }
+  },
+  "rounded_top": {
+    "temp_accel_neg_threshold": -0.25,
+    "flat_trend_threshold": 0.12,
+    "weak_trend_threshold": 0.22,
+    "near_peak_hours": 1.8,
+    "near_end_hours": 1.0,
+    "solar_stalling_slope": 0.012,
+    "solar_strong_rise_slope": 0.030,
+    "rad_low_threshold": 0.55,
+    "rad_recover_threshold": 0.72,
+    "rad_recover_trend": 0.025
+  }
+}

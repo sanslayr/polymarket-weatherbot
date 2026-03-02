@@ -56,6 +56,15 @@
     - 关注变量
     - Polymarket
 
+### F. Parameter Store（学习友好层）
+- `scripts/param_store.py`
+  - 统一加载可学习参数（带默认值 + 热更新缓存）
+- `config/tmax_learning_params.json`
+  - 多层云量映射/层权重
+  - wx 透过率
+  - rounded-top 阈值（斜率/加速度/太阳几何/辐射恢复）
+- 目的：将“经验常量”外置，便于历史回放学习后直接更新配置。
+
 ---
 
 ## 2) 当前数据策略（已对齐）
@@ -147,3 +156,9 @@
 - Open-Meteo 429 具外部不确定性，只能缓解不能消除
 - NOMADS 新 cycle 发布时可能暂时 404，已通过 cycle fallback 缓解
 - sounding thermo 目前以可用字段为主，完整本地 profile solver 仍可继续增强
+
+## 8) 历史学习与在线更新
+
+- 设计目标：参数可由历史回放学习驱动，而非长期手工硬编码。
+- 当前基础：参数层已配置化（`config/tmax_learning_params.json` + `scripts/param_store.py`）。
+- 详细路线图：见 `HISTORICAL_LEARNING_ARCHITECTURE.md`。

@@ -18,6 +18,7 @@ Last updated: 2026-03-02
 - 临近窗口结束时限制“单报跳变”造成的过度上修。
 - 云层字段合并：`rawOb + clouds[] + cover`（技术实现层）。
 - 新增两步温度加速度信号（`temp_accel_2step_c`）用于识别“升温减速/圆弧顶”。
+- 相关阈值参数已外置到 `config/tmax_learning_params.json`，由 `scripts/param_store.py` 统一加载。
 
 ## 3.1 太阳辐射简化曲线（清空日）
 - 在渲染层引入基于经纬度 + 本地时刻的理论晴空辐射相对量（0~1）：

@@ -99,6 +99,14 @@ Last updated: 2026-03-02
 - 温度精度口径统一：非美站不强补 `.0`；同小时偏差固定 1 位小数  
   - commits: `d30bdfd`, `3893cb8`
 
+## 9) 学习友好架构整合
+
+- 新增参数存储层：
+  - `scripts/param_store.py`（默认值 + 配置覆盖 + 热更新缓存）
+  - `config/tmax_learning_params.json`（可学习参数面板）
+- 已将云量/天气透过率与 rounded-top 关键阈值切换为配置驱动，便于后续历史回放学习后直接更新参数。
+- 新增文档：`docs/core/HISTORICAL_LEARNING_ARCHITECTURE.md`（离线学习 + 在线更新 + 典型案例库路线）。
+
 ---
 
 ## 仍在持续优化（未封板）

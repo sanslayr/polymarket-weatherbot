@@ -36,6 +36,7 @@ from forecast_pipeline import load_or_build_forecast_decision
 from realtime_pipeline import classify_window_phase, select_realtime_triggers
 from cache_envelope import extract_payload, make_cache_doc
 from window_phase_engine import pick_peak_indices
+from param_store import load_tmax_learning_params
 
 ROOT = Path(__file__).resolve().parent.parent
 STATION_CSV = ROOT / "station_links.csv"
@@ -932,6 +933,14 @@ def metar_observation_block(
 
     unit = "F" if str(temp_unit).upper() == "F" else "C"
 
+    lp = load_tmax_learning_params() or {}
+    lp_rad = (lp.get("metar_radiation") or {}) if isinstance(lp, dict) else {}
+    cloud_cover_map = (lp_rad.get("cloud_cover_map") or {}) if isinstance(lp_rad, dict) else {}
+    cloud_base_weight = (lp_rad.get("cloud_base_weight") or {}) if isinstance(lp_rad, dict) else {}
+    layer_gamma = list(lp_rad.get("layer_gamma") or [1.0, 0.55, 0.30, 0.20])
+    trans_cfg = (lp_rad.get("transmittance") or {}) if isinstance(lp_rad, dict) else {}
+    wx_cfg = (lp_rad.get("wx_transmittance") or {}) if isinstance(lp_rad, dict) else {}
+
     def _to_temp_unit(v_c: float) -> float:
         return (v_c * 9.0 / 5.0 + 32.0) if unit == "F" else v_c
 
@@ -966,27 +975,31 @@ def metar_observation_block(
 
     def _cloud_cov_code(code: str) -> float:
         c = str(code or "").upper()
-        return {
-            "CLR": 0.0,
-            "CAVOK": 0.0,
-            "FEW": 0.20,
-            "SCT": 0.45,
-            "BKN": 0.75,
-            "OVC": 1.00,
-            "VV": 1.00,
-        }.get(c, 0.45)
+        try:
+            v = float(cloud_cover_map.get(c, cloud_cover_map.get("UNKNOWN", 0.45)))
+        except Exception:
+            v = 0.45
+        return max(0.0, min(1.0, v))
 
     def _cloud_base_weight(ft: int | None) -> float:
+        try:
+            w_unknown = float(cloud_base_weight.get("unknown", 0.65))
+            w1 = float(cloud_base_weight.get("lt_2500", 1.0))
+            w2 = float(cloud_base_weight.get("lt_7000", 0.75))
+            w3 = float(cloud_base_weight.get("lt_15000", 0.45))
+            w4 = float(cloud_base_weight.get("ge_15000", 0.25))
+        except Exception:
+            w_unknown, w1, w2, w3, w4 = 0.65, 1.0, 0.75, 0.45, 0.25
         if ft is None:
-            return 0.65
+            return w_unknown
         x = float(ft)
         if x < 2500:
-            return 1.0
+            return w1
         if x < 7000:
-            return 0.75
+            return w2
         if x < 15000:
-            return 0.45
-        return 0.25
+            return w3
+        return w4
 
     def _metar_cloud_effective_cover(obs: dict[str, Any]) -> float:
         pairs = _collect_cloud_pairs(obs)
@@ -1004,10 +1017,10 @@ def metar_observation_block(
             layers.append((order, score))
         layers.sort(key=lambda z: z[0])
 
-        gammas = [1.0, 0.55, 0.30, 0.20]
+        gammas = layer_gamma if layer_gamma else [1.0, 0.55, 0.30, 0.20]
         prod = 1.0
         for i, (_ord, base_score) in enumerate(layers):
-            g = gammas[i] if i < len(gammas) else 0.15
+            g = float(gammas[i]) if i < len(gammas) else 0.15
             x = max(0.0, min(0.98, g * base_score))
             prod *= (1.0 - x)
         c_eff = 1.0 - prod
@@ -1015,26 +1028,32 @@ def metar_observation_block(
 
     def _cloud_transmittance(obs: dict[str, Any]) -> float:
         c_eff = _metar_cloud_effective_cover(obs)
-        t = 1.0 - 0.85 * (c_eff ** 1.2)
-        return max(0.12, min(1.0, t))
+        try:
+            factor = float(trans_cfg.get("factor", 0.85))
+            power = float(trans_cfg.get("power", 1.2))
+            floor = float(trans_cfg.get("floor", 0.12))
+        except Exception:
+            factor, power, floor = 0.85, 1.2, 0.12
+        t = 1.0 - factor * (c_eff ** power)
+        return max(floor, min(1.0, t))
 
     def _wx_transmittance(wx_raw: Any) -> float:
         s = str(wx_raw or "").upper().replace(" ", "")
         if not s:
-            return 1.0
+            return float(wx_cfg.get("DEFAULT", 1.0))
         if "TS" in s:
-            return 0.45
+            return float(wx_cfg.get("TS", 0.45))
         if "FG" in s:
-            return 0.60
+            return float(wx_cfg.get("FG", 0.60))
         if any(k in s for k in ["BR", "HZ", "FU", "DU", "SA", "VA"]):
-            return 0.90
+            return float(wx_cfg.get("OBSCURATION", 0.90))
         if any(k in s for k in ["+RA", "+DZ", "+SN"]):
-            return 0.55
+            return float(wx_cfg.get("HEAVY_PRECIP", 0.55))
         if any(k in s for k in ["-RA", "-DZ", "-SN"]):
-            return 0.75
+            return float(wx_cfg.get("LIGHT_PRECIP", 0.75))
         if any(k in s for k in ["RA", "DZ", "SN", "PL", "GR", "GS"]):
-            return 0.60
-        return 1.0
+            return float(wx_cfg.get("PRECIP", 0.60))
+        return float(wx_cfg.get("DEFAULT", 1.0))
 
     def _wx_human_desc(wx_raw: Any) -> str:
         t = str(wx_raw or "").upper().strip().replace(" ", "")
@@ -2556,6 +2575,20 @@ def choose_section_text(
 
     unit = "F" if str(temp_unit).upper() == "F" else "C"
 
+    lp = load_tmax_learning_params() or {}
+    lp_rt = (lp.get("rounded_top") or {}) if isinstance(lp, dict) else {}
+
+    rt_accel_neg = float(lp_rt.get("temp_accel_neg_threshold", -0.25))
+    rt_flat = float(lp_rt.get("flat_trend_threshold", 0.12))
+    rt_weak = float(lp_rt.get("weak_trend_threshold", 0.22))
+    rt_near_peak_h = float(lp_rt.get("near_peak_hours", 1.8))
+    rt_near_end_h = float(lp_rt.get("near_end_hours", 1.0))
+    rt_solar_stall = float(lp_rt.get("solar_stalling_slope", 0.012))
+    rt_solar_rise = float(lp_rt.get("solar_strong_rise_slope", 0.030))
+    rt_rad_low = float(lp_rt.get("rad_low_threshold", 0.55))
+    rt_rad_recover = float(lp_rt.get("rad_recover_threshold", 0.72))
+    rt_rad_recover_tr = float(lp_rt.get("rad_recover_trend", 0.025))
+
     def _to_unit(c: float) -> float:
         return (c * 9.0 / 5.0 + 32.0) if unit == "F" else c
 
@@ -3646,11 +3679,11 @@ def choose_section_text(
     if "干层" in h700_summary:
         warm_support += 0.4
     if rad_eff is not None:
-        if rad_eff >= 0.72:
+        if rad_eff >= rt_rad_recover:
             warm_support += 0.55
-        elif rad_eff >= 0.55:
+        elif rad_eff >= rt_rad_low:
             warm_support += 0.30
-        elif rad_eff >= 0.40:
+        elif rad_eff >= max(0.40, rt_rad_low - 0.15):
             warm_support += 0.12
         else:
             warm_support -= 0.08
@@ -3736,7 +3769,7 @@ def choose_section_text(
         except Exception:
             t_now = None
 
-        if t_now is not None and t_cons <= 0.12:
+        if t_now is not None and t_cons <= rt_flat:
             late_enough = (hour_local is None) or (hour_local >= 14.0)
             close_to_peak = (hleft is None) or (hleft <= 1.6)
             if late_enough and close_to_peak:
@@ -3773,19 +3806,20 @@ def choose_section_text(
         except Exception:
             t_now_rt = None
 
-        decel = (t_acc is not None and t_acc <= -0.25)
-        flat_or_down = t_cons <= 0.12
-        near_peak = (hleft_rt is None) or (hleft_rt <= 1.8)
-        solar_stalling = bool(solar_slope_next is not None and solar_slope_next <= 0.012)
-        solar_strong_rise = bool(solar_slope_next is not None and solar_slope_next >= 0.030)
-        rad_stalling = bool((rad_eff is not None and rad_eff <= 0.55) and (rad_eff_tr is None or rad_eff_tr <= 0.01))
-        rad_recover = bool((rad_eff is not None and rad_eff >= 0.72) and (rad_eff_tr is not None and rad_eff_tr >= 0.025))
+        decel = (t_acc is not None and t_acc <= rt_accel_neg)
+        flat_or_down = t_cons <= rt_flat
+        near_peak = (hleft_rt is None) or (hleft_rt <= rt_near_peak_h)
+        solar_stalling = bool(solar_slope_next is not None and solar_slope_next <= rt_solar_stall)
+        solar_strong_rise = bool(solar_slope_next is not None and solar_slope_next >= rt_solar_rise)
+        rad_stall_tr = max(0.008, 0.4 * rt_rad_recover_tr)
+        rad_stalling = bool((rad_eff is not None and rad_eff <= rt_rad_low) and (rad_eff_tr is None or rad_eff_tr <= rad_stall_tr))
+        rad_recover = bool((rad_eff is not None and rad_eff >= rt_rad_recover) and (rad_eff_tr is not None and rad_eff_tr >= rt_rad_recover_tr))
 
         rounded_top_signal = (
             flat_or_down
-            or (t_cons <= 0.22 and decel)
-            or (t_cons <= 0.20 and solar_stalling)
-            or (t_cons <= 0.20 and rad_stalling)
+            or (t_cons <= rt_weak and decel)
+            or (t_cons <= min(rt_weak, 0.20) and solar_stalling)
+            or (t_cons <= min(rt_weak, 0.20) and rad_stalling)
         )
 
         if t_now_rt is not None and near_peak and rounded_top_signal and ((not solar_strong_rise and not rad_recover) or decel):
@@ -3798,11 +3832,11 @@ def choose_section_text(
             if rad_eff is not None:
                 if rad_eff <= 0.40:
                     add_rt = min(add_rt, 0.35)
-                elif rad_eff <= 0.55:
+                elif rad_eff <= rt_rad_low:
                     add_rt = min(add_rt, 0.45)
                 elif rad_eff >= 0.75 and (rad_eff_tr is not None and rad_eff_tr > 0.02):
                     add_rt += 0.08
-            if hleft_rt is not None and hleft_rt <= 1.0:
+            if hleft_rt is not None and hleft_rt <= rt_near_end_h:
                 add_rt = min(add_rt, 0.40)
             if "暖平流" in line850 and b_cons >= 0.9 and t_cons >= 0.10 and (not solar_stalling) and (not rad_stalling):
                 add_rt += 0.10
@@ -3835,7 +3869,7 @@ def choose_section_text(
             t_now = float(metar_diag.get("latest_temp"))
         except Exception:
             t_now = None
-        if t_now is not None and (h_to_end is not None) and h_to_end <= 1.0:
+        if t_now is not None and (h_to_end is not None) and h_to_end <= rt_near_end_h:
             q_add = 0.95
             if t_cons <= 0.20:
                 q_add = 0.65
@@ -4056,9 +4090,11 @@ def choose_section_text(
         except Exception:
             rad_tr_focus = None
 
-        if rad_eff_focus is not None and rad_eff_focus <= 0.50 and (rad_tr_focus is None or rad_tr_focus <= 0.01):
+        low_cut = max(0.45, rt_rad_low - 0.05)
+        low_tr_cut = max(0.008, 0.4 * rt_rad_recover_tr)
+        if rad_eff_focus is not None and rad_eff_focus <= low_cut and (rad_tr_focus is None or rad_tr_focus <= low_tr_cut):
             focus.append((0.98, "• 有效辐射偏弱且未回升（云层/天气现象综合）→ 末段冲高空间受限。"))
-        elif rad_eff_focus is not None and rad_eff_focus >= 0.72 and (rad_tr_focus is not None and rad_tr_focus >= 0.02):
+        elif rad_eff_focus is not None and rad_eff_focus >= rt_rad_recover and (rad_tr_focus is not None and rad_tr_focus >= max(0.02, rt_rad_recover_tr * 0.8)):
             focus.append((0.72, "• 有效辐射仍在回升（云层开窗占优）→ 尾段仍保留小幅冲高可能。"))
 
     # 风场重排（给出具体方向场景）
