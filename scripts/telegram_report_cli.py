@@ -1985,7 +1985,7 @@ def _build_polymarket_section(
         winner_label = str(winner[1])
         return "\n".join([
             "📈 **Polymarket 盘口与博弈**",
-            f"已结算：{winner_label}",
+            f"🔒 已结算：{winner_label}",
         ])
 
     def _px(v: Any) -> float:
