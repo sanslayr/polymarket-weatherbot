@@ -2338,7 +2338,7 @@ def _build_polymarket_section(
 
     if show_lobster_reminder:
         lines.append("")
-        lines.append("**🦞 别让龙虾替你下单——真要准到离谱，这报告你也看不到🦞**")
+        lines.append("**🦞 龙虾我不能带单——真要准到离谱，这报告你也看不到🦞**")
 
     return "\n".join(lines)
 
@@ -3910,7 +3910,7 @@ def _render_metar_only_report(st: Station, model: str, links_payload: dict[str, 
         f"[Wunderground]({links['wunderground']}) | "
         f"[探空图（Tropicaltidbits）]({links['sounding_tropicaltidbits']})"
     )
-    return f"{header}\n\n{body}\n\n{footer}"
+    return f"{header}\n\n{body}\n{footer}"
 
 
 def render_report(command_text: str) -> str:
@@ -4194,7 +4194,7 @@ def render_report(command_text: str) -> str:
         f"[探空图（Tropicaltidbits）]({links['sounding_tropicaltidbits']})"
     )
 
-    return f"{header}\n\n{body}\n\n{footer}"
+    return f"{header}\n\n{body}\n{footer}"
 
 
 def build_parser() -> argparse.ArgumentParser:
