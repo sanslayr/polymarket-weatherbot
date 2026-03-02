@@ -2256,30 +2256,9 @@ def choose_section_text(
         idx = int(((deg % 360) + 22.5) // 45) % 8
         return dirs[idx]
 
-    def _front_evidence_ok(otype: str) -> bool:
-        score = 0.0
-        if ("front" in otype) or ("baroclinic" in otype):
-            score += 1.0
-        if _contains_any(str(line850) + str(extra), ["锋", "锋生", "斜压"]):
-            score += 0.8
-        if _contains_any(str(line850), ["暖平流", "冷平流"]):
-            score += 0.35
-        if obj:
-            try:
-                if _conf_ord((obj or {}).get("confidence")) >= 2:
-                    score += 0.45
-            except Exception:
-                pass
-            try:
-                dmin = float((obj or {}).get("distance_km_min") or 9999.0)
-                if dmin <= 800:
-                    score += 0.35
-            except Exception:
-                pass
-        return score >= 1.4
-
     def _front_plain_desc(otype: str) -> str | None:
-        if not _front_evidence_ok(otype):
+        is_front = ("front" in otype) or ("baroclinic" in otype) or _contains_any(str(line850) + str(extra), ["锋", "锋生", "斜压"])
+        if not is_front:
             return None
 
         warm = "暖平流" in str(line850)
@@ -2567,6 +2546,24 @@ def choose_section_text(
     cgroups = _candidate_groups()
     inter_note = _interaction_note(cgroups)
 
+    def _dominant_nature_text(rkey: str, otype: str, fallback_desc: str) -> str:
+        fd = _front_plain_desc(otype)
+        if rkey == "baroclinic" and fd:
+            return fd
+        if rkey == "advection":
+            if "暖平流" in str(line850) and "冷平流" not in str(line850):
+                return "暖输送主导"
+            if "冷平流" in str(line850) and "暖平流" not in str(line850):
+                return "冷输送主导"
+            return "冷暖输送交替"
+        if rkey == "stability":
+            return "低层稳定约束"
+        if rkey == "dynamic":
+            return "高空触发主导"
+        if rkey == "shear":
+            return "风切重排主导"
+        return fallback_desc or "背景过渡"
+
     rs = _regime_scores()
     r_sorted = sorted(rs.items(), key=lambda x: x[1], reverse=True)
     r1, s1 = r_sorted[0]
@@ -2578,15 +2575,13 @@ def choose_section_text(
         impact = str(obj.get("impact_scope") or "background_only")
         regime, desc = _infer_regime_and_desc(otype, impact)
 
-        # 1) 主导系统（一句话）
+        # 1) 主导系统（一句话，含性质）
         if has_primary_regime:
-            syn_lines.append(f"- **主导系统**：{_regime_label(r1)}（{regime}）。")
+            nature_txt = _dominant_nature_text(r1, otype, regime)
+            syn_lines.append(f"- **主导系统**：{_regime_label(r1)}（{nature_txt}）。")
         else:
-            syn_lines.append(f"- **主导系统**：{regime}（{desc}）。")
-
-        front_nature = _front_plain_desc(otype)
-        if front_nature and ("baroclinic" in otype or "front" in otype or r1 == "baroclinic"):
-            syn_lines.append(f"- **锋面性质**：{front_nature}。")
+            nature_txt = _dominant_nature_text("baroclinic" if ("baroclinic" in otype or "front" in otype) else "mixed", otype, desc)
+            syn_lines.append(f"- **主导系统**：{regime}（{nature_txt}）。")
 
         # 2) 落地影响（方向 + 触发 + 交互）
         if impact == "station_relevant":
@@ -2604,14 +2599,10 @@ def choose_section_text(
 
     else:
         if has_primary_regime:
-            syn_lines.append(f"- **主导系统**：{_regime_label(r1)}（结构未闭合，暂不立3D主系统）。")
+            nature_txt = _dominant_nature_text(r1, "", "结构未闭合")
+            syn_lines.append(f"- **主导系统**：{_regime_label(r1)}（{nature_txt}；结构未闭合，暂不立3D主系统）。")
         else:
             syn_lines.append("- **主导系统**：当前未识别到可稳定追踪的同一套分层系统。")
-
-        if r1 == "baroclinic":
-            fn = _front_plain_desc("")
-            if fn:
-                syn_lines.append(f"- **锋面性质**：{fn}。")
 
         tail = f"。当前组合关系：{inter_note}" if inter_note else ""
         syn_lines.append(f"- **落地影响**：{direction_txt}；短时以实况触发为主。建议：{trigger_txt}{tail}。")
