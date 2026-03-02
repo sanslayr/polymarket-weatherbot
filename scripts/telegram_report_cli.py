@@ -3757,13 +3757,27 @@ def choose_section_text(
     # Precipitation-related night penalties:
     # - ongoing/new precip usually adds evaporative/wet-ground cooling,
     # - even after precip ends, low-cloud residual can delay re-warm.
+    # - Exception: light warm-advection rain can be less suppressive than convective/cold rain.
+    precip_warm_relief = bool(
+        precip_state == "light"
+        and precip_trend in {"new", "intensify", "steady"}
+        and warm_adv_signal
+        and (moist_adv_signal or b_cons >= max(0.55, rt_night_warm_bias + 0.05))
+        and (mix_signal or t_cons >= 0.10)
+        and cloud_code_now not in {"VV"}
+    )
     precip_hard_block = bool(
         precip_state in {"moderate", "heavy", "convective"}
-        or (precip_trend in {"new", "intensify"} and precip_state in {"light", "moderate", "heavy", "convective"})
+        or (
+            precip_trend in {"new", "intensify"}
+            and precip_state == "light"
+            and (not precip_warm_relief)
+        )
     )
     precip_light_drag = bool(
         precip_state == "light"
         and precip_trend in {"steady", "none", "weaken", "end"}
+        and (not precip_warm_relief)
     )
     precip_residual_drag = bool(
         precip_trend in {"end", "weaken"}
@@ -3788,6 +3802,8 @@ def choose_section_text(
         nocturnal_score -= 0.40
     elif precip_light_drag:
         nocturnal_score -= 0.25
+    elif precip_warm_relief:
+        nocturnal_score -= 0.10
 
     nocturnal_gate = warm_adv_signal or (mix_signal and moist_adv_signal and pressure_fall_signal)
     nocturnal_reheat_signal = bool(
@@ -3814,6 +3830,7 @@ def choose_section_text(
     metar_diag["nocturnal_reheat_score"] = round(nocturnal_score, 2)
     metar_diag["nocturnal_precip_hard_block"] = precip_hard_block
     metar_diag["nocturnal_precip_residual_drag"] = precip_residual_drag
+    metar_diag["nocturnal_precip_warm_relief"] = precip_warm_relief
 
     dir_delta = up_s - down_s
     consistency_shift = 0.0
@@ -3860,13 +3877,28 @@ def choose_section_text(
 
     precip_cooling = False
     precip_residual = False
+    precip_warm_relief_day = False
     if phase_now in {"near_window", "in_window"}:
-        if precip_trend in {"new", "intensify"}:
+        precip_warm_relief_day = bool(
+            precip_state == "light"
+            and precip_trend in {"new", "intensify", "steady"}
+            and ("暖平流" in line850)
+            and b_cons >= 0.45
+            and ((dp_step is not None and dp_step >= 0.4) or t_cons >= 0.15)
+            and cloud_code_now not in {"VV"}
+        )
+
+        if precip_state in {"moderate", "heavy", "convective"} and precip_trend in {"new", "intensify", "steady", "none"}:
             precip_cooling = True
-        elif precip_state in {"moderate", "heavy", "convective"} and precip_trend in {"steady", "none"}:
-            precip_cooling = True
-        elif precip_trend == "end" and cloud_code_now in {"BKN", "OVC", "VV"}:
-            # rain just ended but cloud deck remains: cooling impact can linger
+        elif precip_trend in {"new", "intensify"} and precip_state == "light":
+            if precip_warm_relief_day:
+                precip_residual = True
+            else:
+                precip_cooling = True
+        elif precip_trend in {"end", "weaken"} and cloud_code_now in {"BKN", "OVC", "VV"}:
+            # precip just ended but cloud deck remains: cooling impact can linger
+            precip_residual = True
+        elif precip_state == "light" and precip_trend in {"steady", "none"} and (not precip_warm_relief_day):
             precip_residual = True
 
     if precip_cooling:
@@ -3874,7 +3906,9 @@ def choose_section_text(
         center -= 0.18
     elif precip_residual:
         consistency_shift = min(consistency_shift, 0.15)
-        center -= 0.08
+        center -= (0.05 if precip_warm_relief_day else 0.08)
+
+    metar_diag["precip_warm_relief_day"] = bool(precip_warm_relief_day)
 
     # Persistent low-cloud guard: avoid pushing center too high when BKN/OVC remains and no opening signal.
     cloud_opening = ("开窗" in str(metar_diag.get("cloud_trend") or "")) or ("减弱" in str(metar_diag.get("cloud_trend") or ""))
@@ -4513,7 +4547,9 @@ def choose_section_text(
         focus.append((0.7, "• 云量转疏在延续 → 地面增温效率仍有支撑。"))
 
     # precipitation evolution: prioritize change signal
-    if precip_trend in {"new", "intensify"}:
+    if bool(metar_diag.get("precip_warm_relief_day")) and precip_trend in {"new", "intensify", "steady"}:
+        focus.append((0.74, "• 轻降水叠加暖平流信号 → 压温效应可能弱于常规降水情景，仍以小幅扰动为主。"))
+    elif precip_trend in {"new", "intensify"}:
         focus.append((1.08, "• 降水出现/增强 → 上沿偏下修，且短时不确定性增大（对降水强度/相态变化敏感）。"))
     elif precip_trend in {"weaken", "end"}:
         focus.append((0.82, "• 降水减弱/结束 → 压温约束减轻，若云层不回补上沿可恢复。"))
