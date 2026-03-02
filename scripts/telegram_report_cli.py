@@ -2185,16 +2185,8 @@ def _build_polymarket_section(
                 base = max(0.3, spread_m)
                 ov_ratio = ov / base
 
-                # Avoid false divergence alert when market is tightly concentrated
-                # near forecast center (single-bin dominated, low spread).
-                div_by_gap = abs(gap) >= 1.0
-                div_by_overlap = (ov_ratio < 0.25) and (spread_m >= 0.35)
-                if div_by_gap or div_by_overlap:
-                    fc_u = _to_unit(fc_center)
-                    lines.append(
-                        f"  • 提示：市场定价重心约 {m_u:.1f}{sym}（主带 {q25_u:.1f}~{q75_u:.1f}{sym}），"
-                        f"与气象主看中心 {fc_u:.1f}{sym} 偏离较大。"
-                    )
+                # Deviation alert intentionally muted for now (operator preference):
+                # keep expectation/range visible without extra divergence warning line.
 
                 # explicit hot-tail cue above forecast core upper bound
                 hot_tail = sum(p for c, _l, p, _e in wpts if c >= (fc_hi + 0.5))
