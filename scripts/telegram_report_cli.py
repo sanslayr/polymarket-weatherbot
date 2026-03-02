@@ -2040,16 +2040,73 @@ def _build_polymarket_section(
             return "😇潜在Alpha"
         return ""
 
-    display_rows = list(focus)
-    if obs_max is not None:
-        # User policy: display all market bins that are still thermally feasible
-        # relative to current observed daily max.
-        full_tail = [
-            r for r in filtered
-            if (r[5] >= float(obs_max)) and (not math.isinf(r[4]))
-        ]
-        if full_tail:
-            display_rows = sorted(full_tail, key=lambda x: x[0])
+    # Display ladder: keep concise, but cover the continuous bins spanning
+    # forecast core range + major market range (mid-weighted).
+    display_rows = sorted(list(focus), key=lambda x: x[0])
+    try:
+        feasible_rows = [r for r in filtered if (obs_max is None or r[5] >= float(obs_max))]
+        if feasible_rows:
+            pts_disp: list[tuple[float, str, float, bool]] = []
+            for c, lbl, b, a, lo_i, hi_i in feasible_rows:
+                bidv = _px(b)
+                askv = _px(a)
+                p = (0.5 * (bidv + askv)) if (bidv > 0 and askv > 0) else max(bidv, askv)
+                if p > 0:
+                    pts_disp.append((float(c), str(lbl), float(p), bool(math.isinf(lo_i) or math.isinf(hi_i))))
+
+            if len(pts_disp) >= 2:
+                tot_p = sum(p for _c, _l, p, _e in pts_disp)
+                if tot_p > 0:
+                    wpts_disp = sorted([(c, l, p / tot_p, e) for c, l, p, e in pts_disp], key=lambda z: z[0])
+
+                    def _wq_disp(q: float) -> float:
+                        acc = 0.0
+                        for c, _l, p, _e in wpts_disp:
+                            acc += p
+                            if acc >= q:
+                                return c
+                        return wpts_disp[-1][0]
+
+                    m_q25 = _wq_disp(0.25)
+                    m_q75 = _wq_disp(0.75)
+                    show_lo = min(float(core_lo), float(m_q25))
+                    show_hi = max(float(core_hi), float(m_q75))
+
+                    finite = sorted([r for r in feasible_rows if not (math.isinf(r[4]) or math.isinf(r[5]))], key=lambda x: x[0])
+                    base = [r for r in finite if (r[5] >= show_lo - 0.01 and r[4] <= show_hi + 0.01)]
+                    if base:
+                        cmin = min(r[0] for r in base)
+                        cmax = max(r[0] for r in base)
+                        display_rows = [r for r in finite if cmin - 0.01 <= r[0] <= cmax + 0.01]
+
+                    # include upper edge (e.g., 13°C or higher) when it has non-trivial weight.
+                    edge_w = {lbl: w for _c, lbl, w, e in wpts_disp if e}
+                    upper_edges = sorted([r for r in feasible_rows if (not math.isinf(r[4]) and math.isinf(r[5]))], key=lambda x: x[4])
+                    if upper_edges:
+                        ue = None
+                        for r in upper_edges:
+                            if r[4] <= show_hi + 0.6:
+                                ue = r
+                                break
+                        if ue is not None:
+                            ew = edge_w.get(str(ue[1]), 0.0)
+                            if ew >= 0.025 and all(str(ue[1]) != str(x[1]) for x in display_rows):
+                                display_rows.append(ue)
+                                display_rows = sorted(display_rows, key=lambda x: x[0])
+
+                    if len(display_rows) > 7:
+                        mid = 0.5 * (show_lo + show_hi)
+                        best_i = 0
+                        best_d = 1e9
+                        k = 7
+                        for i in range(0, len(display_rows) - k + 1):
+                            d = abs(display_rows[i + k // 2][0] - mid)
+                            if d < best_d:
+                                best_d = d
+                                best_i = i
+                        display_rows = display_rows[best_i: best_i + k]
+    except Exception:
+        display_rows = sorted(list(focus), key=lambda x: x[0])
 
     show_lobster_reminder = any(_row_tag(r) for r in display_rows)
 
