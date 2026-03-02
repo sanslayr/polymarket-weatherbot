@@ -1,122 +1,97 @@
-# /look 特殊情形处理手册（集中归档）
+# /look 天气形势特殊情形手册（可扩展）
 
 Last updated: 2026-03-02
 
-> 目标：把“容易漏/容易冲突”的规则放到一处，减少调用混乱。
-
-## A. 峰值窗口与再创新高
-
-### A1) 早段已出高点（early-day max）
-- 触发：`phase=post` 且已存在 `observed_max_temp_c`
-- 处理：
-  - 区间上沿启用 `post-window realized-peak guard`
-  - 默认抑制“再创新高”尾部，除非满足明确反超条件
-- 反超条件（rebound_ok）：
-  - 晴空/少云稳定（无 BKN/OVC/VV）
-  - 无降水干扰
-  - 温度斜率持续偏正（`t_cons` 强）
-  - 与前高时间间隔仍合理（不是过久后硬冲）
-- 代码锚点：`telegram_report_cli.py`（post-window guard）
-
-### A2) post 阶段文案
-- 目标：不只说“窗口后已定”，要回答“能不能反超前高”。
-- 输出优先：
-  1) 还差多少温度可反超（门槛）
-  2) 当前条件是否支持（云/雨/斜率）
-  3) 再给 1-2 条触发变量
-- 代码锚点：`realtime_pipeline.py::select_realtime_triggers` + `telegram_report_cli.py` 合并逻辑
+> 本文件只归档**天气形势相关**规则（synoptic/云雨/风场/窗口行为）。
+> 技术实现细节（市场拉取、F/C 解析、METAR 量化等）已分离到 `TECHNICAL_IMPLEMENTATION_NOTES.md`。
 
 ---
 
-## B. 云层相关
-
-### B1) 云层判定必须看全字段
-- 数据源：`rawOb + clouds[] + cover`
-- 规则：
-  - 主云层级别使用“约束最强层”（不是第一层）
-  - 云层变化比较用全层 token 集合（新增/消退/重排）
-- 代码锚点：`metar_observation_block` 中 `_collect_cloud_pairs/_cloud_code/_cloud_change_text`
-
-### B2) 低云持续压制
-- 条件：当前 `BKN/OVC/VV` 且无开窗信号
-- 处理：
-  - 限制 center 上推
-  - 限制 tail 上沿扩展
-- 代码锚点：`telegram_report_cli.py`（persistent low-cloud guard）
+## 1) 使用范围
+- 适用于 `/look` 的跨城市最高温判断。
+- 目标是回答：
+  1) 今天高点是否已定？
+  2) 是否还有条件反超？
+  3) 哪个变量最可能改写结论？
 
 ---
 
-## C. 降水与相态
+## 2) 核心天气形势规则
 
-### C1) 降水演变是一级驱动
-- 分类：`new/intensify/weaken/end/steady/none`
-- 影响：
-  - `new/intensify`：上沿下压 + 不确定性上升
-  - `end + BKN/OVC`：残余冷却持续，不立即暖反弹
-- 代码锚点：`metar_observation_block` + `_signal_scores` + 区间修正段
+### A. 早段已出高点（early-day max）
+**触发：** `phase=post` 且已有 `observed_max_temp_c`
 
----
+**判定目标：** 不再泛化“窗口后已定”，而是直接判断“还能否反超前高”。
 
-## D. 斜率与量化观测（METAR quantized）
+**默认：** 抑制后段新高尾部。
 
-### D1) 站点整数温度台阶风险
-- 条件：`metar_temp_quantized=true`
-- 处理：
-  - 临近窗口结束时，单次 +1°C 不视作持续加速
-  - 启用 near-end cap
-- 代码锚点：`telegram_report_cli.py`（Quantized-METAR near-end guard）
-
-### D2) 午后平台期约束
-- 条件：`near/in window + clear-sky stable + 斜率弱`
-- 处理：
-  - 启用 solar-decay/plateau cap，抑制乐观晚窗上冲
-- 代码锚点：`telegram_report_cli.py`（Afternoon solar-decay + plateau gate）
+**仅在以下条件同时满足时放宽：**
+- 云层持续开窗（非 BKN/OVC/VV）
+- 无降水干扰
+- 温度斜率连续转强
+- 距前高时间仍合理（非久后硬冲）
 
 ---
 
-## E. 冷暖平流场景
+### B. 云层约束与开窗
+**低云压制（BKN/OVC/VV 持续）**
+- 上沿下压
+- 尾部缩短
+- 若同时有降水/弱斜率，则优先按“守高”处理
 
-### E1) 冷平流 far-window 反弹上限
-- 条件：`phase=far + 冷平流 + 北向来流`
-- 处理：
-  - 对远窗口快速反弹加上限，避免过暖偏差
-- 代码锚点：`telegram_report_cli.py`（Far-window cold-advection sanity cap）
-
-### E2) 暖平流不能自动推高
-- 仅在“云量/斜率/降水”协同时放大上沿
-- 否则暖平流仅保留为背景支撑，不直接给大尾部
+**开窗信号（减弱/开窗）**
+- 允许小幅恢复上沿
+- 但必须与温度斜率协同，不单凭云层判断
 
 ---
 
-## F. Polymarket 档位与时间
-
-### F1) 本地日期选市场（非UTC日）
-- 默认 `target_date`：站点 local date
-- 影响：Polymarket event URL 按本地日期拼接
-- 代码锚点：`render_report`（local-date default）
-
-### F2) Fahrenheit/Celsius 桶解析
-- 支持：`42-43F`、`44-45F`、`31c`、`30corbelow` 等
-- 防误判：避免把 `...-2026-31c` 的年份段当温度范围
-- 代码锚点：`_poly_parse_interval` / `_poly_label`
-
-### F3) Tag 规则（forecast-first）
-- `最有可能`：天气一致性优先，不是纯盘口报价最大
-- `潜在Alpha`：必须满足最低天气一致性，非“便宜即 alpha”
+### C. 降水演变优先级
+降水演变是一级方向变量：
+- `new / intensify`：压温风险上升，上沿下修
+- `steady`（且中等以上）：增温效率受抑
+- `end + 低云仍在`：残余冷却延续，不可立即暖反弹
 
 ---
 
-## G. 输出文案一致性
+### D. 冷暖平流与落地可达性
+**冷平流（尤其 far-window + 北向来流）**
+- 需限制“快速反弹”预期，防止过暖偏差。
 
-### G1) 单条直出
-- `/look` 与 `/lookhelp`：单条最终消息，禁止预告/占位
+**暖平流**
+- 只能作为“支撑因子”，不是自动抬升结论。
+- 必须与云量/降水/斜率协同才放大上沿。
 
-### G2) 关键证据去模板化
-- 700/500hPa 仅在有判别力时显示
-- 过滤泛化 boilerplate（避免每次都“看起来一样”）
+---
 
-### G3) METAR 展示增强
-- `最新报`标题内显示上一报时间
-- 风：给“上一报对比 + 转向/风速变化”
-- 云：显示上一报完整层结 + 变化类型
-- 天气现象：附中文释义（如 `-RA（小雨）`）
+### E. 午后平台期（辐射边际下降）
+在 `near/in window`：
+- 若已出现平台且斜率偏弱，应抑制乐观上冲尾部。
+- 仍可小幅上探，但不能假设持续加速。
+
+---
+
+## 3) 窗口后（post）输出导向
+窗口后优先输出“反超前高门槛”而不是泛化描述：
+1. 还差多少°C 才能反超
+2. 现有条件支持/不支持（云、雨、斜率、风场）
+3. 最快改判触发（下一报斜率 + 云层变化）
+
+---
+
+## 4) 城市/站点扩展模板（后续可增）
+> 后续遇到稳定的站点特征，按以下模板追加，避免散落在聊天记录。
+
+### [城市名 / ICAO]
+- **地形/下垫面特征：**
+- **常见偏差模式：**（如午后海风触发晚、夜间平流逆温等）
+- **触发信号优先级：**（先看什么，再看什么）
+- **保守条件：**（出现哪些信号就压上沿）
+- **放宽条件：**（哪些组合出现才允许反超）
+- **已验证样例日期：**
+
+---
+
+## 5) 维护约定
+- 本文件只收“天气形势规则”，不收工程实现细节。
+- 新增规则必须是“可跨城市复用”或“明确站点特化”的结论。
+- 技术细节请写入：`TECHNICAL_IMPLEMENTATION_NOTES.md`。
