@@ -92,7 +92,12 @@ Last updated: 2026-03-02
 - 其余站点：默认显示 °C；METAR 实况温度、已观测最高温及“较上一报变化”按原始精度展示（无小数不补 `.0`，有小数则保留）；同小时温度偏差固定保留 1 位小数。
 - 非美国站点在“已观测最高温锚定”时，若 METAR 为整数°C，内部按量化区间处理（如 `-5°C` 视作约 `[-5.5, -4.51]°C`），避免伪精度；盘口过滤仍按已观测真值。
 
-## 10) Layout / typography rules（排版总则）
+## 10) Implementation guardrail（实现护栏，强约束）
+- 涉及窗口时差/相位时差的实现，统一使用 `_hours_between_iso(...)`。
+- 不允许新增分散 tz 差分逻辑（手写 `fromisoformat` 差分 / 手动 `replace(tzinfo=...)` 差分）。
+- 若必须例外，需在代码写 `TZ-WAIVER` 注释并同步 `TECHNICAL_IMPLEMENTATION_NOTES.md` 记录。
+
+## 11) Layout / typography rules（排版总则）
 - 标题层级：主段落用 `**...**`；同级段落避免混用 bullet 与 heading。
 - `METAR` 内：
   - `• 今日已观测最高温`

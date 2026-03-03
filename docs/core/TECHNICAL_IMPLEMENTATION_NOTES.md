@@ -72,3 +72,14 @@ Last updated: 2026-03-02
 ## 6) 维护边界
 - 本文件不承载“天气形势判断规则”，只记录实现细节。
 - 形势规则统一写入：`SPECIAL_CASE_PLAYBOOK.md`。
+
+## 7) 代码写入硬约束（防回归）
+- 时间差计算（小时）**必须**走 `_hours_between_iso(...)` / `_hours_between(...)`。
+- 禁止在业务逻辑中新增分散写法：
+  - `datetime.fromisoformat(a) - datetime.fromisoformat(b)`
+  - 手写 `replace(tzinfo=...)` 后再做差分
+- 若确需例外（极少数场景），必须：
+  1) 在代码旁写 `# TZ-WAIVER:` 注释说明原因；
+  2) 同步更新本文件“例外清单”。
+- 与窗口相位相关的门控（`hleft/h_to_peak/h_to_end/h_after_end/h_since_obs_peak`）不得重复实现，必须复用统一工具函数。
+- 每次改动时序逻辑后，至少回归：`/look ank`（far冷平流）、`/look sea`（post小时站）、`/look wel`（半小时站）。
