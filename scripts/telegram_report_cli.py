@@ -2769,6 +2769,8 @@ def _build_polymarket_section(
 
     expectation_lines: list[str] = []
     range_notes: list[str] = []
+    market_cov_lo_c = None
+    market_cov_hi_c = None
 
     settled_single = False
     settled_center = None
@@ -2799,6 +2801,8 @@ def _build_polymarket_section(
         if settled_single and settled_center is not None:
             s_u = _to_unit(settled_center)
             expectation_lines.append(f"    ↳ {s_u:.1f}{sym}｜{s_u:.1f}~{s_u:.1f}{sym}（近似定局）")
+            market_cov_lo_c = float(settled_center)
+            market_cov_hi_c = float(settled_center)
         pts_full: list[tuple[float, str, float, float, float, bool]] = []
         for c, lbl, b, a, lo_i, hi_i in filtered:
             bidv = _px(b)
@@ -2906,6 +2910,8 @@ def _build_polymarket_section(
                     lo_u = _to_unit(lo_c)
                     hi_u = _to_unit(hi_c)
                     expectation_lines.append(f"    ↳ {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（{cov_pct}%范围）")
+                    market_cov_lo_c = float(lo_c)
+                    market_cov_hi_c = float(hi_c)
                 else:
                     mu_c = max(emp_mu, feasible_floor)
                     lo_c = max(emp_qlo, feasible_floor)
@@ -2914,6 +2920,8 @@ def _build_polymarket_section(
                     lo_u = _to_unit(lo_c)
                     hi_u = _to_unit(hi_c)
                     expectation_lines.append(f"    ↳ {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（{cov_pct}%范围）")
+                    market_cov_lo_c = float(lo_c)
+                    market_cov_hi_c = float(hi_c)
 
                 if edge_share > 0.55:
                     edge_bins = sorted([(str(lbl), float(p)) for _c, lbl, p, _lo, _hi, e in wpts if e], key=lambda x: x[1], reverse=True)
@@ -2929,6 +2937,68 @@ def _build_polymarket_section(
                 hot_tail = sum(p for c, _l, p, _lo, _hi, _e in wpts if c >= (fc_hi + 0.5))
                 if hot_tail >= 0.18:
                     expectation_lines.append(f"  • 提示：市场对更高温尾部定价不低（≥{_to_unit(fc_hi + 0.5):.1f}{sym} 合计约 {hot_tail*100:.0f}%）。")
+    except Exception:
+        pass
+
+    # Final ladder alignment (contract):
+    # include the UNION of weather Tmax range and market expected range, and keep bins continuous.
+    try:
+        union_lo = float(target_lo)
+        union_hi = float(target_hi)
+        if market_cov_lo_c is not None and market_cov_hi_c is not None:
+            union_lo = min(union_lo, float(market_cov_lo_c))
+            union_hi = max(union_hi, float(market_cov_hi_c))
+
+        finite_all = sorted([r for r in filtered if not (math.isinf(r[4]) or math.isinf(r[5]))], key=lambda x: x[0])
+        if finite_all:
+            base = [r for r in finite_all if (r[5] >= union_lo - 0.01 and r[4] <= union_hi + 0.01)]
+            if base:
+                cmin = min(r[0] for r in base)
+                cmax = max(r[0] for r in base)
+                merged = [r for r in finite_all if cmin - 0.01 <= r[0] <= cmax + 0.01]
+            else:
+                merged = sorted(finite_all, key=lambda x: abs(x[0] - 0.5 * (union_lo + union_hi)))[:3]
+                merged = sorted(merged, key=lambda x: x[0])
+            display_rows = merged
+
+        # include overlapping edge bins when union range touches bounds
+        lower_edges = sorted([r for r in filtered if (math.isinf(r[4]) and not math.isinf(r[5]))], key=lambda x: x[5])
+        if lower_edges:
+            lo_cands = [r for r in lower_edges if r[5] >= union_lo - 0.6]
+            if lo_cands:
+                lo_pick = lo_cands[-1]
+                if all(str(lo_pick[1]) != str(x[1]) for x in display_rows):
+                    display_rows = [lo_pick] + display_rows
+
+        upper_edges = sorted([r for r in filtered if (not math.isinf(r[4]) and math.isinf(r[5]))], key=lambda x: x[4])
+        if upper_edges:
+            up_cands = [r for r in upper_edges if r[4] <= union_hi + 0.6]
+            if up_cands:
+                up_pick = up_cands[0]
+                if all(str(up_pick[1]) != str(x[1]) for x in display_rows):
+                    display_rows = display_rows + [up_pick]
+
+        # de-dup + stable sort
+        dedup = {str(r[1]): r for r in display_rows}
+        display_rows = sorted(dedup.values(), key=lambda x: x[0])
+    except Exception:
+        pass
+
+    # Re-ensure dominant bucket after final alignment override.
+    try:
+        if filtered:
+            top_row = None
+            top_p = -1.0
+            for r in filtered:
+                _c, _lbl, b, a, _lo, _hi = r
+                bidv = _px(b)
+                askv = _px(a)
+                p = (0.5 * (bidv + askv)) if (bidv > 0 and askv > 0) else max(bidv, askv)
+                if p > top_p:
+                    top_p = p
+                    top_row = r
+            if top_row is not None and all(str(top_row[1]) != str(x[1]) for x in display_rows):
+                display_rows = sorted(display_rows + [top_row], key=lambda x: x[0])
     except Exception:
         pass
 
