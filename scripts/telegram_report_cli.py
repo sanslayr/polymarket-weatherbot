@@ -4063,6 +4063,29 @@ def choose_section_text(
                 cap_shift = 0.08
             consistency_shift = min(consistency_shift, cap_shift)
 
+    # Hourly-cycle station anti-single-step inertia:
+    # if latest hourly report is already flat and no SPECI pressure, avoid carrying prior-step momentum too far.
+    try:
+        cad_min_local = float(metar_diag.get("metar_routine_cadence_min")) if metar_diag.get("metar_routine_cadence_min") is not None else None
+    except Exception:
+        cad_min_local = None
+    try:
+        t_step_latest = float(metar_diag.get("temp_trend_1step_c")) if metar_diag.get("temp_trend_1step_c") is not None else 0.0
+    except Exception:
+        t_step_latest = 0.0
+    speci_pressure = bool(metar_diag.get("metar_speci_active")) or bool(metar_diag.get("metar_speci_likely"))
+    if (
+        cad_min_local is not None
+        and cad_min_local >= 50.0
+        and (not speci_pressure)
+        and phase_now in {"near_window", "in_window", "post"}
+        and abs(t_step_latest) <= 0.12
+    ):
+        t_cons = min(t_cons, 0.12)
+        if b_cons > 0:
+            b_cons = min(b_cons, 0.9)
+        metar_diag["hourly_flat_anchor_active"] = True
+
     precip_cooling = False
     precip_residual = False
     precip_warm_relief_day = False
@@ -4561,6 +4584,28 @@ def choose_section_text(
     if cad_min is not None and cad_min > 0:
         compact_wait_h = max(0.40, min(0.95, (cad_min / 60.0) * 0.90))
 
+    decisive_hourly_report = False
+    try:
+        t_step_latest2 = float(metar_diag.get("temp_trend_1step_c")) if metar_diag.get("temp_trend_1step_c") is not None else 0.0
+    except Exception:
+        t_step_latest2 = 0.0
+    if (
+        cad_min is not None
+        and cad_min >= 50.0
+        and h_after_end_compact is not None
+        and h_after_end_compact >= max(0.35, compact_wait_h * 0.65)
+        and clear_sky_stable
+        and abs(t_step_latest2) <= 0.12
+        and (not bool(metar_diag.get("metar_speci_active")))
+        and (not bool(metar_diag.get("metar_speci_likely")))
+        and (not bool(metar_diag.get("nocturnal_reheat_signal")))
+        and (not warm_reheat_hint)
+        and precip_state not in {"moderate", "heavy", "convective"}
+    ):
+        decisive_hourly_report = True
+
+    metar_diag["decisive_hourly_report"] = bool(decisive_hourly_report)
+
     if (
         obs_max is not None
         and h_after_end_compact is not None
@@ -4572,6 +4617,8 @@ def choose_section_text(
         and (not bool(metar_diag.get("metar_speci_likely")))
         and precip_state not in {"moderate", "heavy", "convective"}
     ):
+        compact_settled_mode = True
+    elif decisive_hourly_report and obs_max is not None:
         compact_settled_mode = True
 
     peak_range_block = ["🌡️ **可能最高温区间（仅供参考）**"]
@@ -4923,6 +4970,13 @@ def choose_section_text(
             "⚠️ **关注变量**（窗口后）",
             f"• 峰值窗基本已过，最高温大概率在已观测高点附近收敛（当前锚点 {anchor_txt}）。",
         ]
+        if bool(metar_diag.get("decisive_hourly_report")):
+            try:
+                key_dt = datetime.fromisoformat(str(metar_diag.get("latest_report_local") or ""))
+                key_txt = key_dt.strftime("%H:%M")
+            except Exception:
+                key_txt = "本轮"
+            vars_block.append(f"• 该站小时关键报（{key_txt} Local）已给出平稳信号，后续再创新高难度上升。")
 
     # 低置信度时不打“最有可能”标签，避免误导
     allow_best_label = True
