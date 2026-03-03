@@ -1233,7 +1233,54 @@ def metar_observation_block(
         removed = [t for t in prev_tokens if t not in cur_set]
 
         if added and removed:
-            tr_txt = f"云层重排（新增{'/'.join(added)}；消退{'/'.join(removed)}）"
+            rank = {"CLR": 0, "CAVOK": 0, "SKC": 0, "FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4, "VV": 5}
+
+            def _parse_tok(tok: str) -> tuple[str, int | None]:
+                s = str(tok or "").upper()
+                m = re.match(r"^(FEW|SCT|BKN|OVC|VV)(\d{3})$", s)
+                if m:
+                    return m.group(1), int(m.group(2)) * 100
+                if s in {"CLR", "CAVOK", "SKC", "FEW", "SCT", "BKN", "OVC", "VV"}:
+                    return s, None
+                return s, None
+
+            add_p = [_parse_tok(t) for t in added]
+            rem_p = [_parse_tok(t) for t in removed]
+
+            # try same-layer evolution matching by nearest cloud-base height
+            pairs: list[tuple[str, str, float | None, int]] = []
+            used_add: set[int] = set()
+            for ri, (rc, rh) in enumerate(rem_p):
+                best_j = None
+                best_d = None
+                for aj, (ac, ah) in enumerate(add_p):
+                    if aj in used_add:
+                        continue
+                    if rh is not None and ah is not None:
+                        d = abs(float(ah - rh))
+                    else:
+                        d = 99999.0
+                    if best_d is None or d < best_d:
+                        best_d = d
+                        best_j = aj
+                if best_j is not None:
+                    used_add.add(best_j)
+                    ac, ah = add_p[best_j]
+                    dr = rank.get(ac, 2) - rank.get(rc, 2)
+                    pairs.append((removed[ri], added[best_j], best_d, dr))
+
+            same_layer_pairs = [p for p in pairs if p[2] is not None and p[2] <= 4000.0]
+            if len(same_layer_pairs) == len(pairs) and len(pairs) >= 1:
+                dir_all = [p[3] for p in same_layer_pairs]
+                arrows = "/".join([f"{p[0]}→{p[1]}" for p in same_layer_pairs[:3]])
+                if all(d < 0 for d in dir_all):
+                    tr_txt = f"同层云量减弱（{arrows}）"
+                elif all(d > 0 for d in dir_all):
+                    tr_txt = f"同层云量增强（{arrows}）"
+                else:
+                    tr_txt = f"同层云层调整（{arrows}）"
+            else:
+                tr_txt = f"云层重排（新增{'/'.join(added)}；消退{'/'.join(removed)}）"
         elif added:
             tr_txt = f"云量增加（新增{'/'.join(added)}）"
         elif removed:
