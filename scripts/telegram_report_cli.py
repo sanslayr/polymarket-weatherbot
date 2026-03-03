@@ -2712,6 +2712,42 @@ def _build_polymarket_section(
     except Exception:
         display_rows = sorted(list(focus), key=lambda x: x[0])
 
+    # Keep ladder consistent with expectation span: if tails have non-trivial weight
+    # but were pruned by compact display, re-attach at most one lower + one upper tail bin.
+    try:
+        if display_rows and len(filtered) >= 2:
+            p_map: dict[str, float] = {}
+            row_map: dict[str, tuple[float, str, Any, Any, float, float]] = {}
+            for r in filtered:
+                c, lbl, b, a, _lo, _hi = r
+                bidv = _px(b)
+                askv = _px(a)
+                p = (0.5 * (bidv + askv)) if (bidv > 0 and askv > 0) else max(bidv, askv)
+                if p > 0:
+                    p_map[str(lbl)] = float(p)
+                    row_map[str(lbl)] = r
+            if p_map:
+                s = sum(p_map.values())
+                if s > 0:
+                    for k in list(p_map.keys()):
+                        p_map[k] = p_map[k] / s
+
+                cmin = min(r[0] for r in display_rows)
+                cmax = max(r[0] for r in display_rows)
+                low_tail = [row_map[k] for k, p in p_map.items() if p >= 0.02 and row_map[k][0] < cmin - 0.01]
+                high_tail = [row_map[k] for k, p in p_map.items() if p >= 0.02 and row_map[k][0] > cmax + 0.01]
+
+                merged: dict[str, tuple[float, str, Any, Any, float, float]] = {str(r[1]): r for r in display_rows}
+                if low_tail:
+                    pick_lo = sorted(low_tail, key=lambda x: x[0], reverse=True)[0]
+                    merged[str(pick_lo[1])] = pick_lo
+                if high_tail:
+                    pick_hi = sorted(high_tail, key=lambda x: x[0])[0]
+                    merged[str(pick_hi[1])] = pick_hi
+                display_rows = sorted(list(merged.values()), key=lambda x: x[0])
+    except Exception:
+        pass
+
     expectation_lines: list[str] = []
     range_notes: list[str] = []
 
