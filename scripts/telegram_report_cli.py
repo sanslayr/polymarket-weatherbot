@@ -3787,6 +3787,7 @@ def choose_section_text(
     except Exception:
         pass
     metar_block = "📡 **最新实况分析（METAR）**\n" + ("\n".join(metar_prefix + [metar_text]) if metar_prefix else metar_text)
+    obs_analysis_lines: list[str] = []
 
     peak_c = float(calc_window.get('peak_temp_c') or 0.0)
     obs_max = None
@@ -5056,23 +5057,29 @@ def choose_section_text(
             anchor_txt = _fmt_range(float(obs_floor), float(obs_ceil))
         else:
             anchor_txt = _fmt_temp(float(obs_max))
-        vars_block = [
-            "⚠️ **关注变量**（窗口后）",
-            f"• 峰值窗基本已过，最高温大概率在已观测高点附近收敛（当前锚点 {anchor_txt}）。",
-        ]
+
+        # Move realized-state interpretation into METAR analysis block (not variable block).
+        obs_analysis_lines.append(f"• 峰值窗基本已过，最高温大概率在已观测高点附近收敛（当前锚点 {anchor_txt}）。")
         if bool(metar_diag.get("decisive_hourly_report")):
             try:
                 key_dt = datetime.fromisoformat(str(metar_diag.get("latest_report_local") or ""))
                 key_txt = key_dt.strftime("%H:%M")
             except Exception:
                 key_txt = "本轮"
-            vars_block.append(f"• 该站小时关键报（{key_txt} Local）已给出平稳信号，后续再创新高难度上升。")
+            obs_analysis_lines.append(f"• 该站小时关键报（{key_txt} Local）已给出平稳信号，后续再创新高难度上升。")
 
+        vars_block = [
+            "⚠️ **关注变量**（窗口后）",
+        ]
         if next_key_report_txt:
             if (not bool(metar_diag.get("metar_speci_active"))) and (not bool(metar_diag.get("metar_speci_likely"))):
-                vars_block.append(f"• 当前形势稳定、触发SPECI概率偏低；重点看 {next_key_report_txt} Local 是否维持横盘。")
+                vars_block.append(f"• 重点看 {next_key_report_txt} Local：温度是否维持横盘/回落（若是，则高点基本锁定）。")
             else:
-                vars_block.append(f"• 重点看 {next_key_report_txt} Local：若出现加密报或斜率再放大，再评估新高窗口。")
+                vars_block.append(f"• 重点看 {next_key_report_txt} Local：若斜率再放大并伴随风云重排，才可能重开新高窗口。")
+        else:
+            vars_block.append("• 下一报重点看温度斜率是否再转正，以及风向/云量是否出现相变。")
+        vars_block.append("• 关注风向风速是否转入更有利增温的象限并增强。")
+        vars_block.append("• 关注云量是否继续转疏或再回补（将直接影响末段上冲空间）。")
 
     # 低置信度时不打“最有可能”标签，避免误导
     allow_best_label = True
@@ -5111,6 +5118,9 @@ def choose_section_text(
 
     if (settled_bias or late_cap_no_reheat) and (not rebreak_evidence):
         allow_alpha_label = False
+
+    if obs_analysis_lines:
+        metar_block = metar_block + "\n\n**实况分析**\n" + "\n".join(obs_analysis_lines)
 
     poly_block = ""
     try:
