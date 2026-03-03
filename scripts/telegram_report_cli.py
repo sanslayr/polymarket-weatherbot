@@ -1247,8 +1247,9 @@ def metar_observation_block(
             add_p = [_parse_tok(t) for t in added]
             rem_p = [_parse_tok(t) for t in removed]
 
-            # try same-layer evolution matching by nearest cloud-base height
-            pairs: list[tuple[str, str, float | None, int]] = []
+            # try layer-evolution matching by nearest cloud-base height
+            # tuple: (removed_tok, added_tok, base_diff_ft, rank_delta, removed_base_ft, added_base_ft)
+            pairs: list[tuple[str, str, float | None, int, int | None, int | None]] = []
             used_add: set[int] = set()
             for ri, (rc, rh) in enumerate(rem_p):
                 best_j = None
@@ -1267,18 +1268,33 @@ def metar_observation_block(
                     used_add.add(best_j)
                     ac, ah = add_p[best_j]
                     dr = rank.get(ac, 2) - rank.get(rc, 2)
-                    pairs.append((removed[ri], added[best_j], best_d, dr))
+                    pairs.append((removed[ri], added[best_j], best_d, dr, rh, ah))
 
-            same_layer_pairs = [p for p in pairs if p[2] is not None and p[2] <= 4000.0]
-            if len(same_layer_pairs) == len(pairs) and len(pairs) >= 1:
-                dir_all = [p[3] for p in same_layer_pairs]
-                arrows = "/".join([f"{p[0]}→{p[1]}" for p in same_layer_pairs[:3]])
-                if all(d < 0 for d in dir_all):
-                    tr_txt = f"同层云量减弱（{arrows}）"
-                elif all(d > 0 for d in dir_all):
-                    tr_txt = f"同层云量增强（{arrows}）"
+            layer_pairs = [p for p in pairs if p[2] is not None and p[2] <= 4000.0]
+            if len(layer_pairs) == len(pairs) and len(pairs) >= 1:
+                dir_all = [p[3] for p in layer_pairs]
+                arrows = "/".join([f"{p[0]}→{p[1]}" for p in layer_pairs[:3]])
+
+                hvals = [h for p in layer_pairs for h in (p[4], p[5]) if h is not None]
+                if hvals:
+                    h_lo = int(min(hvals))
+                    h_hi = int(max(hvals))
+                    if abs(h_hi - h_lo) <= 1500:
+                        h_mid = int(round((h_lo + h_hi) / 200.0) * 100)
+                        h_txt = f"约{h_mid}ft高度层"
+                    else:
+                        lo_r = int(round(h_lo / 100.0) * 100)
+                        hi_r = int(round(h_hi / 100.0) * 100)
+                        h_txt = f"约{lo_r}-{hi_r}ft高度层"
                 else:
-                    tr_txt = f"同层云层调整（{arrows}）"
+                    h_txt = "该高度层"
+
+                if all(d < 0 for d in dir_all):
+                    tr_txt = f"{h_txt}云量减弱（{arrows}）"
+                elif all(d > 0 for d in dir_all):
+                    tr_txt = f"{h_txt}云量增强（{arrows}）"
+                else:
+                    tr_txt = f"{h_txt}云层调整（{arrows}）"
             else:
                 tr_txt = f"云层重排（新增{'/'.join(added)}；消退{'/'.join(removed)}）"
         elif added:
