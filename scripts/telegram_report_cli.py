@@ -5091,9 +5091,25 @@ def choose_section_text(
         allow_best_label = False
 
     allow_alpha_label = bool(allow_best_label)
-    if compact_settled_mode or bool(metar_diag.get("decisive_hourly_report")):
-        allow_alpha_label = False
-    if phase_now == "post" and bool(metar_diag.get("late_end_cap_applied")) and (not bool(metar_diag.get("nocturnal_reheat_signal"))):
+
+    # Post-window alpha gating should be conditional, not hard-disabled:
+    # allow alpha only when there is explicit re-break evidence.
+    rebreak_evidence = bool(
+        bool(metar_diag.get("nocturnal_reheat_signal"))
+        or bool(metar_diag.get("metar_speci_active"))
+        or bool(metar_diag.get("metar_speci_likely"))
+        or (t_cons >= 0.35 and b_cons >= 0.45)
+        or (phase_now in {"near_window", "in_window"} and t_cons >= 0.45)
+    )
+
+    settled_bias = bool(compact_settled_mode) or bool(metar_diag.get("decisive_hourly_report"))
+    late_cap_no_reheat = bool(
+        phase_now == "post"
+        and bool(metar_diag.get("late_end_cap_applied"))
+        and (not bool(metar_diag.get("nocturnal_reheat_signal")))
+    )
+
+    if (settled_bias or late_cap_no_reheat) and (not rebreak_evidence):
         allow_alpha_label = False
 
     poly_block = ""
