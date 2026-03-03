@@ -2127,7 +2127,15 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2.0 * r * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
 
 
-def run_synoptic_section(st: Station, target_date: str, peak_local: str, tz_name: str, model: str, runtime_tag: str) -> dict[str, Any]:
+def run_synoptic_section(
+    st: Station,
+    target_date: str,
+    peak_local: str,
+    tz_name: str,
+    model: str,
+    runtime_tag: str,
+    pass_mode: str = "full",
+) -> dict[str, Any]:
     from synoptic_runner import run_synoptic_section as _run
 
     return _run(
@@ -2140,6 +2148,7 @@ def run_synoptic_section(st: Station, target_date: str, peak_local: str, tz_name
         scripts_dir=SCRIPTS_DIR,
         cache_dir=CACHE_DIR,
         provider=SYNOPTIC_PROVIDER,
+        pass_mode=pass_mode,
         perf_log=_perf_log,
     )
 
@@ -4301,17 +4310,31 @@ def choose_section_text(
 
     clear_now = cloud_code_now in {"CLR", "CAVOK", "SKC", "FEW", "SCT"}
 
-    # Circulation-context gate for day-to-day amplitude learning:
-    # yesterday's range is only informative when today's synoptic setup is still
-    # radiation-dominant / weakly forced (not a strong frontal-dynamic override day).
-    circ_weak_forced = not any(k in (line500 + " " + extra) for k in ["槽", "短波", "急流", "涡度", "PVA", "锋生", "强迫", "切变", "对流"])
+    # Circulation-context weighted gate for day-to-day amplitude learning:
+    # yesterday's range is informative by degree, not a binary on/off.
+    strong_dyn = any(k in (line500 + " " + extra) for k in ["槽", "短波", "急流", "涡度", "PVA", "锋生", "强迫", "切变", "对流"])
+    circ_weak_forced = not strong_dyn
     if _is_generic_500(line500):
         circ_weak_forced = True
     strong_cold_adv = ("冷平流" in line850) and ("暖平流" not in line850)
     dry_support = ("干层" in h700_summary)
-    circ_context_ok = bool(circ_weak_forced or dry_support)
-    if strong_cold_adv and (not dry_support) and b_cons <= -1.0:
-        circ_context_ok = False
+
+    circ_context_score = 0.55
+    if circ_weak_forced:
+        circ_context_score += 0.22
+    if dry_support:
+        circ_context_score += 0.18
+    if ("暖平流" in line850) and b_cons > -0.4:
+        circ_context_score += 0.08
+    if strong_dyn:
+        circ_context_score -= 0.20
+    if strong_cold_adv:
+        circ_context_score -= 0.22
+    if low_cloud_peak_est >= 35.0:
+        circ_context_score -= 0.10
+    if b_cons <= -1.2:
+        circ_context_score -= 0.08
+    circ_context_score = max(0.0, min(1.0, circ_context_score))
 
     if (
         phase_now == "far"
@@ -4322,20 +4345,21 @@ def choose_section_text(
         and low_cloud_peak_est <= 45.0
         and prev_rng is not None
         and model_rng is not None
-        and circ_context_ok
     ):
         amp_gap = prev_rng - model_rng
-        if amp_gap >= 1.2:
-            diurnal_uplift = min(1.30, 0.30 * amp_gap)
+        if amp_gap >= 1.2 and circ_context_score >= 0.18:
+            raw_uplift = min(1.30, 0.30 * amp_gap)
             if solar_slope_next is not None and solar_slope_next >= 0.03:
-                diurnal_uplift += 0.15
+                raw_uplift += 0.15
             if strong_cold_adv and b_cons <= -1.0:
-                diurnal_uplift -= 0.15
-            diurnal_uplift = max(0.10, diurnal_uplift)
-            center += diurnal_uplift
-            metar_diag["diurnal_uplift_applied"] = True
-            metar_diag["diurnal_uplift_c"] = round(diurnal_uplift, 2)
-            metar_diag["diurnal_context_ok"] = True
+                raw_uplift -= 0.10
+            raw_uplift = max(0.10, raw_uplift)
+            diurnal_uplift = max(0.0, raw_uplift * circ_context_score)
+            if diurnal_uplift >= 0.08:
+                center += diurnal_uplift
+                metar_diag["diurnal_uplift_applied"] = True
+                metar_diag["diurnal_uplift_c"] = round(diurnal_uplift, 2)
+                metar_diag["diurnal_context_score"] = round(circ_context_score, 2)
 
     if phase_now in {"near_window", "in_window"} and cloud_code_now in {"BKN", "OVC", "VV"} and not cloud_opening:
         # cap center by model peak + modest allowance; only slightly relax if slope is clearly positive

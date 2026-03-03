@@ -1,6 +1,6 @@
 # /look 技术实现与维护备注（非天气形势）
 
-Last updated: 2026-03-02
+Last updated: 2026-03-03
 
 > 本文件用于记录工程/数据技术层面的实现点，避免污染天气形势规则手册。
 
@@ -26,7 +26,7 @@ Last updated: 2026-03-02
 - 新增夜间增温辅助信号：`wind_speed_trend_1step_kt`、`dewpoint_trend_1step_c`，用于 after-sunset reheat 组合判定。
 - 新增 METAR 采样节律识别：`metar_routine_cadence_min`、`metar_recent_interval_min`、`metar_speci_active`，用于动态调整短时判读窗口（半小时站/整点站/SPECI 加密采样）。
 - 新增晴空日振幅对照特征：`observed_prev_day_range_c / model_day_range_c`，用于 far 阶段识别“模型日振幅偏小”并做有限上修（避免清晨偏冷直接压死白天升温）。
-- 该上修受“环流上下文门控”约束：仅在弱强迫/辐射主导背景（或干层支撑）下启用，强动力/强锋生日不直接沿用昨日振幅经验。
+- 该上修受“环流上下文软门控”约束：按弱强迫/干层支撑/平流性质计算上下文得分并加权上修幅度，避免硬开关式启停；强动力/强锋生日权重会显著下调。
 - 新增 SPECI 可能性前瞻信号：`metar_speci_likely / metar_speci_likely_score`（温度/风/云/天气现象突变组合），用于避免长周期站点在异常前夜被单报过早锚定。
 - 增加近24h历史特征提取并用于阈值自适应：`metar_speci_count_24h`、`metar_speci_ratio_24h`、`metar_rapid_temp_jump_count_24h`、`metar_rapid_wind_jump_count_24h`、`metar_wx_transition_count_24h`、`metar_speci_likely_threshold`。
 - 相关阈值参数已外置到 `config/tmax_learning_params.json`，由 `scripts/param_store.py` 统一加载。
@@ -56,6 +56,22 @@ Last updated: 2026-03-02
 - 统一使用“并集连续渲染”单机制：展示区间 = `天气Tmax区间 ∪ 市场定价期望区间`。
 - 在该并集区间内按温度档位连续展开，避免多层补丁式裁剪。
 - 额外硬约束：始终包含市场最高概率档位（dominant bucket）。
+
+## 3.4 Synoptic 拉取分层策略（性能优化）
+- 新增 `FORECAST_SYNOPTIC_PASS_STRATEGY`：
+  - `split_outer500`（默认）：全锚点跑 `inner_only`，关键锚点补 `outer500_only`
+  - `full`：全锚点跑 `inner + outer500`（兼容旧行为）
+- `FORECAST_OUTER500_ANCHOR_MAX`（默认 `3`）控制 outer500 关键锚点数量。
+- 可选细调采样范围与密度：
+  - `FORECAST_OUTER500_LAT_SPAN` / `FORECAST_OUTER500_LON_SPAN`
+  - `FORECAST_OUTER500_STEP_DEG` / `FORECAST_OUTER500_BATCH_SIZE`
+  - `FORECAST_INNER_LAT_SPAN` / `FORECAST_INNER_LON_SPAN`
+  - `FORECAST_INNER_STEP_DEG` / `FORECAST_INNER_BATCH_SIZE`
+- 关键锚点按优先级选取：`now_local`、`peak_local`、`start_local`、`end_local`，并补首尾锚点兜底。
+- 质量输出新增：
+  - `synoptic_outer500_anchors_total`
+  - `synoptic_outer500_anchors_ok`
+  - 缺失时标记 `missing_layers += synoptic_outer500`；在 near/in/post 场景下可降级为 `degraded`。
 
 ## 4) 输出渲染技术增强
 - 最新报标题内嵌上一报时间。
