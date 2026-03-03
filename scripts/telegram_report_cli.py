@@ -2748,6 +2748,25 @@ def _build_polymarket_section(
     except Exception:
         pass
 
+    # Always include the dominant market-probability bucket in displayed ladder.
+    # Prevents cases where weather-centric compression hides the actual market focus (e.g. 56-57°F).
+    try:
+        if filtered:
+            top_row = None
+            top_p = -1.0
+            for r in filtered:
+                _c, _lbl, b, a, _lo, _hi = r
+                bidv = _px(b)
+                askv = _px(a)
+                p = (0.5 * (bidv + askv)) if (bidv > 0 and askv > 0) else max(bidv, askv)
+                if p > top_p:
+                    top_p = p
+                    top_row = r
+            if top_row is not None and all(str(top_row[1]) != str(x[1]) for x in display_rows):
+                display_rows = sorted(display_rows + [top_row], key=lambda x: x[0])
+    except Exception:
+        pass
+
     expectation_lines: list[str] = []
     range_notes: list[str] = []
 
