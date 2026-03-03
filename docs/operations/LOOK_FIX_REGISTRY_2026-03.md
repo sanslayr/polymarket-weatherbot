@@ -1,6 +1,6 @@
 # /look 修复总表（2026-03）
 
-Last updated: 2026-03-02
+Last updated: 2026-03-03
 
 > 本表聚合近期高频修正（含群聊中提到的修正），按主题分组，便于回溯。
 
@@ -106,6 +106,23 @@ Last updated: 2026-03-02
   - `config/tmax_learning_params.json`（可学习参数面板）
 - 已将云量/天气透过率与 rounded-top 关键阈值切换为配置驱动，便于后续历史回放学习后直接更新参数。
 - 新增文档：`docs/core/HISTORICAL_LEARNING_ARCHITECTURE.md`（离线学习 + 在线更新 + 典型案例库路线）。
+
+## 10) 2026-03-03 结构收口与防回归整合
+
+- 时区差分收口：关键时差计算统一到 `_hours_between_iso(...)`，替换分散的手写 `fromisoformat/replace(tzinfo)` 差分路径。  
+  - commits: `4e752af`
+- 远离窗口冷平流封顶误触发修复：`hleft` 时区对齐 + 仅在接近峰值时启用 far cap，避免清晨长升温跑道被误封顶（Ankara case）。  
+  - commits: `b1a2f8f`, `4e752af`
+- 市场档位渲染机制统一：按 `天气区间 ∪ 市场期望区间` 连续展示，并强制包含市场最高概率档位，减少补丁式裁剪冲突。  
+  - commits: `e285e56`, `631d2ad`, `1142dec`
+- Post-window 文案分层：把“峰值窗已过/关键报平稳”等事实移入 METAR 下 `实况分析`；`关注变量` 仅保留下一报情景与观测维度。  
+  - commit: `da038aa`
+- Alpha 标签门控改为证据驱动（非一刀切禁用）：收敛态默认抑制，出现再冲高证据时可恢复。  
+  - commit: `e7e0193`
+- 防绕过文档硬约束：在 Contract/Technical Notes 增加“时差计算统一工具”强约束与 `TZ-WAIVER` 例外流程。  
+  - commit: `939c8f5`
+- far 阶段晴空日振幅修正：引入“昨日实况振幅 vs 今日模型振幅”有限上修，并加环流上下文门控（弱强迫/辐射主导才启用）。  
+  - commits: `3e1968d`, `8cc8646`
 
 ---
 
