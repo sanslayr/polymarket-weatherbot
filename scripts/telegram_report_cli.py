@@ -2045,6 +2045,44 @@ def _observed_max_interval_c(
     return x, x
 
 
+def _parse_iso_dt(v: Any) -> datetime | None:
+    try:
+        s = str(v or "")
+        return datetime.fromisoformat(s) if s else None
+    except Exception:
+        return None
+
+
+def _coerce_same_tz(a: datetime | None, b: datetime | None) -> tuple[datetime | None, datetime | None]:
+    if a is None or b is None:
+        return a, b
+    try:
+        if a.tzinfo is not None and b.tzinfo is None:
+            b = b.replace(tzinfo=a.tzinfo)
+        elif a.tzinfo is None and b.tzinfo is not None:
+            a = a.replace(tzinfo=b.tzinfo)
+    except Exception:
+        pass
+    return a, b
+
+
+def _hours_between(later: datetime | None, earlier: datetime | None, nonneg: bool = False) -> float | None:
+    later, earlier = _coerce_same_tz(later, earlier)
+    if later is None or earlier is None:
+        return None
+    try:
+        h = (later - earlier).total_seconds() / 3600.0
+    except Exception:
+        return None
+    if nonneg:
+        return max(0.0, h)
+    return h
+
+
+def _hours_between_iso(later_iso: Any, earlier_iso: Any, nonneg: bool = False) -> float | None:
+    return _hours_between(_parse_iso_dt(later_iso), _parse_iso_dt(earlier_iso), nonneg=nonneg)
+
+
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     r = 6371.0
     p1 = math.radians(lat1)
@@ -3818,14 +3856,7 @@ def choose_section_text(
     try:
         latest_local_txt = str(metar_diag.get("latest_report_local") or "")
         peak_fused_txt = str(gate.get("peak_fused") or "")
-        latest_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
-        peak_dt = datetime.fromisoformat(peak_fused_txt) if peak_fused_txt else None
-        if latest_dt is not None and peak_dt is not None:
-            if latest_dt.tzinfo is not None and peak_dt.tzinfo is None:
-                peak_dt = peak_dt.replace(tzinfo=latest_dt.tzinfo)
-            elif latest_dt.tzinfo is None and peak_dt.tzinfo is not None:
-                latest_dt = latest_dt.replace(tzinfo=peak_dt.tzinfo)
-        h_to_peak = max(0.0, (peak_dt - latest_dt).total_seconds() / 3600.0) if (latest_dt and peak_dt) else None
+        h_to_peak = _hours_between_iso(peak_fused_txt, latest_local_txt, nonneg=True)
     except Exception:
         h_to_peak = None
 
@@ -4278,9 +4309,8 @@ def choose_section_text(
         try:
             peak_local_txt = str(primary_window.get("peak_local") or "")
             latest_local_txt = str(metar_diag.get("latest_report_local") or "")
-            if peak_local_txt and latest_local_txt:
-                hleft = max(0.0, (datetime.fromisoformat(peak_local_txt) - datetime.fromisoformat(latest_local_txt)).total_seconds() / 3600.0)
-            else:
+            hleft = _hours_between_iso(peak_local_txt, latest_local_txt, nonneg=True)
+            if hleft is None:
                 hleft = 0.0
         except Exception:
             hleft = 0.0
@@ -4325,15 +4355,9 @@ def choose_section_text(
         try:
             latest_local_txt = str(metar_diag.get("latest_report_local") or "")
             peak_local_txt = str(primary_window.get("peak_local") or "")
-            latest_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
-            peak_dt = datetime.fromisoformat(peak_local_txt) if peak_local_txt else None
-            if latest_dt is not None and peak_dt is not None:
-                if latest_dt.tzinfo is not None and peak_dt.tzinfo is None:
-                    peak_dt = peak_dt.replace(tzinfo=latest_dt.tzinfo)
-                elif latest_dt.tzinfo is None and peak_dt.tzinfo is not None:
-                    latest_dt = latest_dt.replace(tzinfo=peak_dt.tzinfo)
+            latest_dt = _parse_iso_dt(latest_local_txt)
             hour_local = (latest_dt.hour + latest_dt.minute / 60.0) if latest_dt else None
-            hleft = max(0.0, (peak_dt - latest_dt).total_seconds() / 3600.0) if (latest_dt and peak_dt) else None
+            hleft = _hours_between_iso(peak_local_txt, latest_local_txt, nonneg=True)
         except Exception:
             hour_local = None
             hleft = None
@@ -4364,14 +4388,7 @@ def choose_section_text(
         try:
             latest_local_txt = str(metar_diag.get("latest_report_local") or "")
             peak_local_txt = str(primary_window.get("peak_local") or "")
-            latest_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
-            peak_dt = datetime.fromisoformat(peak_local_txt) if peak_local_txt else None
-            if latest_dt is not None and peak_dt is not None:
-                if latest_dt.tzinfo is not None and peak_dt.tzinfo is None:
-                    peak_dt = peak_dt.replace(tzinfo=latest_dt.tzinfo)
-                elif latest_dt.tzinfo is None and peak_dt.tzinfo is not None:
-                    latest_dt = latest_dt.replace(tzinfo=peak_dt.tzinfo)
-            hleft_rt = max(0.0, (peak_dt - latest_dt).total_seconds() / 3600.0) if (latest_dt and peak_dt) else None
+            hleft_rt = _hours_between_iso(peak_local_txt, latest_local_txt, nonneg=True)
         except Exception:
             hleft_rt = None
         try:
@@ -4428,14 +4445,7 @@ def choose_section_text(
         try:
             latest_local_txt = str(metar_diag.get("latest_report_local") or "")
             end_local_txt = str(primary_window.get("end_local") or "")
-            latest_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
-            end_dt = datetime.fromisoformat(end_local_txt) if end_local_txt else None
-            if latest_dt is not None and end_dt is not None:
-                if latest_dt.tzinfo is not None and end_dt.tzinfo is None:
-                    end_dt = end_dt.replace(tzinfo=latest_dt.tzinfo)
-                elif latest_dt.tzinfo is None and end_dt.tzinfo is not None:
-                    latest_dt = latest_dt.replace(tzinfo=end_dt.tzinfo)
-            h_to_end = max(0.0, (end_dt - latest_dt).total_seconds() / 3600.0) if (latest_dt and end_dt) else None
+            h_to_end = _hours_between_iso(end_local_txt, latest_local_txt, nonneg=True)
         except Exception:
             h_to_end = None
         try:
@@ -4468,14 +4478,7 @@ def choose_section_text(
         try:
             latest_local_txt = str(metar_diag.get("latest_report_local") or "")
             end_local_txt = str(primary_window.get("end_local") or "")
-            latest_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
-            end_dt = datetime.fromisoformat(end_local_txt) if end_local_txt else None
-            if latest_dt is not None and end_dt is not None:
-                if latest_dt.tzinfo is not None and end_dt.tzinfo is None:
-                    end_dt = end_dt.replace(tzinfo=latest_dt.tzinfo)
-                elif latest_dt.tzinfo is None and end_dt.tzinfo is not None:
-                    latest_dt = latest_dt.replace(tzinfo=end_dt.tzinfo)
-            h_after_end = ((latest_dt - end_dt).total_seconds() / 3600.0) if (latest_dt and end_dt) else None
+            h_after_end = _hours_between_iso(latest_local_txt, end_local_txt, nonneg=False)
         except Exception:
             h_after_end = None
 
@@ -4528,14 +4531,7 @@ def choose_section_text(
         try:
             latest_local_txt = str(metar_diag.get("latest_report_local") or "")
             obs_peak_local_txt = str(metar_diag.get("observed_max_time_local") or "")
-            latest_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
-            obs_peak_dt = datetime.fromisoformat(obs_peak_local_txt) if obs_peak_local_txt else None
-            if latest_dt is not None and obs_peak_dt is not None:
-                if latest_dt.tzinfo is not None and obs_peak_dt.tzinfo is None:
-                    obs_peak_dt = obs_peak_dt.replace(tzinfo=latest_dt.tzinfo)
-                elif latest_dt.tzinfo is None and obs_peak_dt.tzinfo is not None:
-                    latest_dt = latest_dt.replace(tzinfo=obs_peak_dt.tzinfo)
-            h_since_obs_peak = max(0.0, (latest_dt - obs_peak_dt).total_seconds() / 3600.0) if (latest_dt and obs_peak_dt) else None
+            h_since_obs_peak = _hours_between_iso(latest_local_txt, obs_peak_local_txt, nonneg=True)
         except Exception:
             h_since_obs_peak = None
 
@@ -4612,15 +4608,8 @@ def choose_section_text(
             try:
                 peak_local_txt = str(primary_window.get("peak_local") or "")
                 latest_local_txt = str(metar_diag.get("latest_report_local") or "")
-                if peak_local_txt and latest_local_txt:
-                    peak_dt = datetime.fromisoformat(peak_local_txt)
-                    latest_dt = datetime.fromisoformat(latest_local_txt)
-                    if peak_dt.tzinfo is None and latest_dt.tzinfo is not None:
-                        peak_dt = peak_dt.replace(tzinfo=latest_dt.tzinfo)
-                    elif peak_dt.tzinfo is not None and latest_dt.tzinfo is None:
-                        latest_dt = latest_dt.replace(tzinfo=peak_dt.tzinfo)
-                    hleft = max(0.0, (peak_dt - latest_dt).total_seconds() / 3600.0)
-                else:
+                hleft = _hours_between_iso(peak_local_txt, latest_local_txt, nonneg=True)
+                if hleft is None:
                     hleft = 2.0
             except Exception:
                 hleft = 2.0
@@ -4664,14 +4653,7 @@ def choose_section_text(
     try:
         latest_local_txt = str(metar_diag.get("latest_report_local") or "")
         end_local_txt = str(primary_window.get("end_local") or "")
-        latest_dt = datetime.fromisoformat(latest_local_txt) if latest_local_txt else None
-        end_dt = datetime.fromisoformat(end_local_txt) if end_local_txt else None
-        if latest_dt is not None and end_dt is not None:
-            if latest_dt.tzinfo is not None and end_dt.tzinfo is None:
-                end_dt = end_dt.replace(tzinfo=latest_dt.tzinfo)
-            elif latest_dt.tzinfo is None and end_dt.tzinfo is not None:
-                latest_dt = latest_dt.replace(tzinfo=end_dt.tzinfo)
-        h_after_end_compact = ((latest_dt - end_dt).total_seconds() / 3600.0) if (latest_dt and end_dt) else None
+        h_after_end_compact = _hours_between_iso(latest_local_txt, end_local_txt, nonneg=False)
     except Exception:
         h_after_end_compact = None
 
