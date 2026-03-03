@@ -4600,8 +4600,8 @@ def choose_section_text(
         hi = min(hi, post_cap_hi)
         lo = min(lo, hi - 0.2)
 
-    # Far-window cold-advection sanity cap: avoid over-projecting rapid afternoon rebound
-    # when low-level northerly cold feed persists.
+    # Far-window cold-advection sanity cap: avoid over-projecting short-term rebound
+    # only when peak is not far away. (Do NOT hard-cap early-morning cases with long daytime heating runway.)
     if phase_now == "far" and "冷平流" in line850:
         try:
             wdir_now = float(metar_diag.get("latest_wdir")) if metar_diag.get("latest_wdir") not in (None, "", "VRB") else None
@@ -4613,7 +4613,13 @@ def choose_section_text(
                 peak_local_txt = str(primary_window.get("peak_local") or "")
                 latest_local_txt = str(metar_diag.get("latest_report_local") or "")
                 if peak_local_txt and latest_local_txt:
-                    hleft = max(0.0, (datetime.fromisoformat(peak_local_txt) - datetime.fromisoformat(latest_local_txt)).total_seconds() / 3600.0)
+                    peak_dt = datetime.fromisoformat(peak_local_txt)
+                    latest_dt = datetime.fromisoformat(latest_local_txt)
+                    if peak_dt.tzinfo is None and latest_dt.tzinfo is not None:
+                        peak_dt = peak_dt.replace(tzinfo=latest_dt.tzinfo)
+                    elif peak_dt.tzinfo is not None and latest_dt.tzinfo is None:
+                        latest_dt = latest_dt.replace(tzinfo=peak_dt.tzinfo)
+                    hleft = max(0.0, (peak_dt - latest_dt).total_seconds() / 3600.0)
                 else:
                     hleft = 2.0
             except Exception:
@@ -4622,11 +4628,17 @@ def choose_section_text(
                 t_now = float(metar_diag.get("latest_temp"))
             except Exception:
                 t_now = None
-            if t_now is not None:
-                rise_cap = min(3.2, 1.6 + 0.45 * hleft)
+
+            # apply cap only when relatively close to peak; skip long-runway warming periods
+            apply_far_cap = bool(hleft <= 4.5)
+            if hleft >= 6.0:
+                apply_far_cap = False
+
+            if t_now is not None and apply_far_cap:
+                rise_cap = min(5.2, 1.8 + 0.60 * hleft)
                 far_cap_hi = t_now + rise_cap
                 if obs_max is not None:
-                    far_cap_hi = max(far_cap_hi, float(obs_max) + 0.3)
+                    far_cap_hi = max(far_cap_hi, float(obs_max) + 0.6)
                 hi = min(hi, far_cap_hi)
                 lo = min(lo, hi - 0.2)
 
