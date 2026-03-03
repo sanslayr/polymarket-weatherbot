@@ -4300,6 +4300,19 @@ def choose_section_text(
         low_cloud_peak_est = 0.0
 
     clear_now = cloud_code_now in {"CLR", "CAVOK", "SKC", "FEW", "SCT"}
+
+    # Circulation-context gate for day-to-day amplitude learning:
+    # yesterday's range is only informative when today's synoptic setup is still
+    # radiation-dominant / weakly forced (not a strong frontal-dynamic override day).
+    circ_weak_forced = not any(k in (line500 + " " + extra) for k in ["槽", "短波", "急流", "涡度", "PVA", "锋生", "强迫", "切变", "对流"])
+    if _is_generic_500(line500):
+        circ_weak_forced = True
+    strong_cold_adv = ("冷平流" in line850) and ("暖平流" not in line850)
+    dry_support = ("干层" in h700_summary)
+    circ_context_ok = bool(circ_weak_forced or dry_support)
+    if strong_cold_adv and (not dry_support) and b_cons <= -1.0:
+        circ_context_ok = False
+
     if (
         phase_now == "far"
         and h_to_peak is not None
@@ -4309,18 +4322,20 @@ def choose_section_text(
         and low_cloud_peak_est <= 45.0
         and prev_rng is not None
         and model_rng is not None
+        and circ_context_ok
     ):
         amp_gap = prev_rng - model_rng
         if amp_gap >= 1.2:
             diurnal_uplift = min(1.30, 0.30 * amp_gap)
             if solar_slope_next is not None and solar_slope_next >= 0.03:
                 diurnal_uplift += 0.15
-            if "冷平流" in line850 and b_cons <= -1.0:
+            if strong_cold_adv and b_cons <= -1.0:
                 diurnal_uplift -= 0.15
             diurnal_uplift = max(0.10, diurnal_uplift)
             center += diurnal_uplift
             metar_diag["diurnal_uplift_applied"] = True
             metar_diag["diurnal_uplift_c"] = round(diurnal_uplift, 2)
+            metar_diag["diurnal_context_ok"] = True
 
     if phase_now in {"near_window", "in_window"} and cloud_code_now in {"BKN", "OVC", "VV"} and not cloud_opening:
         # cap center by model peak + modest allowance; only slightly relax if slope is clearly positive
@@ -4933,7 +4948,7 @@ def choose_section_text(
         focus.append((0.88, "• 异常信号增多，下一报可能转为加密更新（SPECI）→ 建议等下一报再确认上沿。"))
 
     if bool(metar_diag.get("diurnal_uplift_applied")) and phase_now == "far":
-        focus.append((0.84, "• 近似形势下晴空日振幅往往高于模式，白天升温可能强于当前曲线。"))
+        focus.append((0.84, "• 在当前环流仍偏辐射主导的前提下，晴空日振幅常高于模式，白天升温可能强于当前曲线。"))
 
     # 偏差驱动
     if isinstance(t_bias, (int, float)):
