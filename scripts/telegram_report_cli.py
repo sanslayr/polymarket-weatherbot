@@ -4853,7 +4853,10 @@ def choose_section_text(
         focus.append((0.45, "• 先盯温度斜率是否重新放大，这是临窗改判的最快信号。"))
 
     if next_key_report_txt and phase_now in {"near_window", "in_window", "post"} and (not bool(metar_diag.get("metar_speci_active"))):
-        focus.append((0.93, f"• 该站常规约每小时一报，下一关键报约 {next_key_report_txt} Local（对是否封顶更关键）。"))
+        if phase_now == "post" and obs_max is not None:
+            focus.append((0.93, f"• 重点看 {next_key_report_txt} Local：若继续横盘/回落，高点基本锁定；仅当温度重新抬升并伴随风云再配合，才可能改写前高。"))
+        else:
+            focus.append((0.93, f"• 该站常规约每小时一报，下一关键报约 {next_key_report_txt} Local（对是否封顶更关键）。"))
 
     if bool(metar_diag.get("metar_speci_likely")):
         focus.append((0.88, "• 异常信号增多，下一报可能转为加密更新（SPECI）→ 建议等下一报再确认上沿。"))
@@ -5065,6 +5068,12 @@ def choose_section_text(
                 key_txt = "本轮"
             vars_block.append(f"• 该站小时关键报（{key_txt} Local）已给出平稳信号，后续再创新高难度上升。")
 
+        if next_key_report_txt:
+            if (not bool(metar_diag.get("metar_speci_active"))) and (not bool(metar_diag.get("metar_speci_likely"))):
+                vars_block.append(f"• 当前形势稳定、触发SPECI概率偏低；重点看 {next_key_report_txt} Local 是否维持横盘。")
+            else:
+                vars_block.append(f"• 重点看 {next_key_report_txt} Local：若出现加密报或斜率再放大，再评估新高窗口。")
+
     # 低置信度时不打“最有可能”标签，避免误导
     allow_best_label = True
     try:
@@ -5082,6 +5091,10 @@ def choose_section_text(
         allow_best_label = False
 
     allow_alpha_label = bool(allow_best_label)
+    if compact_settled_mode or bool(metar_diag.get("decisive_hourly_report")):
+        allow_alpha_label = False
+    if phase_now == "post" and bool(metar_diag.get("late_end_cap_applied")) and (not bool(metar_diag.get("nocturnal_reheat_signal"))):
+        allow_alpha_label = False
 
     poly_block = ""
     try:
