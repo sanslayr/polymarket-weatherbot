@@ -25,6 +25,7 @@ Last updated: 2026-03-02
 - 新增两步温度加速度信号（`temp_accel_2step_c`）用于识别“升温减速/圆弧顶”。
 - 新增夜间增温辅助信号：`wind_speed_trend_1step_kt`、`dewpoint_trend_1step_c`，用于 after-sunset reheat 组合判定。
 - 新增 METAR 采样节律识别：`metar_routine_cadence_min`、`metar_recent_interval_min`、`metar_speci_active`，用于动态调整短时判读窗口（半小时站/整点站/SPECI 加密采样）。
+- 新增晴空日振幅对照特征：`observed_prev_day_range_c / model_day_range_c`，用于 far 阶段识别“模型日振幅偏小”并做有限上修（避免清晨偏冷直接压死白天升温）。
 - 新增 SPECI 可能性前瞻信号：`metar_speci_likely / metar_speci_likely_score`（温度/风/云/天气现象突变组合），用于避免长周期站点在异常前夜被单报过早锚定。
 - 增加近24h历史特征提取并用于阈值自适应：`metar_speci_count_24h`、`metar_speci_ratio_24h`、`metar_rapid_temp_jump_count_24h`、`metar_rapid_wind_jump_count_24h`、`metar_wx_transition_count_24h`、`metar_speci_likely_threshold`。
 - 相关阈值参数已外置到 `config/tmax_learning_params.json`，由 `scripts/param_store.py` 统一加载。

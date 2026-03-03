@@ -1768,6 +1768,7 @@ def metar_observation_block(
 
 
     observed_points: list[tuple[float, datetime]] = []
+    temps_by_local_date: dict[date, list[float]] = {}
     # Use local target-date max (not rolling 24h max), to avoid cross-day contamination.
     target_local_date = None
     if target_date:
@@ -1781,9 +1782,11 @@ def metar_observation_block(
     for x in series:
         try:
             x_local_dt = _metar_obs_time_utc(x).astimezone(tz)
+            t_val = float(x.get("temp"))
+            temps_by_local_date.setdefault(x_local_dt.date(), []).append(t_val)
             if x_local_dt.date() != target_local_date:
                 continue
-            observed_points.append((float(x.get("temp")), x_local_dt))
+            observed_points.append((t_val, x_local_dt))
         except Exception:
             pass
     obs_max_temp = max((p[0] for p in observed_points), default=None)
@@ -1798,6 +1801,34 @@ def metar_observation_block(
         unit,
         c_quantized=_is_intish(obs_max_temp) if obs_max_temp is not None else None,
     )
+
+    obs_today_range_c = None
+    obs_prev_day_range_c = None
+    try:
+        today_vals = temps_by_local_date.get(target_local_date, [])
+        if len(today_vals) >= 2:
+            obs_today_range_c = float(max(today_vals) - min(today_vals))
+        prev_vals = temps_by_local_date.get(target_local_date - timedelta(days=1), [])
+        if len(prev_vals) >= 4:
+            obs_prev_day_range_c = float(max(prev_vals) - min(prev_vals))
+    except Exception:
+        obs_today_range_c = None
+        obs_prev_day_range_c = None
+
+    model_day_range_c = None
+    try:
+        t2m: list[float] = []
+        for v in (hourly_local.get("temperature_2m") or []):
+            try:
+                fv = float(v)
+                if math.isfinite(fv):
+                    t2m.append(fv)
+            except Exception:
+                continue
+        if len(t2m) >= 2:
+            model_day_range_c = float(max(t2m) - min(t2m))
+    except Exception:
+        model_day_range_c = None
 
     routine_cadence_min = None
     recent_interval_min = None
@@ -2003,6 +2034,9 @@ def metar_observation_block(
         "observed_max_temp_c": obs_max_temp,
         "observed_max_interval_lo_c": obs_max_interval_lo,
         "observed_max_interval_hi_c": obs_max_interval_hi,
+        "observed_today_range_c": obs_today_range_c,
+        "observed_prev_day_range_c": obs_prev_day_range_c,
+        "model_day_range_c": model_day_range_c,
         "observed_max_time_local": obs_max_time_local.isoformat() if obs_max_time_local else None,
     }
 
@@ -4248,6 +4282,46 @@ def choose_section_text(
     consistency_shift = max(-0.75, min(0.75, consistency_shift))
     center += consistency_shift
 
+    # Far-window clear-sky diurnal amplitude uplift:
+    # if yesterday observed diurnal range is materially larger than model daily range,
+    # and current early-period signals are clear-sky/stable, avoid under-projecting daytime rise.
+    diurnal_uplift = 0.0
+    try:
+        prev_rng = float(metar_diag.get("observed_prev_day_range_c")) if metar_diag.get("observed_prev_day_range_c") is not None else None
+    except Exception:
+        prev_rng = None
+    try:
+        model_rng = float(metar_diag.get("model_day_range_c")) if metar_diag.get("model_day_range_c") is not None else None
+    except Exception:
+        model_rng = None
+    try:
+        low_cloud_peak_est = float(calc_window.get("low_cloud_pct") or 0.0)
+    except Exception:
+        low_cloud_peak_est = 0.0
+
+    clear_now = cloud_code_now in {"CLR", "CAVOK", "SKC", "FEW", "SCT"}
+    if (
+        phase_now == "far"
+        and h_to_peak is not None
+        and h_to_peak >= 4.5
+        and clear_now
+        and precip_state == "none"
+        and low_cloud_peak_est <= 45.0
+        and prev_rng is not None
+        and model_rng is not None
+    ):
+        amp_gap = prev_rng - model_rng
+        if amp_gap >= 1.2:
+            diurnal_uplift = min(1.30, 0.30 * amp_gap)
+            if solar_slope_next is not None and solar_slope_next >= 0.03:
+                diurnal_uplift += 0.15
+            if "冷平流" in line850 and b_cons <= -1.0:
+                diurnal_uplift -= 0.15
+            diurnal_uplift = max(0.10, diurnal_uplift)
+            center += diurnal_uplift
+            metar_diag["diurnal_uplift_applied"] = True
+            metar_diag["diurnal_uplift_c"] = round(diurnal_uplift, 2)
+
     if phase_now in {"near_window", "in_window"} and cloud_code_now in {"BKN", "OVC", "VV"} and not cloud_opening:
         # cap center by model peak + modest allowance; only slightly relax if slope is clearly positive
         cap_add = 0.65 + 0.20 * max(0.0, min(0.8, t_cons - 0.35))
@@ -4259,6 +4333,8 @@ def choose_section_text(
 
     lo = center - left_hw
     hi = center + right_hw
+    if diurnal_uplift > 0:
+        hi += min(0.9, 0.75 * diurnal_uplift)
     if obs_floor is not None:
         # Physical consistency with METAR quantization: daily maximum cannot be below observed-bin lower edge.
         lo = max(lo, float(obs_floor))
@@ -4855,6 +4931,9 @@ def choose_section_text(
 
     if bool(metar_diag.get("metar_speci_likely")):
         focus.append((0.88, "• 异常信号增多，下一报可能转为加密更新（SPECI）→ 建议等下一报再确认上沿。"))
+
+    if bool(metar_diag.get("diurnal_uplift_applied")) and phase_now == "far":
+        focus.append((0.84, "• 近似形势下晴空日振幅往往高于模式，白天升温可能强于当前曲线。"))
 
     # 偏差驱动
     if isinstance(t_bias, (int, float)):
