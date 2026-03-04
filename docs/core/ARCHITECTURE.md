@@ -3,6 +3,7 @@
 > 目标：输出简练、可解释、可复用的 `/look` 城市最高温分析。
 
 > 文档导航：先看 `DOCS_INDEX.md`。特殊情形规则集中在 `SPECIAL_CASE_PLAYBOOK.md`。
+> Agent 代码更新边界：`AGENT_UPDATE_GUARDRAILS.md`。
 
 ---
 
@@ -11,24 +12,37 @@
 ### A. Ingress / Orchestrator
 - `scripts/telegram_report_cli.py`
 - 职责：
-  - 命令解析（`/look`）
-  - 站点解析（`station_links.csv`）
+  - 调用命令解析层（`scripts/look_command.py`）
+  - 调用站点目录层（`scripts/station_catalog.py`）
+  - 调用小时预报服务层（`scripts/hourly_data_service.py`）
   - 数据抓取编排（小时预报 + METAR + synoptic pipeline）
-  - 文本渲染（环流背景、实况、主带/尾部、盘口）
+  - 调用渲染服务层（`scripts/report_render_service.py`）
+  - 仅做最终消息封装与输出
 
 ### B. Data Access
 - 小时预报：
-  - 首选 `open-meteo`（`fetch_hourly_openmeteo`）
-  - 回退 `gfs-grib2 hourly-like`（`gfs_grib_provider.fetch_hourly_like`）
+  - 统一在 `scripts/hourly_data_service.py` 实现：
+    - 首选 `open-meteo`
+    - 回退 `gfs-grib2 hourly-like`（`gfs_grib_provider.fetch_hourly_like`）
+    - 包含缓存/断路器/prev-cycle fallback
 - 3D 场：
   - 默认 `gfs-grib2`（`gfs_grib_provider.build_2d_grid_payload_gfs`）
   - 备用 `build_2d_grid_payload.py`（open-meteo 网格）
 - 实况：
-  - AviationWeather METAR 24h
+  - `scripts/metar_utils.py`（AviationWeather METAR 24h + 观测量化区间工具）
+  - `scripts/metar_analysis_service.py`（METAR 诊断特征与实况分析文案）
+- 盘口事件：
+  - `scripts/polymarket_client.py`（事件抓取 + 缓存 + 预取）
+  - `scripts/polymarket_render_service.py`（盘口档位解析与区间渲染）
 
 ### C. Synoptic Engine
 - `scripts/synoptic_runner.py`
-  - 双 pass（inner + outer500）
+  - pass 运行模式：
+    - `full`：每个 anchor 执行 `inner + outer500`
+    - `split_outer500`（默认）：每个 anchor 执行 `inner`，仅关键 anchor 执行 `outer500`
+  - 关键 outer500 anchor 数量由 `FORECAST_OUTER500_ANCHOR_MAX` 控制（默认 4）
+  - runner 层已改为内存直连：build + detect 均走函数调用，减少 JSON 临时文件与进程启动开销
+  - `outer500` pass 走轻量字段/检测（`field_profile=outer500` + `detector_mode=outer500_only`）
   - 调用 `synoptic_2d_detector.py`
 - `scripts/synoptic_2d_detector.py`
   - MSLP 高低压
@@ -48,13 +62,15 @@
 - `scripts/realtime_pipeline.py`
   - far/near/in/post window 相位判定
   - 触发器筛选
-- `scripts/telegram_report_cli.py::choose_section_text`
+- `scripts/report_render_service.py::choose_section_text`
   - 报告输出协议：
     - 环流背景（主导/次级/关键证据/探空提示）
     - METAR
     - 最高温主带 + 条件尾部
     - 关注变量
     - Polymarket
+- `scripts/report_peak_module.py`
+  - 最高温区间计算与尾部约束逻辑（从渲染编排层拆出，便于独立迭代）。
 
 ### F. Parameter Store（学习友好层）
 - `scripts/param_store.py`
@@ -130,9 +146,9 @@
    - 建议：记录 `{anchor, stage(build|detect), error_type(429/404/timeout), provider}`
 
 ### 中优先级
-4. **synoptic runner 去 subprocess 化（逐步）**
-   - 目标：减少 IO 与进程创建开销
-   - 方式：内存对象直连 detector
+4. **gfs parser 去 subprocess 化（后续）**
+   - 现状：runner 主链路已去 subprocess；但 gfs grib 解析仍通过独立 python 进程调用 `.venv_gfs`
+   - 目标：减少跨进程开销并统一异常栈
 
 5. **缓存键标准化 helper**
    - 目标：hourly/synoptic/decision 使用统一 key builder，减少重复/漂移

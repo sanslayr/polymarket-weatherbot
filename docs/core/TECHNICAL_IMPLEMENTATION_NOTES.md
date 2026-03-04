@@ -4,6 +4,15 @@ Last updated: 2026-03-03
 
 > 本文件用于记录工程/数据技术层面的实现点，避免污染天气形势规则手册。
 
+## 0) 已退役模块
+- 旧概率计算层（`probability_*` / `scoring_engine` / `market_mapper` 等）已从运行代码移除。
+- 历史说明保留在 `docs/archive/PROBABILITY_LIBRARY.md`，不再参与 `/look` 执行链路。
+
+## 0.1) 入口拆分约束（持续执行）
+- `telegram_report_cli.py` 仅保留 orchestration + 最终文案渲染。
+- `look_command.py` 负责命令解析；`station_catalog.py` 负责站点解析与站点元信息；`polymarket_client.py` 负责盘口事件请求/缓存；`polymarket_render_service.py` 负责盘口温度档位解析与区间渲染；`market_label_policy.py` 负责盘口标签策略门控与阈值；`hourly_data_service.py` 负责小时预报抓取/缓存/窗口识别；`metar_utils.py` 负责 METAR 抓取与观测量化区间工具口径；`metar_analysis_service.py` 负责 METAR 诊断特征提取与实况分析文案；`report_render_service.py` 负责 `/look` 主体段落编排；`report_peak_module.py` 负责最高温区间计算与尾部约束。
+- 后续 agent 更新必须遵循 `docs/core/AGENT_UPDATE_GUARDRAILS.md` 的变更路由规则。
+
 ## 1) 日期与时区
 - 默认目标日期使用站点 local date（非 UTC day）。
 - Polymarket 事件 URL 按 local date 组装。
@@ -12,6 +21,10 @@ Last updated: 2026-03-03
 - 支持 F/C 单点与范围桶（如 `42-43F`、`31c`、`30corbelow`）。
 - 避免年份段误匹配（如 `...-2026-31c` 不应解析为温度范围）。
 - 过滤时统一单位后再比较，防止 F/C 错位。
+- 天气判断与市场渲染单向解耦：
+  - 天气区间（`report_peak_module`）不读取任何盘口信息。
+  - 市场渲染仅接收天气锚点快照（`latest_temp_c / observed_max_temp_c` + `range_hint`），不得反向修改天气判断状态。
+  - 盘口标签策略（`👍最有可能` / `😇潜在Alpha`）由 `market_label_policy.py` 独立决策，阈值统一从 `market_labels` 参数组读取。
 
 ## 3) METAR 数据技术处理
 - 量化温度台阶识别（`metar_temp_quantized`）。
@@ -58,15 +71,23 @@ Last updated: 2026-03-03
 - 额外硬约束：始终包含市场最高概率档位（dominant bucket）。
 
 ## 3.4 Synoptic 拉取分层策略（性能优化）
+- anchor 时次统一为 `6h` 粒度（不再按模型切换 `3h/6h`）。
 - 新增 `FORECAST_SYNOPTIC_PASS_STRATEGY`：
   - `split_outer500`（默认）：全锚点跑 `inner_only`，关键锚点补 `outer500_only`
   - `full`：全锚点跑 `inner + outer500`（兼容旧行为）
-- `FORECAST_OUTER500_ANCHOR_MAX`（默认 `3`）控制 outer500 关键锚点数量。
+- `FORECAST_OUTER500_ANCHOR_MAX`（默认 `4`）控制 outer500 关键锚点数量。
 - 可选细调采样范围与密度：
   - `FORECAST_OUTER500_LAT_SPAN` / `FORECAST_OUTER500_LON_SPAN`
   - `FORECAST_OUTER500_STEP_DEG` / `FORECAST_OUTER500_BATCH_SIZE`
   - `FORECAST_INNER_LAT_SPAN` / `FORECAST_INNER_LON_SPAN`
   - `FORECAST_INNER_STEP_DEG` / `FORECAST_INNER_BATCH_SIZE`
+- `outer500` pass 使用轻量场：
+  - builder `field_profile=outer500`（仅取 `z500 + u850` 所需字段）
+  - detector `mode=outer500_only`（只做 500轴线/planetary 诊断）
+- `synoptic_runner` 已改为 in-process 直连：
+  - Open-Meteo build 直接调用 `build_2d_grid_payload_openmeteo(...)`
+  - detector 直接调用 `analyze(...)`
+  - 降低 `/look` 的子进程与临时文件开销
 - 关键锚点按优先级选取：`now_local`、`peak_local`、`start_local`、`end_local`，并补首尾锚点兜底。
 - 质量输出新增：
   - `synoptic_outer500_anchors_total`

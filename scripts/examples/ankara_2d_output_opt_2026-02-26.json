@@ -1,0 +1,335 @@
+{
+  "analysis_time_utc": "2026-02-26T12:00:00Z",
+  "station": {
+    "icao": "LTAC",
+    "lat": 40.1281,
+    "lon": 32.995
+  },
+  "scale_summary": {
+    "planetary": {
+      "count": 0,
+      "primary": null,
+      "systems": []
+    },
+    "synoptic": {
+      "count": 8,
+      "primary": {
+        "system_type": "ridge",
+        "scale": "synoptic",
+        "level": "500",
+        "center_lat": 41.333,
+        "center_lon": 29.139,
+        "axis_strength": 0.000328,
+        "area_pixels": 36,
+        "distance_to_station_km": 351.4,
+        "region_name": "north-west-300-800km",
+        "geo_context": {
+          "sector_ns": "north",
+          "sector_ew": "west",
+          "distance_km": 351.4,
+          "distance_band": "300-800km",
+          "center_lat": 41.333,
+          "center_lon": 29.139
+        }
+      },
+      "systems": [
+        {
+          "system_type": "ridge",
+          "scale": "synoptic",
+          "level": "500",
+          "center_lat": 41.333,
+          "center_lon": 29.139,
+          "axis_strength": 0.000328,
+          "area_pixels": 36,
+          "distance_to_station_km": 351.4,
+          "region_name": "north-west-300-800km",
+          "geo_context": {
+            "sector_ns": "north",
+            "sector_ew": "west",
+            "distance_km": 351.4,
+            "distance_band": "300-800km",
+            "center_lat": 41.333,
+            "center_lon": 29.139
+          }
+        },
+        {
+          "system_type": "cold_advection",
+          "scale": "synoptic",
+          "level": "850",
+          "center_lat": 35.27,
+          "center_lon": 32.313,
+          "intensity_k_per_6h": -17.39,
+          "area_pixels": 115,
+          "distance_to_station_km": 543.6,
+          "region_name": "south-west-300-800km",
+          "geo_context": {
+            "sector_ns": "south",
+            "sector_ew": "west",
+            "distance_km": 543.6,
+            "distance_band": "300-800km",
+            "center_lat": 35.27,
+            "center_lon": 32.313
+          }
+        },
+        {
+          "system_type": "shortwave_trough",
+          "scale": "synoptic",
+          "level": "500",
+          "center_lat": 39.897,
+          "center_lon": 25.615,
+          "axis_strength": 0.000336,
+          "area_pixels": 39,
+          "distance_to_station_km": 628.8,
+          "region_name": "south-west-300-800km",
+          "geo_context": {
+            "sector_ns": "south",
+            "sector_ew": "west",
+            "distance_km": 628.8,
+            "distance_band": "300-800km",
+            "center_lat": 39.897,
+            "center_lon": 25.615
+          }
+        },
+        {
+          "system_type": "surface_low",
+          "scale": "synoptic",
+          "level": "mslp",
+          "center_lat": 39.0,
+          "center_lon": 44.0,
+          "intensity_hpa": 1005.1,
+          "prominence_hpa": 4.68,
+          "distance_to_station_km": 951.0,
+          "region_name": "south-east-800km+",
+          "geo_context": {
+            "sector_ns": "south",
+            "sector_ew": "east",
+            "distance_km": 951.0,
+            "distance_band": "800km+",
+            "center_lat": 39.0,
+            "center_lon": 44.0
+          },
+          "trend": "deepening"
+        },
+        {
+          "system_type": "warm_advection",
+          "scale": "synoptic",
+          "level": "850",
+          "center_lat": 42.789,
+          "center_lon": 45.895,
+          "intensity_k_per_6h": 6.05,
+          "area_pixels": 19,
+          "distance_to_station_km": 1113.7,
+          "region_name": "north-east-800km+",
+          "geo_context": {
+            "sector_ns": "north",
+            "sector_ew": "east",
+            "distance_km": 1113.7,
+            "distance_band": "800km+",
+            "center_lat": 42.789,
+            "center_lon": 45.895
+          }
+        },
+        {
+          "system_type": "warm_advection",
+          "scale": "synoptic",
+          "level": "850",
+          "center_lat": 32.833,
+          "center_lon": 42.889,
+          "intensity_k_per_6h": 7.77,
+          "area_pixels": 18,
+          "distance_to_station_km": 1198.7,
+          "region_name": "south-east-800km+",
+          "geo_context": {
+            "sector_ns": "south",
+            "sector_ew": "east",
+            "distance_km": 1198.7,
+            "distance_band": "800km+",
+            "center_lat": 32.833,
+            "center_lon": 42.889
+          }
+        },
+        {
+          "system_type": "warm_advection",
+          "scale": "synoptic",
+          "level": "850",
+          "center_lat": 38.538,
+          "center_lon": 48.846,
+          "intensity_k_per_6h": 5.09,
+          "area_pixels": 13,
+          "distance_to_station_km": 1372.8,
+          "region_name": "south-east-800km+",
+          "geo_context": {
+            "sector_ns": "south",
+            "sector_ew": "east",
+            "distance_km": 1372.8,
+            "distance_band": "800km+",
+            "center_lat": 38.538,
+            "center_lon": 48.846
+          }
+        },
+        {
+          "system_type": "warm_advection",
+          "scale": "synoptic",
+          "level": "850",
+          "center_lat": 48.75,
+          "center_lon": 16.75,
+          "intensity_k_per_6h": 3.11,
+          "area_pixels": 12,
+          "distance_to_station_km": 1601.5,
+          "region_name": "north-west-800km+",
+          "geo_context": {
+            "sector_ns": "north",
+            "sector_ew": "west",
+            "distance_km": 1601.5,
+            "distance_band": "800km+",
+            "center_lat": 48.75,
+            "center_lon": 16.75
+          }
+        }
+      ]
+    },
+    "mesoscale": {
+      "count": 0,
+      "primary": null,
+      "systems": []
+    }
+  },
+  "regional_picture": [
+    {
+      "region_name": "north-west-300-800km",
+      "system_type": "ridge",
+      "level": "500",
+      "scale": "synoptic",
+      "distance_to_station_km": 351.4,
+      "geo_context": {
+        "sector_ns": "north",
+        "sector_ew": "west",
+        "distance_km": 351.4,
+        "distance_band": "300-800km",
+        "center_lat": 41.333,
+        "center_lon": 29.139
+      },
+      "intensity": null,
+      "trend": null
+    },
+    {
+      "region_name": "south-west-300-800km",
+      "system_type": "cold_advection",
+      "level": "850",
+      "scale": "synoptic",
+      "distance_to_station_km": 543.6,
+      "geo_context": {
+        "sector_ns": "south",
+        "sector_ew": "west",
+        "distance_km": 543.6,
+        "distance_band": "300-800km",
+        "center_lat": 35.27,
+        "center_lon": 32.313
+      },
+      "intensity": -17.39,
+      "trend": null
+    },
+    {
+      "region_name": "south-west-300-800km",
+      "system_type": "shortwave_trough",
+      "level": "500",
+      "scale": "synoptic",
+      "distance_to_station_km": 628.8,
+      "geo_context": {
+        "sector_ns": "south",
+        "sector_ew": "west",
+        "distance_km": 628.8,
+        "distance_band": "300-800km",
+        "center_lat": 39.897,
+        "center_lon": 25.615
+      },
+      "intensity": null,
+      "trend": null
+    },
+    {
+      "region_name": "south-east-800km+",
+      "system_type": "surface_low",
+      "level": "mslp",
+      "scale": "synoptic",
+      "distance_to_station_km": 951.0,
+      "geo_context": {
+        "sector_ns": "south",
+        "sector_ew": "east",
+        "distance_km": 951.0,
+        "distance_band": "800km+",
+        "center_lat": 39.0,
+        "center_lon": 44.0
+      },
+      "intensity": 1005.1,
+      "trend": "deepening"
+    },
+    {
+      "region_name": "north-east-800km+",
+      "system_type": "warm_advection",
+      "level": "850",
+      "scale": "synoptic",
+      "distance_to_station_km": 1113.7,
+      "geo_context": {
+        "sector_ns": "north",
+        "sector_ew": "east",
+        "distance_km": 1113.7,
+        "distance_band": "800km+",
+        "center_lat": 42.789,
+        "center_lon": 45.895
+      },
+      "intensity": 6.05,
+      "trend": null
+    },
+    {
+      "region_name": "south-east-800km+",
+      "system_type": "warm_advection",
+      "level": "850",
+      "scale": "synoptic",
+      "distance_to_station_km": 1198.7,
+      "geo_context": {
+        "sector_ns": "south",
+        "sector_ew": "east",
+        "distance_km": 1198.7,
+        "distance_band": "800km+",
+        "center_lat": 32.833,
+        "center_lon": 42.889
+      },
+      "intensity": 7.77,
+      "trend": null
+    },
+    {
+      "region_name": "south-east-800km+",
+      "system_type": "warm_advection",
+      "level": "850",
+      "scale": "synoptic",
+      "distance_to_station_km": 1372.8,
+      "geo_context": {
+        "sector_ns": "south",
+        "sector_ew": "east",
+        "distance_km": 1372.8,
+        "distance_band": "800km+",
+        "center_lat": 38.538,
+        "center_lon": 48.846
+      },
+      "intensity": 5.09,
+      "trend": null
+    },
+    {
+      "region_name": "north-west-800km+",
+      "system_type": "warm_advection",
+      "level": "850",
+      "scale": "synoptic",
+      "distance_to_station_km": 1601.5,
+      "geo_context": {
+        "sector_ns": "north",
+        "sector_ew": "west",
+        "distance_km": 1601.5,
+        "distance_band": "800km+",
+        "center_lat": 48.75,
+        "center_lon": 16.75
+      },
+      "intensity": 3.11,
+      "trend": null
+    }
+  ]
+}

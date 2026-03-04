@@ -1,6 +1,6 @@
 # polymarket-weatherbot Docs Index (structured)
 
-Last updated: 2026-03-02
+Last updated: 2026-03-03
 
 ## TL;DR（先读顺序）
 1. `docs/core/LOOK_OUTPUT_CONTRACT.md`（输出约束，最高优先级）
@@ -22,6 +22,8 @@ Last updated: 2026-03-02
 - `docs/core/SPECIAL_CASE_PLAYBOOK.md`
 - `docs/core/CIRCULATION_SOUNDING_REQUIREMENTS.md`
 - `docs/core/TECHNICAL_IMPLEMENTATION_NOTES.md`
+- `docs/core/ARCH_REVIEW_2026-03-03.md`
+- `docs/core/AGENT_UPDATE_GUARDRAILS.md`
 - `docs/core/TELEGRAM_COMMANDS.md`
 
 ### B. Operations（运维与变更）

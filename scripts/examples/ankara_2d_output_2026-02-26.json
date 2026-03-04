@@ -1,0 +1,58 @@
+{
+  "analysis_time_utc": "2026-02-26T12:00:00Z",
+  "station": {
+    "icao": "LTAC",
+    "lat": 40.1281,
+    "lon": 32.995
+  },
+  "scale_summary": {
+    "planetary": {
+      "count": 0,
+      "primary": null,
+      "systems": []
+    },
+    "synoptic": {
+      "count": 1,
+      "primary": {
+        "system_type": "cold_advection",
+        "scale": "synoptic",
+        "level": "850",
+        "center_lat": 38.435,
+        "center_lon": 31.674,
+        "intensity_k_per_6h": -6.54,
+        "area_pixels": 46,
+        "distance_to_station_km": 220.0,
+        "region_name": "south-west-0-300km"
+      },
+      "systems": [
+        {
+          "system_type": "cold_advection",
+          "scale": "synoptic",
+          "level": "850",
+          "center_lat": 38.435,
+          "center_lon": 31.674,
+          "intensity_k_per_6h": -6.54,
+          "area_pixels": 46,
+          "distance_to_station_km": 220.0,
+          "region_name": "south-west-0-300km"
+        }
+      ]
+    },
+    "mesoscale": {
+      "count": 0,
+      "primary": null,
+      "systems": []
+    }
+  },
+  "regional_picture": [
+    {
+      "region_name": "south-west-0-300km",
+      "system_type": "cold_advection",
+      "level": "850",
+      "scale": "synoptic",
+      "distance_to_station_km": 220.0,
+      "intensity": -6.54,
+      "trend": null
+    }
+  ]
+}

@@ -122,14 +122,30 @@ print(json.dumps({
     return json.loads(proc.stdout.strip())
 
 
-def _nomads_grid_url(runtime_dt: datetime, fh: int, *, lat_min: float, lat_max: float, lon_min: float, lon_max: float) -> str:
+def _nomads_grid_url(
+    runtime_dt: datetime,
+    fh: int,
+    *,
+    lat_min: float,
+    lat_max: float,
+    lon_min: float,
+    lon_max: float,
+    field_profile: str = "full",
+) -> str:
     rdate = runtime_dt.strftime("%Y%m%d")
     rh = runtime_dt.strftime("%H")
     file = f"gfs.t{rh}z.pgrb2.0p25.f{fh:03d}"
+    profile = str(field_profile or "full").strip().lower()
+    if profile == "outer500":
+        levels = "&lev_500_mb=on&lev_850_mb=on"
+        vars_part = "&var_HGT=on&var_UGRD=on"
+    else:
+        levels = "&lev_500_mb=on&lev_700_mb=on&lev_850_mb=on&lev_925_mb=on&lev_mean_sea_level=on"
+        vars_part = "&var_HGT=on&var_TMP=on&var_UGRD=on&var_VGRD=on&var_PRMSL=on"
     q = (
         f"file={file}"
-        "&lev_500_mb=on&lev_700_mb=on&lev_850_mb=on&lev_925_mb=on&lev_mean_sea_level=on"
-        "&var_HGT=on&var_TMP=on&var_UGRD=on&var_VGRD=on&var_PRMSL=on"
+        f"{levels}"
+        f"{vars_part}"
         "&subregion="
         f"&leftlon={lon_min:.3f}&rightlon={lon_max:.3f}&toplat={lat_max:.3f}&bottomlat={lat_min:.3f}"
         f"&dir={quote(f'/gfs.{rdate}/{rh}/atmos')}"
@@ -150,6 +166,7 @@ def build_2d_grid_payload_gfs(
     previous_time_local: str,
     tz_name: str,
     cycle_tag: str,
+    field_profile: str = "full",
     root: Path,
 ) -> dict[str, Any]:
     tz = datetime.now().astimezone().tzinfo
@@ -170,14 +187,23 @@ def build_2d_grid_payload_gfs(
     rt_dt_p = runtime_dt_from_tag(rt_tag_p)
 
     cache_root = root / "skills" / "polymarket-weatherbot" / "cache" / "runtime" / "gfs_grids"
-    bbox_suffix = f"_{lat_min:.2f}_{lat_max:.2f}_{lon_min:.2f}_{lon_max:.2f}.grib2"
+    profile = str(field_profile or "full").strip().lower()
+    bbox_suffix = f"_{lat_min:.2f}_{lat_max:.2f}_{lon_min:.2f}_{lon_max:.2f}_{profile}.grib2"
 
     ga, rt_dt_a_used, fh_a_used = _ensure_grib_with_cycle_fallback(
         cache_root=cache_root,
         file_suffix=bbox_suffix,
         runtime_dt=rt_dt_a,
         fh=fh_a,
-        build_url=lambda rt, fhx: _nomads_grid_url(rt, fhx, lat_min=lat_min, lat_max=lat_max, lon_min=lon_min, lon_max=lon_max),
+        build_url=lambda rt, fhx: _nomads_grid_url(
+            rt,
+            fhx,
+            lat_min=lat_min,
+            lat_max=lat_max,
+            lon_min=lon_min,
+            lon_max=lon_max,
+            field_profile=profile,
+        ),
         max_back_cycles=3,
     )
     gp, rt_dt_p_used, fh_p_used = _ensure_grib_with_cycle_fallback(
@@ -185,14 +211,70 @@ def build_2d_grid_payload_gfs(
         file_suffix=bbox_suffix,
         runtime_dt=rt_dt_p,
         fh=fh_p,
-        build_url=lambda rt, fhx: _nomads_grid_url(rt, fhx, lat_min=lat_min, lat_max=lat_max, lon_min=lon_min, lon_max=lon_max),
+        build_url=lambda rt, fhx: _nomads_grid_url(
+            rt,
+            fhx,
+            lat_min=lat_min,
+            lat_max=lat_max,
+            lon_min=lon_min,
+            lon_max=lon_max,
+            field_profile=profile,
+        ),
         max_back_cycles=3,
     )
 
     py = root / ".venv_gfs" / "bin" / "python"
     if not py.exists():
         raise RuntimeError("gfs parser venv missing (.venv_gfs)")
-    code = r'''
+    if profile == "outer500":
+        code = r'''
+import json, sys, xarray as xr
+import numpy as np
+pa, pp = sys.argv[1], sys.argv[2]
+da = xr.open_dataset(pa, engine='cfgrib')
+dp = xr.open_dataset(pp, engine='cfgrib')
+
+def arr2(v):
+    a = np.asarray(v)
+    a = np.squeeze(a)
+    while a.ndim > 2:
+        a = a[0]
+    if a.ndim != 2:
+        raise RuntimeError(f'expected 2D field, got shape={a.shape}')
+    return a
+
+def level_slice(var, level):
+    if 'isobaricInhPa' in var.dims:
+        return arr2(var.sel(isobaricInhPa=level, method='nearest').values)
+    return arr2(var.values)
+
+z_src = da['gh'] if 'gh' in da else da['z']
+z5 = level_slice(z_src, 500.0)
+if np.nanmean(z5) > 20000:
+    z5 = z5 / 9.80665
+z_src_prev = dp['gh'] if 'gh' in dp else dp['z']
+z5_prev = level_slice(z_src_prev, 500.0)
+if np.nanmean(z5_prev) > 20000:
+    z5_prev = z5_prev / 9.80665
+u8 = level_slice(da['u'], 850.0)
+
+lat = np.asarray(da['latitude'].values).tolist()
+lon = np.asarray(da['longitude'].values).tolist()
+out = {
+  'lat': lat,
+  'lon': lon,
+  'fields': {
+    'z500_gpm': z5.tolist(),
+    'u850_ms': u8.tolist(),
+  },
+  'previous_fields': {
+    'z500_gpm': z5_prev.tolist(),
+  }
+}
+print(json.dumps(out, ensure_ascii=False))
+'''
+    else:
+        code = r'''
 import json, sys, xarray as xr
 import numpy as np
 pa, pp = sys.argv[1], sys.argv[2]
@@ -224,6 +306,10 @@ z_src = da['gh'] if 'gh' in da else da['z']
 z5 = level_slice(z_src, 500.0)
 if np.nanmean(z5) > 20000:
     z5 = z5 / 9.80665
+z_src_prev = dp['gh'] if 'gh' in dp else dp['z']
+z5_prev = level_slice(z_src_prev, 500.0)
+if np.nanmean(z5_prev) > 20000:
+    z5_prev = z5_prev / 9.80665
 
 # 850/700/925hPa fields explicitly by level
 t8 = level_slice(da['t'], 850.0)
@@ -261,6 +347,7 @@ out = {
   },
   'previous_fields': {
     'mslp_hpa': prp.tolist(),
+    'z500_gpm': z5_prev.tolist(),
   }
 }
 print(json.dumps(out, ensure_ascii=False))
@@ -281,6 +368,7 @@ print(json.dumps(out, ensure_ascii=False))
             "step_deg": 0.25,
             "bbox": {"lat_min": lat_min, "lat_max": lat_max, "lon_min": lon_min, "lon_max": lon_max},
             "provider": "gfs-grib2",
+            "field_profile": profile,
             "analysis_runtime_used": rt_dt_a_used.strftime("%Y%m%d%HZ"),
             "analysis_fh_used": int(fh_a_used),
             "previous_runtime_used": rt_dt_p_used.strftime("%Y%m%d%HZ"),

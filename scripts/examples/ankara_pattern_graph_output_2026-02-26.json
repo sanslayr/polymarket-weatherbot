@@ -1,0 +1,280 @@
+{
+  "case": {
+    "station": "LTAC",
+    "analysis_time_utc": "2026-02-26T12:00:00Z"
+  },
+  "patterns": [
+    {
+      "id": "synoptic_post_trough_cold_advection",
+      "scale": "synoptic",
+      "family": "trough-advection",
+      "subtype": "post_trough_cold_advection",
+      "confidence": 0.72,
+      "evidence": [
+        "850hPa冷平流带靠近站点西南侧",
+        "500hPa短波槽位于站点西南侧"
+      ]
+    },
+    {
+      "id": "synoptic_ridge_nearby",
+      "scale": "synoptic",
+      "family": "ridge-trough-couple",
+      "subtype": "ridge_west_black_sea_side",
+      "confidence": 0.63,
+      "evidence": [
+        "500hPa脊轴位于站点西北侧约351km"
+      ]
+    },
+    {
+      "id": "synoptic_remote_surface_low",
+      "scale": "synoptic",
+      "family": "surface-cyclone",
+      "subtype": "remote_deepening_low",
+      "confidence": 0.67,
+      "evidence": [
+        "地面低压位于东南侧约951.0km, 气压1005.1hPa, 趋势deepening"
+      ]
+    }
+  ],
+  "systems": [
+    {
+      "id": "sys_1",
+      "system_type": "ridge",
+      "scale": "synoptic",
+      "level": "500",
+      "geometry_type": "point",
+      "center_lat": 41.333,
+      "center_lon": 29.139,
+      "sector": {
+        "ns": "north",
+        "ew": "west",
+        "distance_km": 351.4,
+        "distance_band": "300-800km"
+      },
+      "intensity": {
+        "hpa": null,
+        "k_per_6h": null,
+        "axis_strength": 0.000328
+      },
+      "lifecycle": "unknown"
+    },
+    {
+      "id": "sys_2",
+      "system_type": "cold_advection",
+      "scale": "synoptic",
+      "level": "850",
+      "geometry_type": "point",
+      "center_lat": 35.27,
+      "center_lon": 32.313,
+      "sector": {
+        "ns": "south",
+        "ew": "west",
+        "distance_km": 543.6,
+        "distance_band": "300-800km"
+      },
+      "intensity": {
+        "hpa": null,
+        "k_per_6h": -17.39,
+        "axis_strength": null
+      },
+      "lifecycle": "unknown"
+    },
+    {
+      "id": "sys_3",
+      "system_type": "shortwave_trough",
+      "scale": "synoptic",
+      "level": "500",
+      "geometry_type": "point",
+      "center_lat": 39.897,
+      "center_lon": 25.615,
+      "sector": {
+        "ns": "south",
+        "ew": "west",
+        "distance_km": 628.8,
+        "distance_band": "300-800km"
+      },
+      "intensity": {
+        "hpa": null,
+        "k_per_6h": null,
+        "axis_strength": 0.000336
+      },
+      "lifecycle": "unknown"
+    },
+    {
+      "id": "sys_4",
+      "system_type": "surface_low",
+      "scale": "synoptic",
+      "level": "mslp",
+      "geometry_type": "point",
+      "center_lat": 39.0,
+      "center_lon": 44.0,
+      "sector": {
+        "ns": "south",
+        "ew": "east",
+        "distance_km": 951.0,
+        "distance_band": "800km+"
+      },
+      "intensity": {
+        "hpa": 1005.1,
+        "k_per_6h": null,
+        "axis_strength": null
+      },
+      "lifecycle": "deepening"
+    },
+    {
+      "id": "sys_5",
+      "system_type": "warm_advection",
+      "scale": "synoptic",
+      "level": "850",
+      "geometry_type": "point",
+      "center_lat": 42.789,
+      "center_lon": 45.895,
+      "sector": {
+        "ns": "north",
+        "ew": "east",
+        "distance_km": 1113.7,
+        "distance_band": "800km+"
+      },
+      "intensity": {
+        "hpa": null,
+        "k_per_6h": 6.05,
+        "axis_strength": null
+      },
+      "lifecycle": "unknown"
+    },
+    {
+      "id": "sys_6",
+      "system_type": "warm_advection",
+      "scale": "synoptic",
+      "level": "850",
+      "geometry_type": "point",
+      "center_lat": 32.833,
+      "center_lon": 42.889,
+      "sector": {
+        "ns": "south",
+        "ew": "east",
+        "distance_km": 1198.7,
+        "distance_band": "800km+"
+      },
+      "intensity": {
+        "hpa": null,
+        "k_per_6h": 7.77,
+        "axis_strength": null
+      },
+      "lifecycle": "unknown"
+    },
+    {
+      "id": "sys_7",
+      "system_type": "warm_advection",
+      "scale": "synoptic",
+      "level": "850",
+      "geometry_type": "point",
+      "center_lat": 38.538,
+      "center_lon": 48.846,
+      "sector": {
+        "ns": "south",
+        "ew": "east",
+        "distance_km": 1372.8,
+        "distance_band": "800km+"
+      },
+      "intensity": {
+        "hpa": null,
+        "k_per_6h": 5.09,
+        "axis_strength": null
+      },
+      "lifecycle": "unknown"
+    },
+    {
+      "id": "sys_8",
+      "system_type": "warm_advection",
+      "scale": "synoptic",
+      "level": "850",
+      "geometry_type": "point",
+      "center_lat": 48.75,
+      "center_lon": 16.75,
+      "sector": {
+        "ns": "north",
+        "ew": "west",
+        "distance_km": 1601.5,
+        "distance_band": "800km+"
+      },
+      "intensity": {
+        "hpa": null,
+        "k_per_6h": 3.11,
+        "axis_strength": null
+      },
+      "lifecycle": "unknown"
+    }
+  ],
+  "relationships": [
+    {
+      "type": "trough_upstream_of_surface_low",
+      "confidence": 0.58,
+      "evidence": "500hPa短波槽在西南侧，地面低压在东南远区"
+    },
+    {
+      "type": "ridge_trough_transition_over_station",
+      "confidence": 0.69,
+      "evidence": "站点位于西北脊与西南槽之间过渡区"
+    },
+    {
+      "type": "cold_advection_linked_to_cyclonic_flow",
+      "confidence": 0.61,
+      "evidence": "冷平流带与区域低压环流背景一致"
+    }
+  ],
+  "impacts": [
+    {
+      "target": "tmax",
+      "driver": "850_cold_advection",
+      "sign": "negative",
+      "magnitude": 0.8695,
+      "lead_hours": 0
+    },
+    {
+      "target": "tmax",
+      "driver": "500_ridge_nearby",
+      "sign": "positive",
+      "magnitude": 0.28,
+      "lead_hours": 0
+    },
+    {
+      "target": "convection",
+      "driver": "shortwave_forcing",
+      "sign": "positive",
+      "magnitude": 0.34,
+      "lead_hours": 6
+    },
+    {
+      "target": "tmax",
+      "driver": "remote_warm_advection",
+      "sign": "positive",
+      "magnitude": 0.31079999999999997,
+      "lead_hours": 12
+    }
+  ],
+  "regime_timeline": [
+    {
+      "valid_time_utc": "2026-02-26T12:00:00Z",
+      "primary_pattern": "post_trough_cold_advection",
+      "secondary_pattern": "ridge_nearby",
+      "confidence": 0.7
+    },
+    {
+      "valid_time_utc": "2026-02-27T00:00:00Z",
+      "primary_pattern": "cold_advection_persisting",
+      "secondary_pattern": "remote_low_deepening",
+      "confidence": 0.62
+    },
+    {
+      "valid_time_utc": "2026-02-27T12:00:00Z",
+      "primary_pattern": "transition_to_mixed_advection",
+      "secondary_pattern": "wave_passage_uncertain",
+      "confidence": 0.48
+    }
+  ],
+  "summary": {
+    "headline": "Ankara处于脊槽过渡带，近区冷平流主导，远区暖平流与东南侧低压共同构成后续变率来源。",
+    "confidence": 0.69
+  }
+}

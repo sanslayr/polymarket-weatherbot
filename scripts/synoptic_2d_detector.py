@@ -669,42 +669,49 @@ def build_scale_summary(systems: list[dict[str, Any]]) -> dict[str, Any]:
     return summary
 
 
-def analyze(payload: dict[str, Any]) -> dict[str, Any]:
+def analyze(payload: dict[str, Any], mode: str = "full") -> dict[str, Any]:
     station = payload["station"]
     lat = np.asarray(payload["lat"], dtype=float)
     lon = np.asarray(payload["lon"], dtype=float)
+    run_mode = str(mode or "full").strip().lower()
 
     fields = payload["fields"]
-    mslp = np.asarray(fields["mslp_hpa"], dtype=float)
     z500 = np.asarray(fields["z500_gpm"], dtype=float)
-    t850 = np.asarray(fields["t850_c"], dtype=float)
     u850 = np.asarray(fields["u850_ms"], dtype=float)
-    v850 = np.asarray(fields["v850_ms"], dtype=float)
-
-    t925 = np.asarray(fields.get("t925_c"), dtype=float) if fields.get("t925_c") is not None else None
-    u925 = np.asarray(fields.get("u925_ms"), dtype=float) if fields.get("u925_ms") is not None else None
-    v925 = np.asarray(fields.get("v925_ms"), dtype=float) if fields.get("v925_ms") is not None else None
-    t700 = np.asarray(fields.get("t700_c"), dtype=float) if fields.get("t700_c") is not None else None
 
     prev = payload.get("previous_fields")
-    prev_mslp = None
     prev_z500 = None
-    if prev and "mslp_hpa" in prev:
-        prev_mslp = np.asarray(prev["mslp_hpa"], dtype=float)
     if prev and "z500_gpm" in prev:
         prev_z500 = np.asarray(prev["z500_gpm"], dtype=float)
 
-    lows = detect_pressure_centers(lat, lon, mslp, station, "surface_low", prev_mslp)
-    highs = detect_pressure_centers(lat, lon, mslp, station, "surface_high", prev_mslp)
-    bands = detect_850_bands(lat, lon, t850, u850, v850, station)
-    fronts = detect_frontogenesis_zones(lat, lon, t850, u850, v850, t925, u925, v925, mslp, station)
-    llj = detect_llj_shear_zones(lat, lon, u850, v850, u925, v925, station)
-    dry700 = detect_dry_intrusion_700(lat, lon, t700, t850, station)
-    baro = detect_baroclinic_coupling(lat, lon, mslp, t850, station)
     axes = detect_500_axes(lat, lon, z500, station, prev_z500=prev_z500)
     planetary = diagnose_planetary(lat, z500, u850)
 
-    systems = planetary + lows + highs + axes + fronts + llj + dry700 + baro + bands["warm_advection"] + bands["cold_advection"]
+    if run_mode == "outer500_only":
+        systems = planetary + axes
+    else:
+        mslp = np.asarray(fields["mslp_hpa"], dtype=float)
+        t850 = np.asarray(fields["t850_c"], dtype=float)
+        v850 = np.asarray(fields["v850_ms"], dtype=float)
+
+        t925 = np.asarray(fields.get("t925_c"), dtype=float) if fields.get("t925_c") is not None else None
+        u925 = np.asarray(fields.get("u925_ms"), dtype=float) if fields.get("u925_ms") is not None else None
+        v925 = np.asarray(fields.get("v925_ms"), dtype=float) if fields.get("v925_ms") is not None else None
+        t700 = np.asarray(fields.get("t700_c"), dtype=float) if fields.get("t700_c") is not None else None
+
+        prev_mslp = None
+        if prev and "mslp_hpa" in prev:
+            prev_mslp = np.asarray(prev["mslp_hpa"], dtype=float)
+
+        lows = detect_pressure_centers(lat, lon, mslp, station, "surface_low", prev_mslp)
+        highs = detect_pressure_centers(lat, lon, mslp, station, "surface_high", prev_mslp)
+        bands = detect_850_bands(lat, lon, t850, u850, v850, station)
+        fronts = detect_frontogenesis_zones(lat, lon, t850, u850, v850, t925, u925, v925, mslp, station)
+        llj = detect_llj_shear_zones(lat, lon, u850, v850, u925, v925, station)
+        dry700 = detect_dry_intrusion_700(lat, lon, t700, t850, station)
+        baro = detect_baroclinic_coupling(lat, lon, mslp, t850, station)
+        systems = planetary + lows + highs + axes + fronts + llj + dry700 + baro + bands["warm_advection"] + bands["cold_advection"]
+
     systems_sorted = sorted(
         systems,
         key=lambda x: (
@@ -737,13 +744,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="2D synoptic detector")
     p.add_argument("--input", required=True)
     p.add_argument("--output", default="")
+    p.add_argument("--mode", default="full", choices=["full", "outer500_only"])
     return p
 
 
 def main() -> None:
     args = build_arg_parser().parse_args()
     payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
-    result = analyze(payload)
+    result = analyze(payload, mode=args.mode)
     text = json.dumps(result, ensure_ascii=True, indent=2)
     if args.output:
         Path(args.output).write_text(text + "\n", encoding="utf-8")

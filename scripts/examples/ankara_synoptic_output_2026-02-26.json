@@ -1,0 +1,100 @@
+{
+  "analysis_time_utc": "2026-02-26T12:00:00Z",
+  "scales": {
+    "planetary": {
+      "primary": null,
+      "secondary": null,
+      "candidates": []
+    },
+    "synoptic": {
+      "primary": {
+        "pattern": "warm_sector_prefrontal",
+        "description": "\u950b\u524d\u6696\u533a\u5f62\u52bf",
+        "score": 0.8,
+        "evidence": [
+          "850hPa\u6696\u5e73\u6d41\u660e\u663e(2.50K/6h)",
+          "\u950b\u751f\u4fe1\u53f7\u589e\u5f3a(0.69)"
+        ]
+      },
+      "secondary": null,
+      "candidates": [
+        {
+          "pattern": "warm_sector_prefrontal",
+          "description": "\u950b\u524d\u6696\u533a\u5f62\u52bf",
+          "score": 0.8,
+          "evidence": [
+            "850hPa\u6696\u5e73\u6d41\u660e\u663e(2.50K/6h)",
+            "\u950b\u751f\u4fe1\u53f7\u589e\u5f3a(0.69)"
+          ]
+        }
+      ]
+    },
+    "mesoscale": {
+      "primary": null,
+      "secondary": null,
+      "candidates": []
+    }
+  },
+  "systems": [
+    {
+      "system_type": "shortwave_trough",
+      "level": "500",
+      "region_name": "central-anatolia",
+      "trend": "eastward",
+      "scale": "synoptic",
+      "system_label": "shortwave_trough@500"
+    }
+  ],
+  "level_layers": {
+    "planetary": [],
+    "500": [
+      {
+        "system_type": "shortwave_trough",
+        "level": "500",
+        "region_name": "central-anatolia",
+        "trend": "eastward",
+        "scale": "synoptic",
+        "system_label": "shortwave_trough@500"
+      }
+    ],
+    "850": [],
+    "mslp": [],
+    "other": []
+  },
+  "regional_picture": [
+    {
+      "region_name": "central-anatolia",
+      "systems": [
+        {
+          "label": "shortwave_trough@500",
+          "scale": "synoptic",
+          "trend": "eastward",
+          "intensity": null
+        }
+      ]
+    }
+  ],
+  "trends": {
+    "timeline": [
+      {
+        "valid_time_utc": "2026-02-27T00:00:00Z",
+        "horizon_hours": 12,
+        "primary_by_scale": {
+          "planetary": null,
+          "synoptic": null,
+          "mesoscale": "cold_air_damming"
+        }
+      },
+      {
+        "valid_time_utc": "2026-02-27T12:00:00Z",
+        "horizon_hours": 24,
+        "primary_by_scale": {
+          "planetary": null,
+          "synoptic": "warm_sector_prefrontal",
+          "mesoscale": "prefrontal_convergence"
+        }
+      }
+    ],
+    "turning_points": []
+  }
+}

@@ -67,6 +67,28 @@ _DEFAULTS: dict[str, Any] = {
         "pressure_fall_min_hpa": -0.6,
         "score_min": 1.5,
     },
+    "market_labels": {
+        "best_min_coverage": 0.60,
+        "best_lead_min": 0.05,
+        "best_lead_low_cov_add": 0.015,
+        "best_lead_phase_add": 0.01,
+        "best_lead_low_conf_add": 0.015,
+        "best_weather_min": 0.30,
+        "best_weather_low_cov_add": 0.02,
+        "best_weather_low_conf_add": 0.02,
+        "alpha_min_coverage": 0.50,
+        "rebreak_t_cons_min": 0.35,
+        "rebreak_b_cons_min": 0.45,
+        "rebreak_near_t_cons_min": 0.45,
+        "alpha_cheap_ask_max": 0.14,
+        "alpha_cheap_spread_max": 0.08,
+        "alpha_cheap_weather_min": 0.14,
+        "alpha_cheap_score_min": 0.24,
+        "alpha_mid_ask_max": 0.18,
+        "alpha_mid_spread_max": 0.06,
+        "alpha_mid_weather_min": 0.48,
+        "alpha_mid_score_min": 0.32,
+    },
 }
 
 _CACHE_LOCK = Lock()

@@ -3,7 +3,7 @@
 Last updated: 2026-03-02
 
 ## 1) Scope
-- Commands: `/look`, `/lookhelp`
+- Commands: `/look`
 - Channel: Telegram（群聊/私聊一致）
 
 ## 2) Hard output rules

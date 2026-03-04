@@ -1,0 +1,12 @@
+{
+  "station": "LTAC",
+  "target_date": "2026-02-26",
+  "model": "ecmwf",
+  "analysis_time_utc": "2026-02-26T07:20:00Z",
+  "summary": "实况优先：短临温度高于模式，Tmax上修但受冷平流约束。",
+  "sections": {
+    "synoptic": "500脊-短波槽过渡，850近区冷平流，东南远区低压加深。",
+    "sounding": "窗口13-15LT，对齐ECMWF 00Z+12h，低层冷背景仍在。",
+    "metar": "07:20Z实况2C，近3小时升温快于模式。"
+  }
+}

@@ -290,10 +290,8 @@ def build_forecast_decision(
 
 
 def _model_step_hours(model: str) -> int:
-    m = (model or "").strip().lower()
-    # Use native-like temporal density for synoptic anchors.
-    if m in {"gfs", "icon", "gem", "ukmo"}:
-        return 3
+    # Unified anchor cadence for all models.
+    # Requirement: all anchors sampled at 6-hour granularity.
     return 6
 
 
@@ -332,6 +330,104 @@ def _full_day_anchor_locals(target_date: str, tz_name: str, model: str) -> list[
     return [a.astimezone(tz).strftime("%Y-%m-%dT%H:%M") for a in anchors_utc]
 
 
+def _parse_anchor_local(anchor_local: str, tz: ZoneInfo) -> datetime | None:
+    try:
+        return datetime.strptime(anchor_local, "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
+    except Exception:
+        return None
+
+
+def _nearest_anchor_local(anchor_locals: list[str], target_local: datetime | None, tz_name: str) -> str | None:
+    if target_local is None or not anchor_locals:
+        return None
+    tz = ZoneInfo(tz_name)
+    best_anchor: str | None = None
+    best_dist_s: float | None = None
+    for a in anchor_locals:
+        dt = _parse_anchor_local(a, tz)
+        if dt is None:
+            continue
+        d = abs((dt - target_local).total_seconds())
+        if best_dist_s is None or d < best_dist_s:
+            best_dist_s = d
+            best_anchor = a
+    return best_anchor
+
+
+def _select_outer500_anchor_locals(
+    *,
+    anchor_locals: list[str],
+    primary_window: dict[str, Any],
+    now_local: datetime,
+    tz_name: str,
+) -> list[str]:
+    if not anchor_locals:
+        return []
+    tz = ZoneInfo(tz_name)
+    max_count_env = int(os.getenv("FORECAST_OUTER500_ANCHOR_MAX", "0") or "0")
+    if max_count_env > 0:
+        max_count = max_count_env
+    else:
+        max_count = 4
+        try:
+            ws = datetime.strptime(str(primary_window.get("start_local") or ""), "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
+            we = datetime.strptime(str(primary_window.get("end_local") or ""), "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
+            if now_local < (ws - timedelta(hours=3)) or now_local > (we + timedelta(hours=2)):
+                max_count = 3
+        except Exception:
+            max_count = 4
+    if max_count <= 0:
+        return []
+    window_targets: list[datetime] = []
+    for k in ("start_local", "peak_local", "end_local"):
+        raw = str(primary_window.get(k) or "").strip()
+        if not raw:
+            continue
+        try:
+            window_targets.append(datetime.strptime(raw, "%Y-%m-%dT%H:%M").replace(tzinfo=tz))
+        except Exception:
+            continue
+
+    picked: list[str] = []
+    seen: set[str] = set()
+
+    def _add(anchor_local: str | None) -> None:
+        if not anchor_local or anchor_local in seen:
+            return
+        seen.add(anchor_local)
+        picked.append(anchor_local)
+
+    for t in window_targets:
+        _add(_nearest_anchor_local(anchor_locals, t, tz_name))
+
+    if len(picked) < max_count:
+        _add(_nearest_anchor_local(anchor_locals, now_local.astimezone(tz), tz_name))
+
+    if len(picked) < max_count:
+        _add(anchor_locals[0])
+    if len(picked) < max_count:
+        _add(anchor_locals[-1])
+
+    if len(picked) < max_count and len(window_targets) >= 2:
+        sdt = min(window_targets)
+        edt = max(window_targets)
+        mid = sdt + (edt - sdt) / 2
+        _add(_nearest_anchor_local(anchor_locals, mid, tz_name))
+
+    if len(picked) < max_count:
+        candidates = [
+            anchor_locals[len(anchor_locals) // 4],
+            anchor_locals[len(anchor_locals) // 2],
+            anchor_locals[(len(anchor_locals) * 3) // 4],
+        ]
+        for c in candidates:
+            if len(picked) >= max_count:
+                break
+            _add(c)
+
+    return picked[:max_count]
+
+
 def _merge_synoptic_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
     merged = {"scale_summary": {"synoptic": {"systems": []}}}
     out = merged["scale_summary"]["synoptic"]["systems"]
@@ -364,7 +460,7 @@ def load_or_build_forecast_decision(
     station_lon: float,
     primary_window: dict[str, Any],
     tz_name: str,
-    run_synoptic_fn: Callable[[Any, str, str, str, str, str], dict[str, Any]],
+    run_synoptic_fn: Callable[..., dict[str, Any]],
     perf_log: Callable[[str, float], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
     def _log(stage: str, start: float) -> None:
@@ -407,14 +503,14 @@ def load_or_build_forecast_decision(
     if anchor_limit > 0:
         anchor_locals = anchor_locals[:anchor_limit]
 
-    def _pull_anchor(a_local: str) -> tuple[str, dict[str, Any] | None, str | None, list[dict[str, Any]]]:
+    def _pull_anchor(a_local: str, pass_mode: str) -> tuple[str, dict[str, Any] | None, str | None, list[dict[str, Any]]]:
         t_anchor = time.perf_counter()
         try:
             # Optional jitter to smooth provider burst limits.
             jitter_ms = int(os.getenv("FORECAST_ANCHOR_JITTER_MS", "0") or "0")
             if jitter_ms > 0:
                 time.sleep(random.uniform(0.0, max(0.0, jitter_ms / 1000.0)))
-            p = run_synoptic_fn(station, target_date, a_local, tz_name, model, runtime)
+            p = run_synoptic_fn(station, target_date, a_local, tz_name, model, runtime, pass_mode=pass_mode)
             tele: list[dict[str, Any]] = []
             tnode = p.get("_telemetry") if isinstance(p, dict) else None
             if isinstance(tnode, dict):
@@ -423,33 +519,72 @@ def load_or_build_forecast_decision(
                         continue
                     row = dict(ev)
                     row.setdefault("anchor_local", a_local)
+                    row.setdefault("pass_mode", pass_mode)
                     tele.append(row)
             if perf_log:
-                perf_log(f"forecast.anchor.{a_local}", time.perf_counter() - t_anchor)
+                perf_log(f"forecast.anchor.{a_local}.{pass_mode}", time.perf_counter() - t_anchor)
             return a_local, p, None, tele
         except Exception as exc:
             if perf_log:
-                perf_log(f"forecast.anchor.{a_local}.failed", time.perf_counter() - t_anchor)
+                perf_log(f"forecast.anchor.{a_local}.{pass_mode}.failed", time.perf_counter() - t_anchor)
             return a_local, None, str(exc), []
 
-    max_workers = max(1, int(os.getenv("FORECAST_MAX_WORKERS", "1") or "1"))
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = [ex.submit(_pull_anchor, a) for a in anchor_locals]
-        for fut in as_completed(futs):
-            _a, payload, err, tele = fut.result()
-            if tele:
-                anchor_telemetry.extend(tele)
-            if payload is not None:
-                syn_payloads.append(payload)
-            elif err:
-                synoptic_error = err
-                anchor_telemetry.append({
-                    "anchor_local": _a,
-                    "status": "failed",
-                    "stage": "runner",
-                    "error_type": _classify_anchor_error(err),
-                    "error": str(err)[:300],
-                })
+    def _run_anchor_batch(anchors: list[str], pass_mode: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+        out_payloads: list[dict[str, Any]] = []
+        out_telemetry: list[dict[str, Any]] = []
+        ok = 0
+        if not anchors:
+            return out_payloads, out_telemetry, ok
+        max_workers = max(1, int(os.getenv("FORECAST_MAX_WORKERS", "2") or "2"))
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = [ex.submit(_pull_anchor, a, pass_mode) for a in anchors]
+            for fut in as_completed(futs):
+                _a, payload, err, tele = fut.result()
+                if tele:
+                    out_telemetry.extend(tele)
+                if payload is not None:
+                    out_payloads.append(payload)
+                    ok += 1
+                elif err:
+                    out_telemetry.append({
+                        "anchor_local": _a,
+                        "pass_mode": pass_mode,
+                        "status": "failed",
+                        "stage": "runner",
+                        "error_type": _classify_anchor_error(err),
+                        "error": str(err)[:300],
+                    })
+        return out_payloads, out_telemetry, ok
+
+    strategy = str(os.getenv("FORECAST_SYNOPTIC_PASS_STRATEGY", "split_outer500") or "split_outer500").strip().lower()
+    inner_ok = 0
+    outer500_anchors: list[str] = []
+    outer500_ok = 0
+
+    if strategy in {"full", "legacy"}:
+        batch_payloads, batch_tele, batch_ok = _run_anchor_batch(anchor_locals, "full")
+        syn_payloads.extend(batch_payloads)
+        anchor_telemetry.extend(batch_tele)
+        inner_ok = batch_ok
+    else:
+        inner_payloads, inner_tele, inner_ok = _run_anchor_batch(anchor_locals, "inner_only")
+        syn_payloads.extend(inner_payloads)
+        anchor_telemetry.extend(inner_tele)
+
+        outer500_anchors = _select_outer500_anchor_locals(
+            anchor_locals=anchor_locals,
+            primary_window=primary_window,
+            now_local=now_local,
+            tz_name=tz_name,
+        )
+        outer_payloads, outer_tele, outer500_ok = _run_anchor_batch(outer500_anchors, "outer500_only")
+        syn_payloads.extend(outer_payloads)
+        anchor_telemetry.extend(outer_tele)
+
+    if anchor_telemetry:
+        for ev in anchor_telemetry:
+            if str(ev.get("status")) == "failed":
+                synoptic_error = str(ev.get("error") or synoptic_error or "")
 
     if syn_payloads:
         synoptic = _merge_synoptic_payloads(syn_payloads)
@@ -461,8 +596,10 @@ def load_or_build_forecast_decision(
                     "date": target_date,
                     "model": model,
                     "synoptic_provider": synoptic_provider,
+                    "synoptic_pass_strategy": strategy,
                     "runtime": runtime,
                     "anchors_local": anchor_locals,
+                    "outer500_anchors_local": outer500_anchors,
                     "slices": syn_payloads,
                 },
                 str(getattr(station, "icao", "")), target_date, model.lower(), str(synoptic_provider or ""), runtime,
@@ -500,11 +637,12 @@ def load_or_build_forecast_decision(
 
     q = decision.setdefault("quality", {})
     total_anchors = max(1, len(anchor_locals))
-    ok_anchors = len(syn_payloads)
+    ok_anchors = max(0, inner_ok)
     coverage = ok_anchors / total_anchors
     q["synoptic_anchors_total"] = total_anchors
     q["synoptic_anchors_ok"] = ok_anchors
     q["synoptic_coverage"] = round(coverage, 3)
+    q["synoptic_pass_strategy"] = strategy
 
     if anchor_telemetry:
         q["synoptic_anchor_events"] = anchor_telemetry
@@ -523,6 +661,18 @@ def load_or_build_forecast_decision(
         q.setdefault("missing_layers", []).append("synoptic")
     elif synoptic_from_fallback:
         q["source_state"] = "fallback-cache"
+
+    if strategy in {"full", "legacy"}:
+        q["synoptic_outer500_anchors_total"] = len(anchor_locals)
+        q["synoptic_outer500_anchors_ok"] = int(ok_anchors)
+    else:
+        q["synoptic_outer500_anchors_total"] = len(outer500_anchors)
+        q["synoptic_outer500_anchors_ok"] = int(outer500_ok)
+        if outer500_anchors and outer500_ok <= 0:
+            q.setdefault("missing_layers", []).append("synoptic_outer500")
+            role = str(primary_window.get("window_role") or "").lower()
+            if role in {"near_window", "in_window", "post_window", "post_eval_no_rebreak"}:
+                q["source_state"] = "degraded"
 
     # Coverage gate: partial slices are usable but should be flagged when too sparse.
     if coverage < float(os.getenv("FORECAST_SYNOPTIC_MIN_COVERAGE", "0.5") or "0.5"):

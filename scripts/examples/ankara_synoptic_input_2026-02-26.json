@@ -1,0 +1,79 @@
+{
+  "analysis_time_utc": "2026-02-26T12:00:00Z",
+  "features": {
+    "z500_anom_std": -1.29,
+    "z500_trough_curvature": 0.48,
+    "shortwave_vort_1e5": 0.4,
+    "t850_advection_k_per_6h": 2.5,
+    "mslp_grad_hpa_per_100km": 1.15,
+    "mslp_tendency_24h_hpa": 0.0,
+    "subtropical_high_northern_edge_lat": 24.0,
+    "subtropical_high_strength_hpa": 586.0,
+    "jet300_speed_kt": 18.0,
+    "jet300_lat_shift_deg": 6.0,
+    "frontogenesis_index": 0.69,
+    "low_level_jet_kt": 17.8,
+    "marine_onshore_index": 0.1,
+    "low_cloud_fraction": 0.35,
+    "cad_index": 0,
+    "convergence_index": 0.55,
+    "omega_block_index": 0.0,
+    "cutoff_low_flag": false
+  },
+  "systems": [
+    {
+      "system_type": "shortwave_trough",
+      "level": "500",
+      "region_name": "central-anatolia",
+      "trend": "eastward"
+    }
+  ],
+  "future": [
+    {
+      "valid_time_utc": "2026-02-27T00:00:00Z",
+      "features": {
+        "z500_anom_std": -0.86,
+        "z500_trough_curvature": 0.24,
+        "shortwave_vort_1e5": 0.8,
+        "t850_advection_k_per_6h": -1.0,
+        "mslp_grad_hpa_per_100km": 1.15,
+        "mslp_tendency_24h_hpa": 5.5,
+        "subtropical_high_northern_edge_lat": 24.0,
+        "subtropical_high_strength_hpa": 586.0,
+        "jet300_speed_kt": 42.2,
+        "jet300_lat_shift_deg": 6.0,
+        "frontogenesis_index": 0.39,
+        "low_level_jet_kt": 15.4,
+        "marine_onshore_index": 0.1,
+        "low_cloud_fraction": 0.22,
+        "cad_index": 1,
+        "convergence_index": 0.37,
+        "omega_block_index": 0.0,
+        "cutoff_low_flag": false
+      }
+    },
+    {
+      "valid_time_utc": "2026-02-27T12:00:00Z",
+      "features": {
+        "z500_anom_std": -0.51,
+        "z500_trough_curvature": 0.24,
+        "shortwave_vort_1e5": 1.4,
+        "t850_advection_k_per_6h": 3.6,
+        "mslp_grad_hpa_per_100km": 2.1,
+        "mslp_tendency_24h_hpa": 2.5,
+        "subtropical_high_northern_edge_lat": 24.0,
+        "subtropical_high_strength_hpa": 586.0,
+        "jet300_speed_kt": 34.6,
+        "jet300_lat_shift_deg": 6.0,
+        "frontogenesis_index": 1,
+        "low_level_jet_kt": 18.1,
+        "marine_onshore_index": 0.1,
+        "low_cloud_fraction": 0.81,
+        "cad_index": 0.38,
+        "convergence_index": 0.71,
+        "omega_block_index": 0.0,
+        "cutoff_low_flag": false
+      }
+    }
+  ]
+}

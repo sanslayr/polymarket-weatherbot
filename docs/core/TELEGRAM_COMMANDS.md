@@ -30,11 +30,6 @@ Last updated: 2026-03-02
 - 美国站点（ICAO `K*`）最高温区间默认显示华氏；其余站点显示摄氏。
 - Polymarket 市场按站点 local date 选取当日事件。
 
-### `/lookhelp`
-返回 `/look` 使用说明。
-
----
-
 ## 3) Alias 提示（常用）
 - `nyc` -> New York
 - `seo/sel` -> Seoul

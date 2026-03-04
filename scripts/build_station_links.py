@@ -133,6 +133,7 @@ def build_links(
     target_valid_utc: datetime,
     target_date_utc: datetime,
     sounding_model: str = "ecmwf",
+    sounding_target_valid_utc: datetime | None = None,
 ) -> dict[str, Any]:
     runtime_utc, fh = pick_runtime_and_fh(
         model=model,
@@ -142,10 +143,11 @@ def build_links(
 
     # Sounding link policy: prefer ECMWF links by default.
     snd_model = sounding_model if sounding_model in MODEL_CONFIGS else "ecmwf"
+    snd_target_valid_utc = sounding_target_valid_utc or target_valid_utc
     snd_runtime_utc, snd_fh = pick_runtime_and_fh(
         model=snd_model,
         now_utc=now_utc,
-        target_valid_utc=target_valid_utc,
+        target_valid_utc=snd_target_valid_utc,
     )
 
     runtime = format_runtime(runtime_utc)
