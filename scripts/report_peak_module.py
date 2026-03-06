@@ -10,6 +10,7 @@ from typing import Any
 from metar_utils import observed_max_interval_c as _observed_max_interval_c
 from realtime_pipeline import classify_window_phase
 from historical_payload import get_weighted_reference
+from historical_strategy import blend_historical_range
 
 
 def _parse_iso_dt(v: Any) -> datetime | None:
@@ -254,61 +255,15 @@ def _apply_historical_reference(
     disp_lo: float,
     disp_hi: float,
 ) -> tuple[float, float, float, float, dict[str, Any] | None]:
-    weighted = get_weighted_reference(metar_diag)
-    if not isinstance(weighted, dict) or compact_settled_mode:
-        return core_lo, core_hi, disp_lo, disp_hi, None
-
-    recommended = _safe_float(weighted.get("recommended_tmax_c"))
-    if recommended is None:
-        return core_lo, core_hi, disp_lo, disp_hi, None
-
-    strength = str(weighted.get("reference_strength") or "weak")
-    selected_branch = str(weighted.get("selected_branch") or "")
-    synoptic_alignment = str(weighted.get("synoptic_alignment") or "neutral")
-    analog_count = int(_safe_float(weighted.get("analog_count")) or 0)
-    if analog_count <= 0:
-        return core_lo, core_hi, disp_lo, disp_hi, None
-
-    base_center = (float(core_lo) + float(core_hi)) / 2.0
-    base_core_half = max(0.1, (float(core_hi) - float(core_lo)) / 2.0)
-    base_disp_half = max(base_core_half, (float(disp_hi) - float(disp_lo)) / 2.0)
-
-    ref_weight = {"weak": 0.18, "medium": 0.42, "strong": 0.68}.get(strength, 0.18)
-    ref_cap = {"weak": 0.45, "medium": 0.95, "strong": 1.55}.get(strength, 0.45)
-    if synoptic_alignment == "supportive":
-        ref_weight += 0.06
-        ref_cap += 0.15
-    elif synoptic_alignment == "conflicting":
-        ref_weight = max(0.08, ref_weight - 0.10)
-        ref_cap = max(0.25, ref_cap - 0.20)
-    phase_scale = {"far": 0.70, "near_window": 1.0, "in_window": 1.08, "post": 0.55}.get(phase_now, 0.85)
-    shift = max(-ref_cap, min(ref_cap, (recommended - base_center) * ref_weight * phase_scale))
-
-    ref_low = _safe_float(weighted.get("recommended_tmax_p25_c"))
-    ref_high = _safe_float(weighted.get("recommended_tmax_p75_c"))
-    if ref_low is not None and ref_high is not None and ref_high > ref_low:
-        ref_half = max(0.1, (ref_high - ref_low) / 2.0)
-        width_blend = {"weak": 0.10, "medium": 0.30, "strong": 0.45}.get(strength, 0.10)
-        core_half = base_core_half * (1.0 - width_blend) + ref_half * width_blend
-        disp_half = base_disp_half * (1.0 - width_blend) + max(ref_half + 0.15, ref_half * 1.20) * width_blend
-    else:
-        core_half = base_core_half
-        disp_half = base_disp_half
-
-    new_center = base_center + shift
-    new_core_lo = new_center - core_half
-    new_core_hi = new_center + core_half
-    new_disp_lo = new_center - disp_half
-    new_disp_hi = new_center + disp_half
-    return new_core_lo, new_core_hi, new_disp_lo, new_disp_hi, {
-        "applied": True,
-        "strength": strength,
-        "selected_branch": selected_branch,
-        "synoptic_alignment": synoptic_alignment,
-        "shift_c": round(shift, 2),
-        "base_center_c": round(base_center, 2),
-        "recommended_center_c": round(recommended, 2),
-    }
+    return blend_historical_range(
+        metar_diag=metar_diag,
+        phase_now=phase_now,
+        compact_settled_mode=compact_settled_mode,
+        core_lo=core_lo,
+        core_hi=core_hi,
+        disp_lo=disp_lo,
+        disp_hi=disp_hi,
+    )
 
 def _build_peak_range_module(
     primary_window: dict[str, Any],
@@ -1431,6 +1386,9 @@ def _build_peak_range_module(
         peak_range_block.append(
             f"- 注：已纳入历史 analog 数值校正{branch_txt}{date_txt}，参考强度 {strength_cn}，区间中心修正 {float(historical_blend.get('shift_c') or 0.0):+.1f}°C。"
         )
+        notes = [str(item) for item in (historical_blend.get("policy_notes") or []) if str(item).strip()]
+        if notes:
+            peak_range_block.append(f"- 历史融合权衡：{'；'.join(notes[:3])}。")
 
     return {
         "peak_range_block": peak_range_block,

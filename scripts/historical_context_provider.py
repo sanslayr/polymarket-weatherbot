@@ -1295,6 +1295,8 @@ def assess_analog_branches(
                 "rationale": rationale,
                 "row_count": len(rows),
                 "tmax_spread_c": round(max(tmax_values) - min(tmax_values), 2) if len(tmax_values) >= 2 else 0.0,
+                "tmax_center_c": round(statistics.median(tmax_values), 2) if tmax_values else None,
+                "peak_center_hour_local": round(statistics.median(peak_values), 2) if peak_values else None,
                 "rows": rows,
             }
         )
@@ -1307,6 +1309,19 @@ def assess_analog_branches(
     top_score = float(top.get("fit_score") or 0.0)
     second_score = float(second.get("fit_score") or 0.0) if second else None
     margin = top_score - second_score if second_score is not None else top_score
+    top_center = _safe_float(top.get("tmax_center_c"))
+    second_center = _safe_float(second.get("tmax_center_c")) if second else None
+    center_gap = abs(top_center - second_center) if top_center is not None and second_center is not None else None
+
+    branch_mode = "converged"
+    if second is None:
+        branch_mode = "converged"
+    elif margin >= 0.9 and top_score >= 5.0:
+        branch_mode = "preferred"
+    elif margin < 0.35 or (center_gap is not None and center_gap >= 1.2 and margin < 0.7):
+        branch_mode = "split"
+    else:
+        branch_mode = "competitive"
 
     strength = "weak"
     strength_cn = "弱参考"
@@ -1327,6 +1342,8 @@ def assess_analog_branches(
         "top_branch_score": round(top_score, 2),
         "second_branch_score": round(second_score, 2) if second_score is not None else None,
         "score_margin": round(margin, 2),
+        "branch_mode": branch_mode,
+        "branch_center_gap_c": round(center_gap, 2) if center_gap is not None else None,
         "selected_rows": selected_rows,
         "branch_details": [{k: v for k, v in item.items() if k != "rows"} for item in details],
     }
