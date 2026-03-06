@@ -210,7 +210,7 @@ def _render_metar_only_report(
         tz_name,
         temp_unit=unit_pref,
     )
-    mgm_ref = _fetch_mgm_reference(st)
+    mgm_ref = _fetch_mgm_reference(st) if str(st.icao).upper() == "LTAC" else None
     if mgm_ref:
         def _fmt_temp_ref(v_c: Any) -> str:
             try:
@@ -407,7 +407,7 @@ def render_report(command_text: str) -> str:
         target_date=target_date,
         temp_unit=unit_pref,
     )
-    mgm_ref = _fetch_mgm_reference(st)
+    mgm_ref = _fetch_mgm_reference(st) if str(st.icao).upper() == "LTAC" else None
     if mgm_ref:
         def _fmt_temp_ref(v_c: Any) -> str:
             try:
