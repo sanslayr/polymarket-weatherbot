@@ -125,6 +125,16 @@ def metar_observation_block(
                 toks.append(f"{code}{int(round(ft/100.0)):03d}")
         return toks
 
+    def _cloud_lowest_base_ft(obs: dict[str, Any]) -> int | None:
+        pairs = _collect_cloud_pairs(obs)
+        bases: list[int] = []
+        for _code, ft in pairs:
+            if ft is not None:
+                bases.append(int(ft))
+        if not bases:
+            return None
+        return min(bases)
+
     def parse_cloud_layers(obs: dict[str, Any]) -> str:
         pairs = _collect_cloud_pairs(obs)
         if not pairs:
@@ -1266,6 +1276,9 @@ def metar_observation_block(
         "latest_rh": _calc_rh_pct(latest.get("temp"), latest.get("dewp")),
         "dewpoint_trend_1step_c": dewpoint_step,
         "latest_cloud_code": latest_cloud_code,
+        "latest_cloud_layers": parse_cloud_layers(latest),
+        "latest_cloud_tokens": _cloud_tokens(latest),
+        "latest_cloud_lowest_base_ft": _cloud_lowest_base_ft(latest),
         "latest_wx": latest.get("wxString") or latest.get("wx") or "",
         "latest_precip_state": wx_state_now,
         "precip_trend": wx_trend,

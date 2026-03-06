@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import math
 import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import requests
 
+from runtime_cache_policy import gfs_binary_cache_enabled
 from runtime_utils import resolve_runtime_for_valid_time, runtime_dt_from_tag
 
 
@@ -42,6 +45,30 @@ def _download_grib(path: Path, url: str) -> None:
     r.raise_for_status()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(r.content)
+
+
+def _repo_root(root: Path) -> Path:
+    candidates = [
+        root,
+        root / "skills" / "polymarket-weatherbot",
+        Path(__file__).resolve().parent.parent,
+    ]
+    for candidate in candidates:
+        if (candidate / ".venv_gfs").exists():
+            return candidate
+    return Path(__file__).resolve().parent.parent
+
+
+@contextmanager
+def _grib_workspace(root: Path, subdir: str):
+    repo_root = _repo_root(root)
+    if gfs_binary_cache_enabled():
+        path = repo_root / "cache" / "runtime" / subdir
+        path.mkdir(parents=True, exist_ok=True)
+        yield path
+        return
+    with tempfile.TemporaryDirectory(prefix=f"weatherbot-{subdir}-") as tmp:
+        yield Path(tmp)
 
 
 def _is_http_404(exc: Exception) -> bool:
@@ -81,7 +108,7 @@ def _ensure_grib_with_cycle_fallback(
 
 
 def _extract_point_from_grib(grib_path: Path, lat: float, lon: float, root: Path) -> dict[str, Any]:
-    py = root / ".venv_gfs" / "bin" / "python"
+    py = _repo_root(root) / ".venv_gfs" / "bin" / "python"
     if not py.exists():
         raise RuntimeError("gfs parser venv missing (.venv_gfs)")
 
@@ -186,48 +213,47 @@ def build_2d_grid_payload_gfs(
     rt_dt_a = runtime_dt_from_tag(rt_tag_a)
     rt_dt_p = runtime_dt_from_tag(rt_tag_p)
 
-    cache_root = root / "skills" / "polymarket-weatherbot" / "cache" / "runtime" / "gfs_grids"
     profile = str(field_profile or "full").strip().lower()
     bbox_suffix = f"_{lat_min:.2f}_{lat_max:.2f}_{lon_min:.2f}_{lon_max:.2f}_{profile}.grib2"
+    with _grib_workspace(root, "gfs_grids") as cache_root:
+        ga, rt_dt_a_used, fh_a_used = _ensure_grib_with_cycle_fallback(
+            cache_root=cache_root,
+            file_suffix=bbox_suffix,
+            runtime_dt=rt_dt_a,
+            fh=fh_a,
+            build_url=lambda rt, fhx: _nomads_grid_url(
+                rt,
+                fhx,
+                lat_min=lat_min,
+                lat_max=lat_max,
+                lon_min=lon_min,
+                lon_max=lon_max,
+                field_profile=profile,
+            ),
+            max_back_cycles=3,
+        )
+        gp, rt_dt_p_used, fh_p_used = _ensure_grib_with_cycle_fallback(
+            cache_root=cache_root,
+            file_suffix=bbox_suffix,
+            runtime_dt=rt_dt_p,
+            fh=fh_p,
+            build_url=lambda rt, fhx: _nomads_grid_url(
+                rt,
+                fhx,
+                lat_min=lat_min,
+                lat_max=lat_max,
+                lon_min=lon_min,
+                lon_max=lon_max,
+                field_profile=profile,
+            ),
+            max_back_cycles=3,
+        )
 
-    ga, rt_dt_a_used, fh_a_used = _ensure_grib_with_cycle_fallback(
-        cache_root=cache_root,
-        file_suffix=bbox_suffix,
-        runtime_dt=rt_dt_a,
-        fh=fh_a,
-        build_url=lambda rt, fhx: _nomads_grid_url(
-            rt,
-            fhx,
-            lat_min=lat_min,
-            lat_max=lat_max,
-            lon_min=lon_min,
-            lon_max=lon_max,
-            field_profile=profile,
-        ),
-        max_back_cycles=3,
-    )
-    gp, rt_dt_p_used, fh_p_used = _ensure_grib_with_cycle_fallback(
-        cache_root=cache_root,
-        file_suffix=bbox_suffix,
-        runtime_dt=rt_dt_p,
-        fh=fh_p,
-        build_url=lambda rt, fhx: _nomads_grid_url(
-            rt,
-            fhx,
-            lat_min=lat_min,
-            lat_max=lat_max,
-            lon_min=lon_min,
-            lon_max=lon_max,
-            field_profile=profile,
-        ),
-        max_back_cycles=3,
-    )
-
-    py = root / ".venv_gfs" / "bin" / "python"
-    if not py.exists():
-        raise RuntimeError("gfs parser venv missing (.venv_gfs)")
-    if profile == "outer500":
-        code = r'''
+        py = _repo_root(root) / ".venv_gfs" / "bin" / "python"
+        if not py.exists():
+            raise RuntimeError("gfs parser venv missing (.venv_gfs)")
+        if profile == "outer500":
+            code = r'''
 import json, sys, xarray as xr
 import numpy as np
 pa, pp = sys.argv[1], sys.argv[2]
@@ -273,8 +299,8 @@ out = {
 }
 print(json.dumps(out, ensure_ascii=False))
 '''
-    else:
-        code = r'''
+        else:
+            code = r'''
 import json, sys, xarray as xr
 import numpy as np
 pa, pp = sys.argv[1], sys.argv[2]
@@ -352,10 +378,10 @@ out = {
 }
 print(json.dumps(out, ensure_ascii=False))
 '''
-    proc = subprocess.run([str(py), "-c", code, str(ga), str(gp)], capture_output=True, text=True, timeout=120)
-    if proc.returncode != 0:
-        raise RuntimeError(f"gfs grid parse failed: {proc.stderr.strip() or proc.stdout.strip()}")
-    parsed = json.loads(proc.stdout)
+        proc = subprocess.run([str(py), "-c", code, str(ga), str(gp)], capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0:
+            raise RuntimeError(f"gfs grid parse failed: {proc.stderr.strip() or proc.stdout.strip()}")
+        parsed = json.loads(proc.stdout)
 
     return {
         "analysis_time_utc": a_utc.strftime("%Y-%m-%dT%H:%M:00Z"),
@@ -383,23 +409,23 @@ def fetch_hourly_like(st: Any, target_date: str, cycle_tag: str, root: Path) -> 
     wanted = [d0 + timedelta(hours=h) for h in range(0, 24, 3)]
 
     out_rows: list[dict[str, Any]] = []
-    cache_root = root / "skills" / "polymarket-weatherbot" / "cache" / "runtime" / "gfs_grib"
-    for vt in wanted:
-        rt_tag_used, fh = resolve_runtime_for_valid_time(vt, cycle_tag, cycle_hours=6, max_back_cycles=3)
-        if fh < 0:
-            continue
-        rt_dt_used = runtime_dt_from_tag(rt_tag_used)
-        grib, rt_used, fh_used = _ensure_grib_with_cycle_fallback(
-            cache_root=cache_root,
-            file_suffix=".grib2",
-            runtime_dt=rt_dt_used,
-            fh=fh,
-            build_url=lambda rt, fhx: _nomads_url(rt, fhx, float(st.lat), float(st.lon)),
-            max_back_cycles=3,
-        )
-        row = _extract_point_from_grib(grib, float(st.lat), float(st.lon), root)
-        if row.get("time"):
-            out_rows.append(row)
+    with _grib_workspace(root, "gfs_grib") as cache_root:
+        for vt in wanted:
+            rt_tag_used, fh = resolve_runtime_for_valid_time(vt, cycle_tag, cycle_hours=6, max_back_cycles=3)
+            if fh < 0:
+                continue
+            rt_dt_used = runtime_dt_from_tag(rt_tag_used)
+            grib, rt_used, fh_used = _ensure_grib_with_cycle_fallback(
+                cache_root=cache_root,
+                file_suffix=".grib2",
+                runtime_dt=rt_dt_used,
+                fh=fh,
+                build_url=lambda rt, fhx: _nomads_url(rt, fhx, float(st.lat), float(st.lon)),
+                max_back_cycles=3,
+            )
+            row = _extract_point_from_grib(grib, float(st.lat), float(st.lon), root)
+            if row.get("time"):
+                out_rows.append(row)
 
     if not out_rows:
         raise RuntimeError("gfs-grib2 fetch returned no usable rows")

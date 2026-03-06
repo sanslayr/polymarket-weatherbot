@@ -25,6 +25,7 @@ from contracts import (
     FORECAST_3D_BUNDLE_SCHEMA_VERSION,
 )
 from cache_envelope import extract_payload, make_cache_doc
+from runtime_cache_policy import runtime_cache_enabled
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT / "cache" / "runtime"
@@ -41,6 +42,8 @@ def _cache_path(*parts: str) -> Path:
 
 
 def _read_cache(*parts: str, ttl_hours: int = 6) -> dict[str, Any] | None:
+    if not runtime_cache_enabled():
+        return None
     p = _cache_path(*parts)
     if not p.exists():
         return None
@@ -61,6 +64,8 @@ def _read_cache(*parts: str, ttl_hours: int = 6) -> dict[str, Any] | None:
 
 
 def _write_cache(payload: dict[str, Any], *parts: str) -> None:
+    if not runtime_cache_enabled():
+        return
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     p = _cache_path(*parts)
     doc = make_cache_doc(
@@ -73,6 +78,8 @@ def _write_cache(payload: dict[str, Any], *parts: str) -> None:
 
 
 def _write_3d_bundle(bundle: dict[str, Any], *parts: str) -> None:
+    if not runtime_cache_enabled():
+        return
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     k = _cache_key(*parts)
     p = CACHE_DIR / f"forecast_3d_bundle_{k}.json"
@@ -81,6 +88,8 @@ def _write_3d_bundle(bundle: dict[str, Any], *parts: str) -> None:
 
 def _read_recent_synoptic_bundle(*, station_icao: str, target_date: str, model: str, synoptic_provider: str, max_age_hours: int = 12) -> dict[str, Any] | None:
     """Fallback: read most recent 3D bundle for same station/date/model/provider across runtime tags."""
+    if not runtime_cache_enabled():
+        return None
     patt = str(CACHE_DIR / "forecast_3d_bundle_*.json")
     cands: list[tuple[datetime, dict[str, Any]]] = []
     for p in glob.glob(patt):

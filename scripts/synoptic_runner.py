@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from build_2d_grid_payload import build_2d_grid_payload_openmeteo
 from contracts import SYNOPTIC_CACHE_SCHEMA_VERSION
 from cache_envelope import extract_payload, make_cache_doc
+from runtime_cache_policy import runtime_cache_enabled
 from synoptic_2d_detector import analyze as analyze_synoptic_2d
 
 
@@ -25,6 +26,8 @@ def _cache_path(cache_dir: Path, kind: str, *parts: str) -> Path:
 
 
 def _read_cache(cache_dir: Path, kind: str, *parts: str) -> dict[str, Any] | None:
+    if not runtime_cache_enabled():
+        return None
     p = _cache_path(cache_dir, kind, *parts)
     if not p.exists():
         return None
@@ -46,6 +49,8 @@ def _read_cache(cache_dir: Path, kind: str, *parts: str) -> dict[str, Any] | Non
 
 
 def _write_cache(cache_dir: Path, kind: str, payload: dict[str, Any], *parts: str) -> None:
+    if not runtime_cache_enabled():
+        return
     cache_dir.mkdir(parents=True, exist_ok=True)
     p = _cache_path(cache_dir, kind, *parts)
     doc = make_cache_doc(

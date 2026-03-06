@@ -39,6 +39,11 @@ from hourly_data_service import (
 )
 from metar_utils import fetch_metar_24h
 from metar_analysis_service import metar_observation_block
+from historical_context_provider import (
+    build_historical_context,
+    historical_context_enabled,
+)
+from historical_render import render_historical_context_block
 from polymarket_render_service import _build_polymarket_section
 from report_render_service import choose_section_text
 from polymarket_client import prefetch_polymarket_event as _prefetch_polymarket_event
@@ -46,6 +51,7 @@ from station_catalog import (
     Station,
     default_model_for_station,
     direction_factor_for as _direction_factor_for,
+    factor_summary_for as _factor_summary_for,
     format_utc_offset,
     resolve_station,
     site_tag_for as _site_tag_for,
@@ -62,6 +68,41 @@ PERF_LOG_ENABLED = os.getenv("LOOK_PERF_LOG", "0") == "1"
 SYNOPTIC_PROVIDER = "gfs-grib2"
 _POLY_PREFETCH_POOL = ThreadPoolExecutor(max_workers=2)
 _METAR_FETCH_POOL = ThreadPoolExecutor(max_workers=4)
+LOOK_FORCE_LIVE_METAR = str(os.getenv("LOOK_FORCE_LIVE_METAR", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+LOOK_FORCE_LIVE_POLYMARKET = str(os.getenv("LOOK_FORCE_LIVE_POLYMARKET", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _attach_historical_context(
+    metar_diag: dict[str, Any],
+    *,
+    station_icao: str,
+    target_date: str,
+    forecast_decision: dict[str, Any] | None,
+    synoptic_context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not historical_context_enabled():
+        return None
+    historical_context = build_historical_context(
+        station_icao,
+        target_date,
+        metar_diag,
+        forecast_decision=forecast_decision,
+        synoptic_context=synoptic_context,
+        site_tag=_site_tag_for(station_icao),
+        terrain_tag=_terrain_tag_for(station_icao),
+        direction_factor=_direction_factor_for(station_icao),
+        factor_summary=_factor_summary_for(station_icao),
+    )
+    metar_diag["historical_context"] = historical_context
+    metar_diag["historical_adjustment_hint"] = historical_context.get("adjustment_hint") if isinstance(historical_context, dict) else None
+    metar_diag["historical_weighted_reference"] = historical_context.get("weighted_reference") if isinstance(historical_context, dict) else None
+    metar_diag["historical_synoptic_context"] = historical_context.get("synoptic_context") if isinstance(historical_context, dict) else None
+    metar_diag["historical_recommended_tmax_c"] = (
+        historical_context.get("weighted_reference", {}).get("recommended_tmax_c")
+        if isinstance(historical_context, dict)
+        else None
+    )
+    return historical_context
 
 
 def _perf_log(stage: str, seconds: float) -> None:
@@ -170,7 +211,7 @@ def _render_metar_only_report(
     metar24_prefetched: list[dict[str, Any]] | None = None,
 ) -> str:
     unit_pref = "F" if str(st.icao).upper().startswith("K") else "C"
-    metar24 = metar24_prefetched if metar24_prefetched is not None else fetch_metar_24h(st.icao)
+    metar24 = metar24_prefetched if metar24_prefetched is not None else fetch_metar_24h(st.icao, force_refresh=LOOK_FORCE_LIVE_METAR)
     metar_text, _metar_diag = metar_observation_block(
         metar24,
         {"time": [], "temperature_2m": [], "pressure_msl": []},
@@ -218,7 +259,7 @@ def _render_metar_only_report(
     poly_block = ""
     try:
         purl = links_payload["links"]["polymarket_event"]
-        prefetched = _prefetch_polymarket_event(purl)
+        prefetched = _prefetch_polymarket_event(purl, force_refresh=LOOK_FORCE_LIVE_POLYMARKET)
         poly_block = _build_polymarket_section(
             purl,
             pseudo_window,
@@ -239,6 +280,16 @@ def _render_metar_only_report(
         "- 说明：Open-Meteo 当前不可用，已降级为实况-only 输出；背景/窗口判断暂不展开。\n\n"
         f"{metar_text}"
     )
+    historical_context = _attach_historical_context(
+        _metar_diag,
+        station_icao=st.icao,
+        target_date=datetime.now(timezone.utc).astimezone(tz).strftime("%Y-%m-%d"),
+        forecast_decision=None,
+    )
+    if historical_context:
+        historical_block = render_historical_context_block(historical_context)
+        if historical_block:
+            body += f"\n\n{historical_block}"
     if poly_block:
         body += f"\n\n{poly_block}"
 
@@ -302,7 +353,7 @@ def render_report(command_text: str) -> str:
     if model not in {"gfs", "ecmwf"}:
         model = "gfs"
     provider = "auto"
-    metar_future = _METAR_FETCH_POOL.submit(fetch_metar_24h, st.icao)
+    metar_future = _METAR_FETCH_POOL.submit(fetch_metar_24h, st.icao, force_refresh=LOOK_FORCE_LIVE_METAR)
 
     t0 = time.perf_counter()
     provider_used = "unknown"
@@ -477,7 +528,11 @@ def render_report(command_text: str) -> str:
     try:
         purl = str((links_payload.get("links") or {}).get("polymarket_event") or "")
         if purl:
-            poly_prefetch_future = _POLY_PREFETCH_POOL.submit(_prefetch_polymarket_event, purl)
+            poly_prefetch_future = _POLY_PREFETCH_POOL.submit(
+                _prefetch_polymarket_event,
+                purl,
+                force_refresh=LOOK_FORCE_LIVE_POLYMARKET,
+            )
     except Exception:
         poly_prefetch_future = None
 
@@ -517,6 +572,7 @@ def render_report(command_text: str) -> str:
     terrain_tag = _terrain_tag_for(st.icao)
     site_tag = _site_tag_for(st.icao)
     direction_factor = _direction_factor_for(st.icao)
+    factor_summary = _factor_summary_for(st.icao)
     head_geo = f"{abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}"
     if site_tag:
         head_geo = f"{head_geo} ({site_tag})"
@@ -575,6 +631,13 @@ def render_report(command_text: str) -> str:
         except Exception:
             poly_prefetched_event = None
 
+    historical_context = _attach_historical_context(
+        metar_diag,
+        station_icao=st.icao,
+        target_date=target_date,
+        forecast_decision=forecast_decision,
+    )
+
     t0 = time.perf_counter()
     body = choose_section_text(
         primary,
@@ -587,6 +650,10 @@ def render_report(command_text: str) -> str:
         synoptic_window=analysis_window,
         polymarket_prefetched_event=poly_prefetched_event,
     )
+    if historical_context:
+        historical_block = render_historical_context_block(historical_context)
+        if historical_block:
+            body = f"{body}\n\n{historical_block}"
     _mark("render_body", time.perf_counter() - t0)
     total_elapsed = time.perf_counter() - t_e2e
 

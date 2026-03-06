@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from typing import Any
 
@@ -12,6 +13,8 @@ from polymarket_client import (
     fetch_polymarket_event_markets as _fetch_polymarket_event_markets,
     poly_slug_from_url as _poly_slug_from_url,
 )
+
+LOOK_FORCE_LIVE_POLYMARKET = str(os.getenv("LOOK_FORCE_LIVE_POLYMARKET", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _poly_num(tok: str) -> int:
@@ -105,7 +108,7 @@ def _build_polymarket_section(
     if not slug:
         return "Polymarket：未找到对应市场。"
     if prefetched_event is None:
-        event_found, markets = _fetch_polymarket_event_markets(slug)
+        event_found, markets = _fetch_polymarket_event_markets(slug, force_refresh=LOOK_FORCE_LIVE_POLYMARKET)
     else:
         event_found, markets = prefetched_event
 

@@ -1,6 +1,6 @@
 # polymarket-weatherbot
 
-Polymarket weather forecasting skill and runtime workspace backup for station-based Tmax analysis, report generation, and operational cache/state continuity.
+Polymarket weather forecasting skill for station-based Tmax analysis, report generation, and operational decision support.
 
 ## What This Repository Contains
 
@@ -8,7 +8,7 @@ Polymarket weather forecasting skill and runtime workspace backup for station-ba
 - Station catalog and metadata (`station_links.csv`) with per-station operational links
 - Forecast/synoptic analysis modules used by `/look` command flow
 - Docs covering architecture, operation guardrails, review records, and research handoff notes
-- Runtime/cache snapshots and local workspace state for backup continuity
+- Runtime logic and lightweight local state handling used by the forecasting workflow
 
 ## Key Entry Points
 
@@ -20,5 +20,5 @@ Polymarket weather forecasting skill and runtime workspace backup for station-ba
 
 ## Notes
 
-- This repository intentionally includes runtime/cache data for backup purposes.
-- If you want a code-only branch later, create a new branch and add a strict `.gitignore` policy.
+- Runtime/cache artifacts are not part of the source tree and should stay ignored.
+- Large binary forecast caches such as `grib2` files should be treated as ephemeral runtime data only.

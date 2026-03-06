@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from runtime_cache_policy import runtime_cache_enabled
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT / "cache" / "runtime"
@@ -47,6 +48,8 @@ def _read_cache(
     allow_stale: bool = False,
     stale_max_hours: float = 36.0,
 ) -> list[dict[str, Any]] | None:
+    if not runtime_cache_enabled():
+        return None
     p = _cache_file(icao)
     if not p.exists():
         return None
@@ -69,6 +72,8 @@ def _read_cache(
 
 
 def _write_cache(icao: str, payload: list[dict[str, Any]], now_utc: datetime, ttl_minutes: int = 15) -> None:
+    if not runtime_cache_enabled():
+        return
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     doc = {
         "updated_at_utc": _iso_utc(now_utc),
@@ -78,11 +83,12 @@ def _write_cache(icao: str, payload: list[dict[str, Any]], now_utc: datetime, tt
     _cache_file(icao).write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
 
 
-def fetch_metar_24h(icao: str) -> list[dict[str, Any]]:
+def fetch_metar_24h(icao: str, *, force_refresh: bool = False) -> list[dict[str, Any]]:
     now_utc = datetime.now(timezone.utc)
-    cached = _read_cache(icao, now_utc)
-    if cached is not None:
-        return cached
+    if not force_refresh:
+        cached = _read_cache(icao, now_utc)
+        if cached is not None:
+            return cached
 
     url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=json&hours=24"
     for _ in range(1, 4):

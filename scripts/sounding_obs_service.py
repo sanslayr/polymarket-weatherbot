@@ -11,6 +11,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from station_catalog import Station, station_meta_for
+from runtime_cache_policy import runtime_cache_enabled
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT / "cache" / "runtime"
@@ -120,6 +121,8 @@ def _can_reuse_stale_payload(payload: dict[str, Any], now_utc: datetime, updated
 
 
 def _read_cache(icao: str, now_utc: datetime, *, allow_stale: bool = False) -> dict[str, Any] | None:
+    if not runtime_cache_enabled():
+        return None
     p = _cache_file(icao)
     if not p.exists():
         return None
@@ -140,6 +143,8 @@ def _read_cache(icao: str, now_utc: datetime, *, allow_stale: bool = False) -> d
 
 
 def _write_cache(icao: str, payload: dict[str, Any], now_utc: datetime, ttl_minutes: int) -> None:
+    if not runtime_cache_enabled():
+        return
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     p = _cache_file(icao)
     doc = {

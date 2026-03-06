@@ -11,6 +11,7 @@ import requests
 
 import build_station_links as BSL
 from cache_envelope import extract_payload, make_cache_doc
+from runtime_cache_policy import runtime_cache_enabled
 from station_catalog import Station
 from window_phase_engine import pick_peak_indices
 
@@ -22,6 +23,8 @@ OPENMETEO_BREAKER_FILE = CACHE_DIR / "openmeteo_breaker.json"
 
 
 def _openmeteo_breaker_info() -> tuple[bool, datetime | None, str | None]:
+    if not runtime_cache_enabled():
+        return False, None, None
     try:
         if not OPENMETEO_BREAKER_FILE.exists():
             return False, None, None
@@ -57,6 +60,8 @@ def _retry_after_seconds_from_exc(exc: Exception) -> int | None:
 
 
 def _trip_openmeteo_breaker(reason: str = "429", seconds: int | None = None) -> None:
+    if not runtime_cache_enabled():
+        return
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         sec = int(seconds if seconds is not None else OPENMETEO_BREAKER_SECONDS)
@@ -76,6 +81,8 @@ def _cache_path(kind: str, *parts: str) -> Path:
 
 
 def _read_cache(kind: str, *parts: str, ttl_hours: int = CACHE_TTL_HOURS, allow_stale: bool = False) -> dict[str, Any] | None:
+    if not runtime_cache_enabled():
+        return None
     p = _cache_path(kind, *parts)
     if not p.exists():
         return None
@@ -94,6 +101,8 @@ def _read_cache(kind: str, *parts: str, ttl_hours: int = CACHE_TTL_HOURS, allow_
 
 
 def _write_cache(kind: str, payload: dict[str, Any], *parts: str) -> None:
+    if not runtime_cache_enabled():
+        return
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     p = _cache_path(kind, *parts)
     doc = make_cache_doc(

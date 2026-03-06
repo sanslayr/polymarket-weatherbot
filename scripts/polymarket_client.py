@@ -19,12 +19,18 @@ def poly_slug_from_url(polymarket_event_url: str) -> str:
     return str(polymarket_event_url or "").rstrip("/").split("/")[-1]
 
 
-def fetch_polymarket_event_markets(slug: str, timeout: float | None = None) -> tuple[bool, list[dict[str, Any]]]:
+def fetch_polymarket_event_markets(
+    slug: str,
+    timeout: float | None = None,
+    *,
+    force_refresh: bool = False,
+) -> tuple[bool, list[dict[str, Any]]]:
     now_ts = time.time()
-    with _POLY_EVENT_CACHE_LOCK:
-        hit = _POLY_EVENT_CACHE.get(slug)
-        if hit and hit[0] > now_ts:
-            return hit[1], list(hit[2])
+    if not force_refresh:
+        with _POLY_EVENT_CACHE_LOCK:
+            hit = _POLY_EVENT_CACHE.get(slug)
+            if hit and hit[0] > now_ts:
+                return hit[1], list(hit[2])
 
     r = requests.get(
         "https://gamma-api.polymarket.com/events",
@@ -51,11 +57,15 @@ def fetch_polymarket_event_markets(slug: str, timeout: float | None = None) -> t
     return event_found, markets
 
 
-def prefetch_polymarket_event(polymarket_event_url: str) -> tuple[bool, list[dict[str, Any]]] | None:
+def prefetch_polymarket_event(
+    polymarket_event_url: str,
+    *,
+    force_refresh: bool = False,
+) -> tuple[bool, list[dict[str, Any]]] | None:
     try:
         slug = poly_slug_from_url(polymarket_event_url)
         if not slug:
             return None
-        return fetch_polymarket_event_markets(slug)
+        return fetch_polymarket_event_markets(slug, force_refresh=force_refresh)
     except Exception:
         return None

@@ -8,6 +8,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
+from condition_state import build_condition_context, build_live_condition_signals
 from market_label_policy import build_market_label_policy
 from param_store import load_tmax_learning_params
 from polymarket_render_service import _build_polymarket_section
@@ -803,10 +804,11 @@ def _build_vars_and_market_blocks(
 ) -> tuple[list[str], str, str]:
     vars_block = [f"⚠️ **关注变量**（{PHASE_LABELS.get(phase_now, PHASE_LABELS['unknown'])}）"]
     obs_analysis_lines: list[str] = []
+    signals = build_live_condition_signals(metar_diag)
 
-    t_bias = metar_diag.get("temp_bias_smooth_c") if metar_diag.get("temp_bias_smooth_c") is not None else metar_diag.get("temp_bias_c")
-    t_tr = metar_diag.get("temp_trend_smooth_c") if metar_diag.get("temp_trend_smooth_c") is not None else metar_diag.get("temp_trend_1step_c")
-    cloud_tr = str(metar_diag.get("cloud_trend") or "")
+    t_bias = signals.get("temp_bias_c")
+    t_tr = signals.get("temp_trend_c")
+    cloud_tr = str(signals.get("cloud_trend") or "")
     focus: list[tuple[float, str]] = []
 
     def _fallback_vars(exc: Exception | None = None) -> list[str]:
@@ -943,7 +945,7 @@ def _build_vars_and_market_blocks(
     except Exception:
         bv_s = 0.0
     try:
-        wd_s = float(metar_diag.get("wind_dir_change_deg") or 0.0)
+        wd_s = float(signals.get("wind_dir_change_deg") or 0.0)
     except Exception:
         wd_s = 0.0
     quiet_baseline = bool(
@@ -992,7 +994,7 @@ def _build_vars_and_market_blocks(
     # 基于METAR多层云量 + 天气现象的有效辐射因子（0~1）
     if phase_now in {"near_window", "in_window"}:
         try:
-            rad_eff_focus = float(metar_diag.get("radiation_eff_smooth")) if metar_diag.get("radiation_eff_smooth") is not None else None
+            rad_eff_focus = float(signals.get("radiation_eff")) if signals.get("radiation_eff") is not None else None
         except Exception:
             rad_eff_focus = None
         try:
@@ -1011,7 +1013,7 @@ def _build_vars_and_market_blocks(
     try:
         wdir = metar_diag.get("latest_wdir")
         wspd = metar_diag.get("latest_wspd")
-        wdchg = float(metar_diag.get("wind_dir_change_deg") or 0.0)
+        wdchg = float(signals.get("wind_dir_change_deg") or 0.0)
         st_lat = float(metar_diag.get("station_lat") or 0.0)
         nh = st_lat >= 0
         warm_sector = "偏南到西南" if nh else "偏北到西北"
@@ -1159,7 +1161,7 @@ def _build_vars_and_market_blocks(
             except Exception:
                 bv_far = 0.0
             try:
-                wd_far = float(metar_diag.get("wind_dir_change_deg") or 0.0)
+                wd_far = float(signals.get("wind_dir_change_deg") or 0.0)
             except Exception:
                 wd_far = 0.0
             active_far = (
@@ -1257,86 +1259,6 @@ def _build_vars_and_market_blocks(
         poly_block = ""
 
     return vars_block, metar_block, poly_block
-
-
-def _build_condition_state(
-    primary_window: dict[str, Any],
-    metar_diag: dict[str, Any],
-    forecast_decision: dict[str, Any] | None,
-    synoptic_window: dict[str, Any] | None,
-) -> dict[str, Any]:
-    fdec = forecast_decision if isinstance(forecast_decision, dict) else {}
-    d = (fdec.get("decision") or {}) if isinstance(fdec, dict) else {}
-    bg = (d.get("background") or fdec.get("background") or {}) if isinstance(fdec, dict) else {}
-    quality = (fdec.get("quality") or {}) if isinstance(fdec, dict) else {}
-
-    meta_window = (((fdec.get("meta") or {}).get("window")) if isinstance(fdec, dict) else {}) or {}
-    if isinstance(synoptic_window, dict) and synoptic_window.get("start_local") and synoptic_window.get("end_local"):
-        syn_w = synoptic_window
-    elif isinstance(meta_window, dict) and meta_window.get("start_local") and meta_window.get("end_local"):
-        syn_w = meta_window
-    else:
-        syn_w = primary_window
-
-    post_focus_active = bool(metar_diag.get("post_focus_window_active"))
-    calc_window = syn_w if post_focus_active else primary_window
-
-    line500 = str(bg.get("line_500") or "高空背景信号有限。")
-    line850 = str(bg.get("line_850") or "低层输送信号一般。")
-    extra = str(bg.get("extra") or "")
-    h700_summary = str((((fdec.get("features") or {}).get("h700") or {}).get("summary") if isinstance(fdec, dict) else "") or "")
-    h925_summary = str((((fdec.get("features") or {}).get("h925") or {}).get("summary") if isinstance(fdec, dict) else "") or "")
-    snd_thermo = ((((fdec.get("features") or {}).get("sounding") or {}).get("thermo") if isinstance(fdec, dict) else None) or {})
-    cloud_code_now = str(metar_diag.get("latest_cloud_code") or "").upper()
-    precip_state = str(metar_diag.get("latest_precip_state") or "none").lower()
-    precip_trend = str(metar_diag.get("precip_trend") or "none").lower()
-    candidates = (((fdec.get("features") or {}).get("objects_3d") or {}).get("candidates") or []) if isinstance(fdec, dict) else []
-
-    try:
-        cov = float((quality or {}).get("synoptic_coverage")) if (quality or {}).get("synoptic_coverage") is not None else None
-    except Exception:
-        cov = None
-
-    def _conf_ord(x: str) -> int:
-        return {"high": 3, "medium": 2, "low": 1}.get(str(x or "").lower(), 0)
-
-    raw_obj = (d.get("object_3d_main") or {}) if isinstance(d, dict) else {}
-    obj = dict(raw_obj) if isinstance(raw_obj, dict) else {}
-    if cov is not None and cov < 0.5:
-        obj = {}
-    elif obj and _conf_ord(obj.get("confidence")) <= 1:
-        alt = None
-        for c in candidates:
-            if not isinstance(c, dict):
-                continue
-            if _conf_ord(c.get("confidence")) >= 2:
-                alt = c
-                break
-        if alt is not None:
-            obj = dict(alt)
-            obj["_promoted_from_candidate"] = True
-        else:
-            obj = {}
-
-    return {
-        "fdec": fdec,
-        "d": d,
-        "quality": quality,
-        "syn_w": syn_w,
-        "calc_window": calc_window,
-        "line500": line500,
-        "line850": line850,
-        "extra": extra,
-        "h700_summary": h700_summary,
-        "h925_summary": h925_summary,
-        "snd_thermo": snd_thermo,
-        "cloud_code_now": cloud_code_now,
-        "precip_state": precip_state,
-        "precip_trend": precip_trend,
-        "candidates": candidates,
-        "cov": cov,
-        "obj": obj,
-    }
 
 
 def _build_metar_block(
@@ -1475,12 +1397,13 @@ def choose_section_text(
         # Relative clear-sky radiation shape (slightly convex to represent midday dominance)
         return max(0.0, min(1.0, cosz ** 1.15))
 
-    state = _build_condition_state(
+    state = build_condition_context(
         primary_window=primary_window,
         metar_diag=metar_diag,
         forecast_decision=forecast_decision,
         synoptic_window=synoptic_window,
     )
+    signals = build_live_condition_signals(metar_diag)
 
     fdec = state["fdec"]
     d = state["d"]
@@ -1584,8 +1507,8 @@ def choose_section_text(
     core_lo = peak_data["core_lo"]
     core_hi = peak_data["core_hi"]
 
-    t_bias = metar_diag.get("temp_bias_smooth_c") if metar_diag.get("temp_bias_smooth_c") is not None else metar_diag.get("temp_bias_c")
-    t_tr = metar_diag.get("temp_trend_smooth_c") if metar_diag.get("temp_trend_smooth_c") is not None else metar_diag.get("temp_trend_1step_c")
+    t_bias = signals.get("temp_bias_c")
+    t_tr = signals.get("temp_trend_c")
 
     vars_block, metar_block, poly_block = _build_vars_and_market_blocks(
         primary_window=primary_window,
