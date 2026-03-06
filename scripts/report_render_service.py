@@ -1081,7 +1081,7 @@ def _build_vars_and_market_blocks(
 
     # P1 short-term triggers (window-gated)
     try:
-        rt_triggers = select_realtime_triggers(primary_window, metar_diag)
+        rt_triggers = select_realtime_triggers(primary_window, metar_diag, temp_unit=unit)
         if next_key_report_txt and phase_now in {"near_window", "in_window", "post"} and (not bool(metar_diag.get("metar_speci_active"))):
             if cad_min is not None and 20.0 <= cad_min <= 90.0:
                 cad_txt = f"约每{int(round(cad_min / 5.0) * 5)}分钟"

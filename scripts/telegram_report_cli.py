@@ -44,7 +44,6 @@ from historical_context_provider import (
     historical_context_enabled,
 )
 from historical_payload import attach_historical_payload
-from historical_render import render_historical_context_block
 from polymarket_render_service import _build_polymarket_section
 from report_render_service import choose_section_text
 from polymarket_client import prefetch_polymarket_event as _prefetch_polymarket_event
@@ -213,6 +212,14 @@ def _render_metar_only_report(
     )
     mgm_ref = _fetch_mgm_reference(st)
     if mgm_ref:
+        def _fmt_temp_ref(v_c: Any) -> str:
+            try:
+                v = float(v_c)
+            except Exception:
+                return str(v_c)
+            if unit_pref == "F":
+                return f"{(v * 9.0 / 5.0 + 32.0):.1f}°F"
+            return f"{v:.1f}°C"
         try:
             t = float(mgm_ref.get("temp_c")) if mgm_ref.get("temp_c") is not None else None
         except Exception:
@@ -221,7 +228,7 @@ def _render_metar_only_report(
         vz_txt = vz[11:16] + "Z" if ("T" in vz and len(vz) >= 16) else "--:--Z"
         bits = [f"- MGM参考（{vz_txt}）"]
         if t is not None:
-            bits.append(f"T={t:.1f}°C")
+            bits.append(f"T={_fmt_temp_ref(t)}")
         if mgm_ref.get("rh") is not None:
             bits.append(f"RH={mgm_ref.get('rh')}%")
         metar_text = metar_text + "\n" + "，".join(bits)
@@ -279,10 +286,6 @@ def _render_metar_only_report(
         target_date=datetime.now(timezone.utc).astimezone(tz).strftime("%Y-%m-%d"),
         forecast_decision=None,
     )
-    if historical_context:
-        historical_block = render_historical_context_block(historical_context)
-        if historical_block:
-            body += f"\n\n{historical_block}"
     if poly_block:
         body += f"\n\n{poly_block}"
 
@@ -406,6 +409,14 @@ def render_report(command_text: str) -> str:
     )
     mgm_ref = _fetch_mgm_reference(st)
     if mgm_ref:
+        def _fmt_temp_ref(v_c: Any) -> str:
+            try:
+                v = float(v_c)
+            except Exception:
+                return str(v_c)
+            if unit_pref == "F":
+                return f"{(v * 9.0 / 5.0 + 32.0):.1f}°F"
+            return f"{v:.1f}°C"
         try:
             t = float(mgm_ref.get("temp_c")) if mgm_ref.get("temp_c") is not None else None
         except Exception:
@@ -414,7 +425,7 @@ def render_report(command_text: str) -> str:
         vz_txt = vz[11:16] + "Z" if ("T" in vz and len(vz) >= 16) else "--:--Z"
         extra = [f"- MGM参考（{vz_txt}）"]
         if t is not None:
-            extra.append(f"T={t:.1f}°C")
+            extra.append(f"T={_fmt_temp_ref(t)}")
         rh = mgm_ref.get("rh")
         if rh is not None:
             extra.append(f"RH={rh}%")
@@ -643,10 +654,6 @@ def render_report(command_text: str) -> str:
         synoptic_window=analysis_window,
         polymarket_prefetched_event=poly_prefetched_event,
     )
-    if historical_context:
-        historical_block = render_historical_context_block(historical_context)
-        if historical_block:
-            body = f"{body}\n\n{historical_block}"
     _mark("render_body", time.perf_counter() - t0)
     total_elapsed = time.perf_counter() - t_e2e
 

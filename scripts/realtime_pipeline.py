@@ -14,6 +14,26 @@ def _dt(s: Any) -> datetime | None:
         return None
 
 
+def _fmt_temp_unit(value_c: Any, unit: str) -> str:
+    try:
+        v = float(value_c)
+    except Exception:
+        return str(value_c)
+    if str(unit).upper() == "F":
+        return f"{(v * 9.0 / 5.0 + 32.0):.1f}°F"
+    return f"{v:.1f}°C"
+
+
+def _fmt_delta_unit(delta_c: Any, unit: str) -> str:
+    try:
+        v = float(delta_c)
+    except Exception:
+        return str(delta_c)
+    if str(unit).upper() == "F":
+        return f"{(v * 9.0 / 5.0):.1f}°F"
+    return f"{v:.1f}°C"
+
+
 def classify_window_phase(primary_window: dict[str, Any], metar_diag: dict[str, Any]) -> dict[str, Any]:
     model_start = _dt(primary_window.get("start_local"))
     model_end = _dt(primary_window.get("end_local"))
@@ -80,7 +100,7 @@ def classify_window_phase(primary_window: dict[str, Any], metar_diag: dict[str, 
     }
 
 
-def select_realtime_triggers(primary_window: dict[str, Any], metar_diag: dict[str, Any]) -> list[str]:
+def select_realtime_triggers(primary_window: dict[str, Any], metar_diag: dict[str, Any], *, temp_unit: str = "C") -> list[str]:
     phase = classify_window_phase(primary_window, metar_diag).get("phase", "unknown")
     t_src = metar_diag.get("temp_trend_smooth_c") if metar_diag.get("temp_trend_smooth_c") is not None else metar_diag.get("temp_trend_1step_c")
     t_tr = float(t_src or 0.0)
@@ -124,11 +144,11 @@ def select_realtime_triggers(primary_window: dict[str, Any], metar_diag: dict[st
             need = max(0.0, obs_max - t_now + 0.1)
             if need >= 0.8:
                 if wet_now or cloudy_now or t_tr <= 0.2:
-                    out.append(f"• 反超前高门槛：还差约{need:.1f}°C；当前云雨/弱斜率背景下，反超概率偏低。")
+                    out.append(f"• 反超前高门槛：还差约{_fmt_delta_unit(need, temp_unit)}；当前云雨/弱斜率背景下，反超概率偏低。")
                 else:
-                    out.append(f"• 反超前高门槛：还差约{need:.1f}°C；需连续2报升温且云层继续开窗，才有机会改写前高。")
+                    out.append(f"• 反超前高门槛：还差约{_fmt_delta_unit(need, temp_unit)}；需连续2报升温且云层继续开窗，才有机会改写前高。")
             elif need >= 0.3:
-                out.append(f"• 接近前高（差约{need:.1f}°C）：未来1小时若维持正斜率并减云，可小幅反超。")
+                out.append(f"• 接近前高（差约{_fmt_delta_unit(need, temp_unit)}）：未来1小时若维持正斜率并减云，可小幅反超。")
             elif t_tr >= 0.3 and (not wet_now) and (not cloudy_now):
                 out.append("• 已贴近前高：若下一报继续升温且不回补云层，存在小幅反超机会。")
             else:

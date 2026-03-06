@@ -3,7 +3,28 @@ from __future__ import annotations
 from typing import Any
 
 
-def diagnose_sounding(primary_window: dict[str, Any], metar_diag: dict[str, Any]) -> dict[str, Any]:
+def _fmt_temp_unit(value_c: Any, unit: str) -> str:
+    try:
+        v = float(value_c)
+    except Exception:
+        return str(value_c)
+    if str(unit).upper() == "F":
+        return f"{(v * 9.0 / 5.0 + 32.0):.1f}°F"
+    return f"{v:.1f}°C"
+
+
+def _fmt_delta_unit(value_c: Any, unit: str, force_sign: bool = False) -> str:
+    try:
+        v = float(value_c)
+    except Exception:
+        return str(value_c)
+    if str(unit).upper() == "F":
+        out = v * 9.0 / 5.0
+        return f"{out:+.1f}°F" if force_sign else f"{out:.1f}°F"
+    return f"{v:+.1f}°C" if force_sign else f"{v:.1f}°C"
+
+
+def diagnose_sounding(primary_window: dict[str, Any], metar_diag: dict[str, Any], *, temp_unit: str = "C") -> dict[str, Any]:
     t850 = primary_window.get("t850_c")
     w850 = primary_window.get("w850_kmh")
     cloud = primary_window.get("low_cloud_pct")
@@ -24,13 +45,13 @@ def diagnose_sounding(primary_window: dict[str, Any], metar_diag: dict[str, Any]
             items.append(f"低云较少（CloudLow≈{cloud:.0f}%），辐射增温条件较好")
 
     if t850 is not None:
-        items.append(f"850层热力背景：T850≈{t850:.1f}°C")
+        items.append(f"850层热力背景：T850≈{_fmt_temp_unit(t850, temp_unit)}")
 
     if temp_bias is not None:
         if temp_bias >= 1.0:
-            items.append(f"实况较模型偏暖（+{temp_bias:.1f}°C），短临上沿可上修")
+            items.append(f"实况较模型偏暖（{_fmt_delta_unit(temp_bias, temp_unit, force_sign=True)}），短临上沿可上修")
         elif temp_bias <= -1.0:
-            items.append(f"实况较模型偏冷（{temp_bias:.1f}°C），短临上沿需下修")
+            items.append(f"实况较模型偏冷（{_fmt_delta_unit(temp_bias, temp_unit, force_sign=True)}），短临上沿需下修")
 
     # Thermodynamic diagnostics: consume explicit sounding-derived fields if upstream provides them.
     thermo = {

@@ -9,7 +9,7 @@ from typing import Any
 
 from metar_utils import observed_max_interval_c as _observed_max_interval_c
 from realtime_pipeline import classify_window_phase
-from historical_payload import get_weighted_reference
+from historical_payload import get_historical_payload, get_weighted_reference
 from historical_strategy import blend_historical_range
 
 
@@ -59,6 +59,36 @@ def _hm(s: Any) -> str:
         return str(s)
 
 
+def _fmt_hour_float(value: Any) -> str:
+    v = _safe_float(value)
+    if v is None:
+        return "n/a"
+    total_minutes = max(0, int(round(v * 60.0)))
+    hour = (total_minutes // 60) % 24
+    minute = total_minutes % 60
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _fmt_temp_unit(value_c: Any, unit: str) -> str:
+    v = _safe_float(value_c)
+    if v is None:
+        return "n/a"
+    if str(unit).upper() == "F":
+        value = v * 9.0 / 5.0 + 32.0
+        return f"{value:.1f}°F"
+    return f"{v:.1f}°C"
+
+
+def _fmt_delta_unit(delta_c: Any, unit: str) -> str:
+    v = _safe_float(delta_c)
+    if v is None:
+        return "n/a"
+    if str(unit).upper() == "F":
+        value = v * 9.0 / 5.0
+        return f"{value:+.1f}°F"
+    return f"{v:+.1f}°C"
+
+
 def _contains_any_text(text: str, keys: list[str]) -> bool:
     s = str(text or "")
     return any(k in s for k in keys)
@@ -71,6 +101,14 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _pick_prefixed_line(lines: list[str], prefix: str) -> str | None:
+    for line in lines:
+        text = str(line or "").strip()
+        if text.startswith(prefix):
+            return text[len(prefix):].strip()
+    return None
 
 
 def _is_generic_500_text(s: str) -> bool:
@@ -1382,10 +1420,27 @@ def _build_peak_range_module(
             selected_dates = [str(item) for item in (weighted.get("selected_dates") or []) if str(item).strip()]
         else:
             selected_dates = []
-        date_txt = f"，参考日 {' / '.join(selected_dates[:3])}" if selected_dates else ""
+        date_txt = f"，参考日 {' / '.join(selected_dates[:3])} " if selected_dates else ""
         peak_range_block.append(
-            f"- 注：已纳入历史 analog 数值校正{branch_txt}{date_txt}，参考强度 {strength_cn}，区间中心修正 {float(historical_blend.get('shift_c') or 0.0):+.1f}°C。"
+            f"- 注：已参考相似历史日{branch_txt}{date_txt}做校正，参考强度 {strength_cn}，区间中心修正 {_fmt_delta_unit(historical_blend.get('shift_c'), unit)}。"
         )
+        historical_payload = get_historical_payload(metar_diag)
+        historical_context = (historical_payload or {}).get("context") if isinstance(historical_payload, dict) else None
+        if isinstance(historical_context, dict):
+            summary_lines = [str(item) for item in (historical_context.get("summary_lines") or []) if str(item).strip()]
+            current_match = _pick_prefixed_line(summary_lines, "当前实况匹配：")
+            weighted = get_weighted_reference(metar_diag) or {}
+            weighted_center = _safe_float(weighted.get("recommended_tmax_c"))
+            weighted_peak = _safe_float(weighted.get("peak_center_hour_local"))
+            detail_bits: list[str] = []
+            if current_match:
+                detail_bits.append(f"当前匹配 {current_match}")
+            if weighted_center is not None:
+                detail_bits.append(f"加权参考中心 {_fmt_temp_unit(weighted_center, unit)}")
+            if weighted_peak is not None:
+                detail_bits.append(f"历史峰值约 {_fmt_hour_float(weighted_peak)}")
+            if detail_bits:
+                peak_range_block.append(f"- 历史参考摘要：{'；'.join(detail_bits)}。")
         notes = [str(item) for item in (historical_blend.get("policy_notes") or []) if str(item).strip()]
         if notes:
             peak_range_block.append(f"- 历史融合权衡：{'；'.join(notes[:3])}。")
