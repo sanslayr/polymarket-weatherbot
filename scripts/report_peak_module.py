@@ -100,7 +100,7 @@ def _date_span_text(dates: list[str]) -> str:
         ordered = cleaned
     if len(ordered) == 1:
         return ordered[0]
-    return f"{ordered[0]}/{ordered[-1]}"
+    return f"{ordered[0]}&{ordered[-1]}"
 
 
 def _reference_degree_text(text: str) -> str:
