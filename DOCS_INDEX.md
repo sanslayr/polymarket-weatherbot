@@ -29,6 +29,8 @@ Last updated: 2026-03-03
 ### B. Operations（运维与变更）
 - `docs/operations/LOG_ARCHIVE_POLICY.md`
 - `docs/operations/LOOK_FIX_REGISTRY_2026-03.md`
+- `docs/operations/SOUNDING_OBS_ANALYSIS_PIPELINE.md`
+- `docs/operations/city-background/README.md`
 
 ### C. Reviews（历史复盘）
 - `docs/reviews/FORECAST_MODULE_REVIEW_2026-03-01.md`
@@ -49,6 +51,7 @@ Last updated: 2026-03-03
 - **技术实现细节变更**（市场解析/数据精度/渲染）→ 改 `docs/core/TECHNICAL_IMPLEMENTATION_NOTES.md`
 - **输出口径变更** → 改 `docs/core/LOOK_OUTPUT_CONTRACT.md`
 - **日志与归档治理变更** → 改 `docs/operations/LOG_ARCHIVE_POLICY.md`
+- **探空实测接入/时效/代表性策略变更** → 改 `docs/operations/SOUNDING_OBS_ANALYSIS_PIPELINE.md`
 - 所有重要改动统一记入 `docs/operations/LOOK_FIX_REGISTRY_2026-03.md`
 
 ---

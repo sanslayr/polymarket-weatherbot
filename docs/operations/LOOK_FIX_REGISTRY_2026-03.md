@@ -137,6 +137,17 @@ Last updated: 2026-03-03
   - `AGENTS.md`
   - `workspace/AGENTS.md`
 
+## 12) 2026-03-06 探空实测接入硬规则收口
+
+- 新增/更新运行规范文档：`docs/operations/SOUNDING_OBS_ANALYSIS_PIPELINE.md`
+- 核心硬规则：
+  - 探空实测必须在 **24h 内**，超时直接禁用实测探空；
+  - 距离 `>150km` 或地形区不一致（含大湖两侧/明显地形屏障）直接禁用实测探空；
+  - 低代表性不做降级加权，直接走“模式剖面 + 本地METAR”。
+- 站点侧约束：
+  - Toronto 不采用 Buffalo（地形/下垫面代表性不一致）；
+  - Seoul 指定 Incheon 站点；若 24h 内无实测则仍禁用实测探空。
+
 ---
 
 ## 仍在持续优化（未封板）
