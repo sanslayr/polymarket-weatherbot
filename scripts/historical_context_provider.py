@@ -20,9 +20,11 @@ from condition_state import build_live_condition_signals, extract_hour, extract_
 from synoptic_adjustment_context import branch_alignment, build_synoptic_adjustment_context
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_REFERENCE_DIR = ROOT / "cache" / "historical_reference"
+DEFAULT_REFERENCE_DIR = ROOT / "data" / "historical_reference"
+LEGACY_CACHE_REFERENCE_DIR = ROOT / "cache" / "historical_reference"
 ARCHIVE_REFERENCE_CANDIDATES = (
     DEFAULT_REFERENCE_DIR,
+    LEGACY_CACHE_REFERENCE_DIR,
     ROOT.parent / "polymarket-weather-archive" / "reports",
     Path("/Users/ham/polymarket-weather-archive/reports"),
 )
@@ -31,7 +33,9 @@ PRIOR_FILE = "weatherbot_station_priors.csv"
 DAILY_FILE = "weatherbot_daily_local_regimes.csv"
 MONTHLY_FILE = "weatherbot_monthly_climatology.csv"
 REFERENCE_MD = "weatherbot_metar_reference.md"
+DEFAULT_RAW_DIR = DEFAULT_REFERENCE_DIR / "raw_metar_isd"
 ARCHIVE_RAW_CANDIDATES = (
+    DEFAULT_RAW_DIR,
     ROOT.parent / "polymarket-weather-archive" / "data" / "raw" / "metar_isd",
     Path("/Users/ham/polymarket-weather-archive/data/raw/metar_isd"),
 )

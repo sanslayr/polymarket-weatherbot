@@ -2,7 +2,7 @@
 
 ## Goal
 
-Feed lightweight archive outputs into `weatherbot` without shipping raw multi-GB historical data into the online path.
+Feed archive-derived METAR reference outputs into `weatherbot` in a self-contained way, including raw station observations needed for intraday analog matching.
 
 ## Current Online Inputs
 
@@ -13,15 +13,24 @@ Feed lightweight archive outputs into `weatherbot` without shipping raw multi-GB
 - `weatherbot_monthly_climatology.csv`
 - `weatherbot_metar_reference.md` (optional human reference)
 
-Default lookup order:
+Default lookup order (unless `WEATHERBOT_HISTORICAL_DIR` is explicitly set, which overrides all defaults):
 
-1. `cache/historical_reference/`
-2. sibling archive repo: `../polymarket-weather-archive/reports`
-3. explicit env override: `WEATHERBOT_HISTORICAL_DIR`
+1. `data/historical_reference/`
+2. `cache/historical_reference/` (legacy fallback)
+3. sibling archive repo: `../polymarket-weather-archive/reports`
+
+Repo-local raw METAR/ISD for intraday analog matching:
+
+- `data/historical_reference/raw_metar_isd/`
+
+Raw lookup order (unless `WEATHERBOT_HISTORICAL_RAW_DIR` is explicitly set, which overrides all defaults):
+
+1. `data/historical_reference/raw_metar_isd/`
+2. sibling archive repo raw path
 
 ## Sync Workflow
 
-Copy fresh archive outputs into weatherbot cache:
+Copy fresh archive outputs into weatherbot data:
 
 ```bash
 python3 scripts/sync_historical_reference.py
@@ -31,7 +40,8 @@ Custom source:
 
 ```bash
 python3 scripts/sync_historical_reference.py \
-  --source-dir /path/to/polymarket-weather-archive/reports
+  --reports-source-dir /path/to/polymarket-weather-archive/reports \
+  --raw-source-dir /path/to/polymarket-weather-archive/data/raw/metar_isd
 ```
 
 ## Runtime Behavior
