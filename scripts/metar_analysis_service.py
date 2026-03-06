@@ -24,7 +24,18 @@ def metar_observation_block(
     temp_unit: str = "C",
 ) -> tuple[str, dict[str, Any]]:
     if not metar24:
-        return "无可用METAR数据。", {}
+        try:
+            tz = ZoneInfo(tz_name)
+            now_local = datetime.now(tz)
+            now_utc = now_local.astimezone(ZoneInfo("UTC"))
+            diag = {
+                "metar_unavailable": True,
+                "latest_report_local": now_local.strftime("%Y-%m-%dT%H:%M"),
+                "latest_report_utc": now_utc.strftime("%Y-%m-%dT%H:%MZ"),
+            }
+        except Exception:
+            diag = {"metar_unavailable": True}
+        return "无可用METAR数据。", diag
 
     series = sorted(metar24, key=lambda x: x.get("reportTime", ""))
     latest = series[-1]
