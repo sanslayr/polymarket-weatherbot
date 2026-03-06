@@ -9,6 +9,7 @@ from typing import Any
 
 from metar_utils import observed_max_interval_c as _observed_max_interval_c
 from realtime_pipeline import classify_window_phase
+from historical_payload import get_weighted_reference
 
 
 def _parse_iso_dt(v: Any) -> datetime | None:
@@ -253,7 +254,7 @@ def _apply_historical_reference(
     disp_lo: float,
     disp_hi: float,
 ) -> tuple[float, float, float, float, dict[str, Any] | None]:
-    weighted = metar_diag.get("historical_weighted_reference")
+    weighted = get_weighted_reference(metar_diag)
     if not isinstance(weighted, dict) or compact_settled_mode:
         return core_lo, core_hi, disp_lo, disp_hi, None
 
@@ -1421,7 +1422,7 @@ def _build_peak_range_module(
         )
         branch = str(historical_blend.get("selected_branch") or "")
         branch_txt = f"（{branch}）" if branch else ""
-        weighted = metar_diag.get("historical_weighted_reference")
+        weighted = get_weighted_reference(metar_diag)
         if isinstance(weighted, dict):
             selected_dates = [str(item) for item in (weighted.get("selected_dates") or []) if str(item).strip()]
         else:

@@ -43,6 +43,7 @@ from historical_context_provider import (
     build_historical_context,
     historical_context_enabled,
 )
+from historical_payload import attach_historical_payload
 from historical_render import render_historical_context_block
 from polymarket_render_service import _build_polymarket_section
 from report_render_service import choose_section_text
@@ -93,15 +94,7 @@ def _attach_historical_context(
         direction_factor=_direction_factor_for(station_icao),
         factor_summary=_factor_summary_for(station_icao),
     )
-    metar_diag["historical_context"] = historical_context
-    metar_diag["historical_adjustment_hint"] = historical_context.get("adjustment_hint") if isinstance(historical_context, dict) else None
-    metar_diag["historical_weighted_reference"] = historical_context.get("weighted_reference") if isinstance(historical_context, dict) else None
-    metar_diag["historical_synoptic_context"] = historical_context.get("synoptic_context") if isinstance(historical_context, dict) else None
-    metar_diag["historical_recommended_tmax_c"] = (
-        historical_context.get("weighted_reference", {}).get("recommended_tmax_c")
-        if isinstance(historical_context, dict)
-        else None
-    )
+    attach_historical_payload(metar_diag, historical_context)
     return historical_context
 
 

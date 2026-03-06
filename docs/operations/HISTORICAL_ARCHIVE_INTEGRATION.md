@@ -55,15 +55,18 @@ python3 scripts/sync_historical_reference.py \
 - top similar historical days
 - lightweight adjustment hint
 
-The provider also stores this payload on `metar_diag["historical_context"]` and
-`metar_diag["historical_adjustment_hint"]` so later forecast logic can consume it
-without changing the fetch/render call chain again.
+The provider now also stores a structured payload on `metar_diag["historical"]`
+so later forecast logic can consume it without scattering more top-level keys
+across `metar_diag`.
 
-It now also stores:
+Current payload fields:
 
-- `metar_diag["historical_weighted_reference"]`
-- `metar_diag["historical_recommended_tmax_c"]`
-- `metar_diag["historical_synoptic_context"]`
+- `context`
+- `adjustment_hint`
+- `weighted_reference`
+- `recommended_tmax_c`
+- `synoptic_context`
+- `branch_assessment`
 
 This means historical analog guidance can already participate in the online Tmax
 range calculation, not only as a report appendix.
