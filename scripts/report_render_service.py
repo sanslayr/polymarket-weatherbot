@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 from datetime import datetime, timedelta
 from typing import Any
@@ -798,6 +799,7 @@ def _build_vars_and_market_blocks(
     disp_hi: float,
     core_lo: float,
     core_hi: float,
+    unit: str,
     fmt_range,
     fmt_temp,
     polymarket_prefetched_event: tuple[bool, list[dict[str, Any]]] | None,
@@ -1540,6 +1542,7 @@ def choose_section_text(
         disp_hi=float(disp_hi),
         core_lo=float(core_lo),
         core_hi=float(core_hi),
+        unit=unit,
         fmt_range=fmt_range_fn,
         fmt_temp=_fmt_temp,
         polymarket_prefetched_event=polymarket_prefetched_event,

@@ -98,16 +98,8 @@ def _attach_historical_context(
 
 
 def _perf_log(stage: str, seconds: float) -> None:
-    if not PERF_LOG_ENABLED:
-        return
-    try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        p = CACHE_DIR / "perf.log"
-        line = f"{datetime.now(timezone.utc).isoformat().replace('+00:00','Z')}\t{stage}\t{seconds:.3f}s\n"
-        with p.open("a", encoding="utf-8") as f:
-            f.write(line)
-    except Exception:
-        pass
+    _ = (stage, seconds)
+    return
 
 
 

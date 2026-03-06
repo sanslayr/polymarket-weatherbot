@@ -128,39 +128,11 @@ def _load_station_daily_rows(station_id: str) -> tuple[dict[str, str], ...]:
 
 
 @lru_cache(maxsize=128)
-def _load_candidate_daily_rows(station_id: str, target_window: str | None, month: int | None) -> tuple[dict[str, str], ...]:
+def _load_candidate_daily_rows(station_id: str) -> tuple[dict[str, str], ...]:
     station_rows = list(_load_station_daily_rows(station_id))
     if not station_rows:
         return tuple()
-
-    selected: list[dict[str, str]] = []
-    seen_dates: set[str] = set()
-
-    def _push(rows: list[dict[str, str]]) -> None:
-        for row in rows:
-            local_date = str(row.get("local_date") or "")
-            if not local_date or local_date in seen_dates:
-                continue
-            seen_dates.add(local_date)
-            selected.append(row)
-
-    if target_window:
-        _push([row for row in station_rows if _window_label_for_row(station_id, row) == target_window])
-    if month is not None:
-        _push([row for row in station_rows if _safe_int(row.get("month")) == month])
-        _push(
-            [
-                row
-                for row in station_rows
-                if (
-                    _safe_int(row.get("month")) is not None
-                    and _circular_month_distance(_safe_int(row.get("month")) or 0, month) == 1
-                )
-            ]
-        )
-    if len(selected) < 120:
-        _push(station_rows)
-    return tuple(selected)
+    return tuple(station_rows)
 
 
 @lru_cache(maxsize=32)
@@ -266,9 +238,7 @@ def build_historical_context(
         "当前实况匹配："
         f"{live_regime['primary_regime_cn']}（标签：{', '.join(live_regime['tags_cn']) or '过渡'}）"
     )
-    climate_window = _window_label_for_date(station_key, target_date)
-    if climate_window:
-        summary_lines.append(f"检索口径：优先匹配 `{climate_window}` 内、且日历位置接近的历史样本")
+    summary_lines.append("检索口径：按日历日期邻近度加权，不预设季节窗口")
     if analog_tmax_values:
         analog_tmax_mean = sum(analog_tmax_values) / len(analog_tmax_values)
         analog_peak_mean = (sum(analog_peak_values) / len(analog_peak_values)) if analog_peak_values else None
@@ -401,37 +371,21 @@ def find_similar_days(
     *,
     limit: int = 3,
 ) -> list[dict[str, str]]:
-    month = _target_month(target_date)
     signals = build_live_condition_signals(metar_diag)
     current_hour = extract_hour(signals.get("latest_report_local"))
     current_minute = extract_minute(signals.get("latest_report_local"))
-    target_window = _window_label_for_date(station_id, target_date)
     target_day_of_year = _target_day_of_year(target_date)
     current_state = _live_state_vector(metar_diag, live_regime)
     rows: list[dict[str, str]] = []
-    for row in _load_candidate_daily_rows(station_id, target_window, month):
+    for row in _load_candidate_daily_rows(station_id):
         score = 0.0
         reasons: list[tuple[float, str]] = []
         row_date = str(row.get("local_date") or "")
-        row_month = _safe_int(row.get("month"))
-        row_window = _window_label_for_row(station_id, row)
-        if row_window and target_window and row_window == target_window:
-            bonus = 3.0
-            score += bonus
-            reasons.append((bonus, f"同处 `{row_window}` 气候窗口"))
-        elif row_month == month:
-            bonus = 1.0
-            score += bonus
-            reasons.append((bonus, "同月样本"))
-        elif row_month is not None and month is not None and _circular_month_distance(row_month, month) == 1:
-            bonus = 0.4
-            score += bonus
-            reasons.append((bonus, "邻近月份样本"))
 
         row_day_of_year = _date_to_day_of_year(row_date)
         if target_day_of_year is not None and row_day_of_year is not None:
             calendar_gap = _circular_day_distance(target_day_of_year, row_day_of_year)
-            bonus = max(0.0, 2.5 - (calendar_gap / 12.0))
+            bonus = max(0.0, 4.0 - (calendar_gap / 9.0))
             score += bonus
             if bonus >= 0.8:
                 reasons.append((bonus, f"日历位置接近（差 `{calendar_gap}` 天）"))
@@ -522,10 +476,6 @@ def find_similar_days(
             continue
         enriched = dict(row)
         enriched["_similarity_score"] = f"{score:.2f}"
-        if target_window:
-            enriched["_target_climate_window"] = target_window
-        if row_window:
-            enriched["_row_climate_window"] = row_window
         if calendar_gap is not None:
             enriched["_calendar_gap_days"] = str(calendar_gap)
         if hist_state:
@@ -1554,6 +1504,23 @@ def _target_month(target_date: str | None) -> int | None:
         return datetime.strptime(str(target_date), "%Y-%m-%d").month
     except Exception:
         return None
+
+
+def _boundary_adjacent_months(target_date: str | None, edge_days: int = 10) -> set[int]:
+    if not target_date:
+        return set()
+    try:
+        dt = datetime.strptime(str(target_date), "%Y-%m-%d")
+    except Exception:
+        return set()
+    out: set[int] = set()
+    if dt.day <= edge_days:
+        out.add((dt.replace(day=1) - timedelta(days=1)).month)
+    next_month_start = (dt.replace(day=28) + timedelta(days=4)).replace(day=1)
+    last_day = (next_month_start - timedelta(days=1)).day
+    if (last_day - dt.day) < edge_days:
+        out.add(next_month_start.month)
+    return out
 
 def _target_day_of_year(target_date: str | None) -> int | None:
     if not target_date:

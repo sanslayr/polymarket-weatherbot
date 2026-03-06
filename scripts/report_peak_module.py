@@ -11,6 +11,7 @@ from metar_utils import observed_max_interval_c as _observed_max_interval_c
 from realtime_pipeline import classify_window_phase
 from historical_payload import get_historical_payload, get_weighted_reference
 from historical_strategy import blend_historical_range
+from historical_context_provider import _analog_branch_label
 
 
 def _parse_iso_dt(v: Any) -> datetime | None:
@@ -77,6 +78,67 @@ def _fmt_temp_unit(value_c: Any, unit: str) -> str:
         value = v * 9.0 / 5.0 + 32.0
         return f"{value:.1f}°F"
     return f"{v:.1f}°C"
+
+
+def _extract_quoted_token(text: str) -> str:
+    s = str(text or "").strip()
+    if not s:
+        return ""
+    parts = s.split("`")
+    if len(parts) >= 3 and parts[1].strip():
+        return parts[1].strip()
+    return s
+
+
+def _date_span_text(dates: list[str]) -> str:
+    cleaned = [str(item).strip() for item in dates if str(item).strip()]
+    if not cleaned:
+        return ""
+    try:
+        ordered = sorted(cleaned)
+    except Exception:
+        ordered = cleaned
+    if len(ordered) == 1:
+        return ordered[0]
+    return f"{ordered[0]}/{ordered[-1]}"
+
+
+def _reference_degree_text(text: str) -> str:
+    s = str(text or "")
+    if "强" in s:
+        return "高"
+    if "中" in s:
+        return "中"
+    if "弱" in s:
+        return "弱"
+    return s or "中"
+
+
+def _branch_reference_text(
+    label: str,
+    rows: list[dict[str, Any]],
+    degree_text: str,
+    prefix: str | None = None,
+) -> str:
+    dates = [str(row.get("local_date") or "").strip() for row in rows if str(row.get("local_date") or "").strip()]
+    date_text = _date_span_text(dates)
+    parts: list[str] = []
+    if prefix:
+        parts.append(prefix)
+    if date_text:
+        parts.append(date_text)
+    parts.append("日期邻近样本")
+    parts.append(f"{label}背景")
+    parts.append(f"参考度{degree_text}")
+    return "，".join(parts)
+
+
+def _shift_direction_text(shift_c: Any, unit: str) -> str:
+    v = _safe_float(shift_c)
+    if v is None or abs(v) < 0.05:
+        return "温度修正中性"
+    direction = "上修" if v > 0 else "下修"
+    return f"温度{direction}{_fmt_delta_unit(v, unit)}"
 
 
 def _fmt_delta_unit(delta_c: Any, unit: str) -> str:
@@ -1413,37 +1475,50 @@ def _build_peak_range_module(
             str(historical_blend.get("strength") or ""),
             str(historical_blend.get("strength") or ""),
         )
-        branch = str(historical_blend.get("selected_branch") or "")
-        branch_txt = f"（{branch}）" if branch else ""
         weighted = get_weighted_reference(metar_diag)
         if isinstance(weighted, dict):
             selected_dates = [str(item) for item in (weighted.get("selected_dates") or []) if str(item).strip()]
         else:
             selected_dates = []
-        date_txt = f"，参考日 {' / '.join(selected_dates[:3])} " if selected_dates else ""
-        peak_range_block.append(
-            f"- 注：已参考相似历史日{branch_txt}{date_txt}做校正，参考强度 {strength_cn}，区间中心修正 {_fmt_delta_unit(historical_blend.get('shift_c'), unit)}。"
-        )
         historical_payload = get_historical_payload(metar_diag)
         historical_context = (historical_payload or {}).get("context") if isinstance(historical_payload, dict) else None
         if isinstance(historical_context, dict):
             summary_lines = [str(item) for item in (historical_context.get("summary_lines") or []) if str(item).strip()]
             current_match = _pick_prefixed_line(summary_lines, "当前实况匹配：")
-            weighted = get_weighted_reference(metar_diag) or {}
-            weighted_center = _safe_float(weighted.get("recommended_tmax_c"))
-            weighted_peak = _safe_float(weighted.get("peak_center_hour_local"))
-            detail_bits: list[str] = []
-            if current_match:
-                detail_bits.append(f"当前匹配 {current_match}")
-            if weighted_center is not None:
-                detail_bits.append(f"加权参考中心 {_fmt_temp_unit(weighted_center, unit)}")
-            if weighted_peak is not None:
-                detail_bits.append(f"历史峰值约 {_fmt_hour_float(weighted_peak)}")
-            if detail_bits:
-                peak_range_block.append(f"- 历史参考摘要：{'；'.join(detail_bits)}。")
-        notes = [str(item) for item in (historical_blend.get("policy_notes") or []) if str(item).strip()]
-        if notes:
-            peak_range_block.append(f"- 历史融合权衡：{'；'.join(notes[:3])}。")
+            analogs = historical_context.get("analogs") if isinstance(historical_context.get("analogs"), list) else []
+            branch_assessment = (historical_payload or {}).get("branch_assessment") if isinstance(historical_payload, dict) else None
+            branch_details = list((branch_assessment or {}).get("branch_details") or []) if isinstance(branch_assessment, dict) else []
+            degree_text = _reference_degree_text(strength_cn)
+            if isinstance(branch_assessment, dict) and str(branch_assessment.get("branch_mode") or "") in {"split", "competitive"} and len(branch_details) >= 2:
+                grouped: dict[str, list[dict[str, Any]]] = {}
+                for row in analogs:
+                    if not isinstance(row, dict):
+                        continue
+                    label = _analog_branch_label(row)
+                    grouped.setdefault(label, []).append(row)
+                branch_texts: list[str] = []
+                for idx, item in enumerate(branch_details[:2], start=1):
+                    label = str(item.get("label") or "").strip()
+                    if not label:
+                        continue
+                    rows = sorted(
+                        grouped.get(label, []),
+                        key=lambda row: float(str(row.get("_similarity_score") or 0.0)),
+                        reverse=True,
+                    )
+                    fit_degree = _reference_degree_text(str(item.get("fit_label") or degree_text))
+                    branch_texts.append(f"  - {_branch_reference_text(label, rows, fit_degree, prefix='主' if idx == 1 else '次')}")
+                if branch_texts:
+                    peak_range_block.append("- 历史参考：")
+                    peak_range_block.extend(branch_texts)
+                    peak_range_block.append(f"  - {_shift_direction_text(historical_blend.get('shift_c'), unit)}")
+            else:
+                match_txt = current_match or "过渡型"
+                date_text = _date_span_text(selected_dates)
+                single_text = _branch_reference_text(match_txt, [{"local_date": date_text}] if date_text else [], degree_text)
+                peak_range_block.append("- 历史参考：")
+                peak_range_block.append(f"  - {single_text}")
+                peak_range_block.append(f"  - {_shift_direction_text(historical_blend.get('shift_c'), unit)}")
 
     return {
         "peak_range_block": peak_range_block,
