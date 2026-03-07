@@ -21,7 +21,8 @@ import requests
 
 FULL_HOURLY_FIELDS = (
     "pressure_msl,geopotential_height_500hPa,temperature_850hPa,wind_speed_850hPa,"
-    "wind_direction_850hPa,temperature_700hPa,wind_speed_700hPa,wind_direction_700hPa,"
+    "wind_direction_850hPa,relative_humidity_850hPa,temperature_700hPa,wind_speed_700hPa,wind_direction_700hPa,"
+    "relative_humidity_700hPa,"
     "temperature_925hPa,wind_speed_925hPa,wind_direction_925hPa"
 )
 OUTER500_HOURLY_FIELDS = "geopotential_height_500hPa,wind_speed_850hPa,wind_direction_850hPa"
@@ -299,9 +300,11 @@ def build_2d_grid_payload_openmeteo(
         mslp = [[0.0] * nlon for _ in range(nlat)]
         t850 = [[0.0] * nlon for _ in range(nlat)]
         v850 = [[0.0] * nlon for _ in range(nlat)]
+        rh850 = [[float("nan")] * nlon for _ in range(nlat)]
         t700 = [[float("nan")] * nlon for _ in range(nlat)]
         u700 = [[float("nan")] * nlon for _ in range(nlat)]
         v700 = [[float("nan")] * nlon for _ in range(nlat)]
+        rh700 = [[float("nan")] * nlon for _ in range(nlat)]
         t925 = [[float("nan")] * nlon for _ in range(nlat)]
         u925 = [[float("nan")] * nlon for _ in range(nlat)]
         v925 = [[float("nan")] * nlon for _ in range(nlat)]
@@ -342,10 +345,12 @@ def build_2d_grid_payload_openmeteo(
                 v850[i][j] = v
                 mslp[i][j] = read_time_value(item, "pressure_msl", analysis_time)
                 t850[i][j] = read_time_value(item, "temperature_850hPa", analysis_time)
+                rh850[i][j] = read_time_value_opt(item, "relative_humidity_850hPa", analysis_time)
 
                 t700[i][j] = read_time_value_opt(item, "temperature_700hPa", analysis_time)
                 sp700 = read_time_value_opt(item, "wind_speed_700hPa", analysis_time)
                 wd700 = read_time_value_opt(item, "wind_direction_700hPa", analysis_time)
+                rh700[i][j] = read_time_value_opt(item, "relative_humidity_700hPa", analysis_time)
                 if not math.isnan(sp700) and not math.isnan(wd700):
                     u, v = uv_from_met_wind(sp700, wd700)
                     u700[i][j] = u
@@ -378,9 +383,11 @@ def build_2d_grid_payload_openmeteo(
                 "t850_c": t850,
                 "u850_ms": u850,
                 "v850_ms": v850,
+                "rh850_pct": rh850,
                 "t700_c": t700,
                 "u700_ms": u700,
                 "v700_ms": v700,
+                "rh700_pct": rh700,
                 "t925_c": t925,
                 "u925_ms": u925,
                 "v925_ms": v925,

@@ -12,7 +12,7 @@ from realtime_pipeline import classify_window_phase
 from historical_payload import get_historical_payload, get_weighted_reference
 from historical_strategy import blend_historical_range
 from historical_context_provider import _analog_branch_label
-from layer_signal_policy import h700_dry_support_factor, h700_is_moist_constraint
+from layer_signal_policy import h700_effective_dry_factor, h700_is_moist_constraint
 
 
 def _parse_iso_dt(v: Any) -> datetime | None:
@@ -166,6 +166,23 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
+def _h500_weight_score(feature: dict[str, Any] | None) -> float:
+    if not isinstance(feature, dict):
+        return 0.0
+    try:
+        return max(-1.0, min(1.0, float(feature.get("tmax_weight_score") or 0.0)))
+    except Exception:
+        return 0.0
+
+
+def _h500_has_key_signal(feature: dict[str, Any] | None) -> bool:
+    if not isinstance(feature, dict):
+        return False
+    if str(feature.get("impact_weight") or "") in {"medium", "high"}:
+        return True
+    return abs(_h500_weight_score(feature)) >= 0.22
+
+
 def _pick_prefixed_line(lines: list[str], prefix: str) -> str | None:
     for line in lines:
         text = str(line or "").strip()
@@ -181,6 +198,7 @@ def _is_generic_500_text(s: str) -> bool:
         "云层若放开更易再冲高",
         "高空背景信号有限",
         "高空背景一般",
+        "500hPa弱信号背景",
     ]
     return any(k in t for k in generic_tokens)
 
@@ -204,6 +222,13 @@ def _render_sounding_factor_pack(
     wind_chg = _f(metar_diag.get("wind_dir_change_deg"))
     t_now = _f(metar_diag.get("latest_temp"))
     wx = str(metar_diag.get("latest_wx") or "").upper()
+    sounding_source = str(snd_thermo.get("profile_source") or "")
+    sounding_conf = str(snd_thermo.get("sounding_confidence") or "")
+    sounding_cap = _f(snd_thermo.get("low_level_cap_score"))
+    sounding_mix = _f(snd_thermo.get("mixing_support_score"))
+    sounding_dry = _f(snd_thermo.get("midlevel_dry_score"))
+    sounding_moist = _f(snd_thermo.get("midlevel_moist_score"))
+    sounding_wind_mix = _f(snd_thermo.get("wind_profile_mix_score"))
 
     up_adj = 0.0
     down_adj = 0.0
@@ -212,19 +237,21 @@ def _render_sounding_factor_pack(
 
     inv = 0.0
     if low_cloud is not None and low_cloud >= 70:
-        inv += 0.6
+        inv += 0.35 if sounding_source == "obs" else 0.6
     if w850 is not None and w850 <= 15:
-        inv += 0.35
+        inv += 0.18 if sounding_source == "obs" else 0.35
     if "耦合偏弱" in h925_summary:
-        inv += 0.35
+        inv += 0.20 if sounding_source == "obs" else 0.35
+    if sounding_cap is not None:
+        inv = max(inv, 0.95 * sounding_cap)
     if inv >= 0.9:
         down_adj += 0.55
         profile_score += 0.35
-        tags.append("逆温/稳定约束偏强")
+        tags.append("探空稳定层/封盖约束偏强" if sounding_source == "obs" else "逆温/稳定约束偏强")
     elif inv >= 0.45:
         down_adj += 0.25
         profile_score += 0.25
-        tags.append("低层稳定约束")
+        tags.append("探空显示低层稳定约束" if sounding_source == "obs" else "低层稳定约束")
 
     capev = snd_thermo.get("sbcape_jkg") or snd_thermo.get("mlcape_jkg") or snd_thermo.get("mucape_jkg")
     cinv = snd_thermo.get("sbcin_jkg") if snd_thermo.get("sbcin_jkg") is not None else snd_thermo.get("mlcin_jkg")
@@ -243,7 +270,13 @@ def _render_sounding_factor_pack(
             profile_score += 0.2
             tags.append("近冰点相变/潜热冷却风险")
 
-    dry_factor = h700_dry_support_factor(h700_summary)
+    dry_factor = h700_effective_dry_factor(
+        h700_summary,
+        low_cloud_pct=low_cloud,
+        cloud_code_now=cloud_code_now,
+    )
+    if sounding_dry is not None:
+        dry_factor = max(dry_factor * (0.65 if sounding_source == "obs" else 1.0), 0.95 * sounding_dry)
     if dry_factor > 0:
         profile_score += 0.18 * dry_factor
         if cloud_code_now in {"CLR", "CAVOK", "SKC", "FEW", "SCT"}:
@@ -251,15 +284,21 @@ def _render_sounding_factor_pack(
         else:
             up_adj += 0.10 * dry_factor
         if dry_factor >= 0.75:
-            tags.append("中层偏干+低层开窗（增温效率提升）")
+            tags.append("探空中层偏干+低层开窗（增温效率提升）" if sounding_source == "obs" else "中层偏干+低层开窗（增温效率提升）")
         elif dry_factor >= 0.30:
-            tags.append("中层偏干背景（需配合低层开窗）")
-    elif h700_is_moist_constraint(h700_summary):
+            tags.append("探空中层偏干背景（需配合低层开窗）" if sounding_source == "obs" else "中层偏干背景（需配合低层开窗）")
+    moist_constraint = (sounding_moist is not None and sounding_moist >= 0.45) or h700_is_moist_constraint(h700_summary)
+    if moist_constraint and dry_factor <= 0:
         profile_score += 0.35
-        down_adj += 0.25
-        tags.append("中层湿层约束")
+        down_adj += 0.25 + (0.08 if sounding_moist is not None and sounding_moist >= 0.75 else 0.0)
+        tags.append("探空中层湿层约束" if sounding_source == "obs" else "中层湿层约束")
 
-    if w850 is not None:
+    mix_signal = max(sounding_mix or 0.0, sounding_wind_mix or 0.0)
+    if mix_signal >= 0.7:
+        up_adj += 0.26
+        profile_score += 0.24
+        tags.append("探空显示混合下传条件较好")
+    elif w850 is not None:
         if w850 >= 25 and (low_cloud is None or low_cloud <= 55):
             up_adj += 0.2
             profile_score += 0.2
@@ -273,6 +312,11 @@ def _render_sounding_factor_pack(
         down_adj += 0.08
         profile_score += 0.1
         tags.append("风切节奏扰动")
+    if sounding_source == "obs":
+        if sounding_conf == "H":
+            profile_score += 0.20
+        elif sounding_conf == "M":
+            profile_score += 0.12
 
     return {
         "up_adj": up_adj,
@@ -305,7 +349,11 @@ def _render_signal_scores(
 
     if _contains_any_text(extra, ["封盖", "压制", "湿层", "低云"]):
         down += 1.0
-    if h700_dry_support_factor(h700_summary) <= 0 and _contains_any_text(extra, ["干层", "日照", "升温加速"]):
+    if h700_effective_dry_factor(
+        h700_summary,
+        low_cloud_pct=calc_window.get("low_cloud_pct"),
+        cloud_code_now=cloud_code_now,
+    ) <= 0 and _contains_any_text(extra, ["干层", "日照", "升温加速"]):
         up += 0.8
 
     try:
@@ -376,6 +424,7 @@ def _build_peak_range_module(
     quality: dict[str, Any],
     obj: dict[str, Any],
     line500: str,
+    h500_feature: dict[str, Any] | None,
     line850: str,
     extra: str,
     h700_summary: str,
@@ -431,6 +480,7 @@ def _build_peak_range_module(
 
     gate = classify_window_phase(primary_window, metar_diag)
     phase_now = str(gate.get('phase') or 'unknown')
+    h500_score = _h500_weight_score(h500_feature)
 
     # horizon to fused peak (used by uncertainty and market-label confidence gating)
     try:
@@ -839,6 +889,19 @@ def _build_peak_range_module(
 
     consistency_shift = max(-0.75, min(0.75, consistency_shift))
     center += consistency_shift
+    h500_phase_scale = {
+        "far": 0.85,
+        "near_window": 0.72,
+        "in_window": 0.56,
+        "post": 0.30,
+    }.get(phase_now, 0.60)
+    h500_center_shift = max(-0.35, min(0.35, 0.32 * h500_score * h500_phase_scale))
+    center += h500_center_shift
+    if abs(h500_score) >= 0.12:
+        metar_diag["h500_tmax_weight_score"] = round(h500_score, 2)
+        metar_diag["h500_center_shift_c"] = round(h500_center_shift, 2)
+        if isinstance(h500_feature, dict):
+            metar_diag["h500_thermal_role"] = str(h500_feature.get("thermal_role") or "")
 
     # Far-window clear-sky diurnal amplitude uplift:
     # if yesterday observed diurnal range is materially larger than model daily range,
@@ -861,12 +924,23 @@ def _build_peak_range_module(
 
     # Circulation-context weighted gate for day-to-day amplitude learning:
     # yesterday's range is informative by degree, not a binary on/off.
-    strong_dyn = any(k in (line500 + " " + extra) for k in ["槽", "短波", "急流", "涡度", "PVA", "锋生", "强迫", "切变", "对流"])
+    strong_dyn = (
+        _h500_has_key_signal(h500_feature)
+        or any(k in str(extra) for k in ["锋生", "强迫", "切变", "对流"])
+        or (
+            (not isinstance(h500_feature, dict) or not h500_feature)
+            and any(k in str(line500) for k in ["副热带高压", "冷高压", "深槽", "低压槽", "暖脊", "高压脊", "短波", "急流", "涡度", "PVA", "NVA"])
+        )
+    )
     circ_weak_forced = not strong_dyn
-    if _is_generic_500_text(line500):
+    if _is_generic_500_text(line500) and abs(h500_score) < 0.18:
         circ_weak_forced = True
     strong_cold_adv = ("冷平流" in line850) and ("暖平流" not in line850)
-    dry_support = h700_dry_support_factor(h700_summary)
+    dry_support = h700_effective_dry_factor(
+        h700_summary,
+        low_cloud_pct=low_cloud_peak_est,
+        cloud_code_now=cloud_code_now,
+    )
 
     circ_context_score = 0.55
     if circ_weak_forced:
@@ -877,6 +951,7 @@ def _build_peak_range_module(
         circ_context_score += 0.08
     if strong_dyn:
         circ_context_score -= 0.20
+    circ_context_score += 0.16 * h500_score
     if strong_cold_adv:
         circ_context_score -= 0.22
     if low_cloud_peak_est >= 35.0:
@@ -967,6 +1042,10 @@ def _build_peak_range_module(
     if isinstance(metar_diag.get("temp_bias_smooth_c"), (int, float)) and float(metar_diag.get("temp_bias_smooth_c") or 0.0) >= 0.5:
         warm_support += 0.4
     warm_support += min(0.6, max(0.0, float(sf_local.get("up_adj") or 0.0) - 0.3 * float(sf_local.get("down_adj") or 0.0)))
+    if h500_score > 0:
+        warm_support += min(0.45, 0.40 * h500_score)
+    elif h500_score < 0:
+        warm_support -= min(0.40, 0.36 * abs(h500_score))
 
     if (
         phase_now in {"near_window", "in_window"}
@@ -1510,7 +1589,7 @@ def _build_peak_range_module(
 
     if bool(metar_diag.get("obs_correction_applied")):
         peak_range_block.append("- 注：已应用实况纠偏（模型峰值偏低，窗口锚定到当日实况峰值时段）。")
-    if historical_blend and historical_blend.get("applied"):
+    if historical_blend and (historical_blend.get("applied") or historical_blend.get("display")):
         strength_cn = {"weak": "弱参考", "medium": "中参考", "strong": "强参考"}.get(
             str(historical_blend.get("strength") or ""),
             str(historical_blend.get("strength") or ""),
@@ -1529,6 +1608,9 @@ def _build_peak_range_module(
             branch_assessment = (historical_payload or {}).get("branch_assessment") if isinstance(historical_payload, dict) else None
             branch_details = list((branch_assessment or {}).get("branch_details") or []) if isinstance(branch_assessment, dict) else []
             degree_text = _reference_degree_text(strength_cn)
+            title = "- 历史参考："
+            if bool(historical_blend.get("advisory_only")):
+                title = "- 历史参考（旁证，不参与本次区间定标）："
             if isinstance(branch_assessment, dict) and str(branch_assessment.get("branch_mode") or "") in {"split", "competitive"} and len(branch_details) >= 2:
                 grouped: dict[str, list[dict[str, Any]]] = {}
                 for row in analogs:
@@ -1549,16 +1631,18 @@ def _build_peak_range_module(
                     fit_degree = _reference_degree_text(str(item.get("fit_label") or degree_text))
                     branch_texts.append(f"  - {_branch_reference_text(label, rows, fit_degree, prefix='主' if idx == 1 else '次')}")
                 if branch_texts:
-                    peak_range_block.append("- 历史参考：")
+                    peak_range_block.append(title)
                     peak_range_block.extend(branch_texts)
-                    peak_range_block.append(f"  - {_shift_direction_text(historical_blend.get('shift_c'), unit)}")
+                    if historical_blend.get("applied"):
+                        peak_range_block.append(f"  - {_shift_direction_text(historical_blend.get('shift_c'), unit)}")
             else:
                 match_txt = current_match or "过渡型"
                 date_text = _date_span_text(selected_dates)
                 single_text = _branch_reference_text(match_txt, [{"local_date": date_text}] if date_text else [], degree_text)
-                peak_range_block.append("- 历史参考：")
+                peak_range_block.append(title)
                 peak_range_block.append(f"  - {single_text}")
-                peak_range_block.append(f"  - {_shift_direction_text(historical_blend.get('shift_c'), unit)}")
+                if historical_blend.get("applied"):
+                    peak_range_block.append(f"  - {_shift_direction_text(historical_blend.get('shift_c'), unit)}")
 
     return {
         "peak_range_block": peak_range_block,

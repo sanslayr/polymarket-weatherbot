@@ -15,7 +15,10 @@ CITY_ALIASES = {
     "la": "los angeles",
     "sao": "sao paulo",
     "saopaulo": "sao paulo",
+    "bue": "buenos aires",
+    "ba": "buenos aires",
     "buenos": "buenos aires",
+    "buenosaires": "buenos aires",
     "seoul": "seoul",
     "ank": "ankara",
 }

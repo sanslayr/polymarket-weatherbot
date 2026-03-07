@@ -5,7 +5,7 @@ from __future__ import annotations
 Keeping version strings in one place prevents drift between modules and docs.
 """
 
-FORECAST_DECISION_SCHEMA_VERSION = "forecast-decision.v4"
+FORECAST_DECISION_SCHEMA_VERSION = "forecast-decision.v6"
 FORECAST_3D_BUNDLE_SCHEMA_VERSION = "forecast-3d-bundle.v1"
 OBJECTS_3D_SCHEMA_VERSION = "objects-3d.v1"
 

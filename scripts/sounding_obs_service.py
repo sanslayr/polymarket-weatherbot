@@ -336,14 +336,104 @@ def _parse_metric(text: str, patterns: list[str]) -> float | None:
     return None
 
 
-def _parse_thermo(text: str, quality: str) -> dict[str, Any]:
+def _derive_layer_metrics(levels: dict[str, dict[str, float] | None]) -> dict[str, Any]:
+    lv925 = levels.get("925")
+    lv850 = levels.get("850")
+    lv700 = levels.get("700")
+
+    def _gf(level: dict[str, float] | None, key: str) -> float | None:
+        if not isinstance(level, dict):
+            return None
+        try:
+            value = float(level.get(key))
+        except Exception:
+            return None
+        if math.isnan(value):
+            return None
+        return value
+
+    rh925 = _gf(lv925, "rh_pct")
+    rh850 = _gf(lv850, "rh_pct")
+    rh700 = _gf(lv700, "rh_pct")
+    t925 = _gf(lv925, "temp_c")
+    t850 = _gf(lv850, "temp_c")
+    w925 = _gf(lv925, "wind_kt")
+    w850 = _gf(lv850, "wind_kt")
+    w700 = _gf(lv700, "wind_kt")
+
+    t925_850 = None if t925 is None or t850 is None else float(t925 - t850)
+    mid_rhs = [v for v in (rh850, rh700) if v is not None]
+    mid_rh = None if not mid_rhs else float(sum(mid_rhs) / len(mid_rhs))
+
+    low_level_cap_score = 0.0
+    low_level_mix_score = 0.0
+    if t925_850 is not None:
+        if t925_850 >= 2.5:
+            low_level_cap_score = 1.0
+        elif t925_850 >= 1.2:
+            low_level_cap_score = 0.65
+        if t925_850 <= 0.4:
+            low_level_mix_score = 0.85
+        elif t925_850 <= 1.0:
+            low_level_mix_score = 0.40
+
+    midlevel_dry_score = 0.0
+    midlevel_moist_score = 0.0
+    if mid_rh is not None:
+        if mid_rh <= 35.0:
+            midlevel_dry_score = 1.0
+        elif mid_rh <= 45.0:
+            midlevel_dry_score = 0.6
+        if mid_rh >= 75.0:
+            midlevel_moist_score = 1.0
+        elif mid_rh >= 65.0:
+            midlevel_moist_score = 0.55
+
+    wind_profile_mix_score = 0.0
+    if w850 is not None:
+        if w850 >= 30.0:
+            wind_profile_mix_score = 1.0
+        elif w850 >= 20.0:
+            wind_profile_mix_score = 0.65
+        elif w850 >= 14.0:
+            wind_profile_mix_score = 0.35
+
+    mixing_support_score = max(
+        low_level_mix_score,
+        min(1.0, 0.55 * low_level_mix_score + 0.30 * wind_profile_mix_score + 0.25 * midlevel_dry_score),
+    )
+    suppression_score = min(
+        1.0,
+        0.60 * low_level_cap_score + 0.30 * midlevel_moist_score + (0.15 if (rh925 is not None and rh925 >= 75.0) else 0.0),
+    )
+
+    return {
+        "rh925_pct": rh925,
+        "rh850_pct": rh850,
+        "rh700_pct": rh700,
+        "t925_t850_c": t925_850,
+        "midlevel_rh_pct": mid_rh,
+        "wind925_kt": w925,
+        "wind850_kt": w850,
+        "wind700_kt": w700,
+        "low_level_cap_score": round(low_level_cap_score, 3),
+        "low_level_mix_score": round(low_level_mix_score, 3),
+        "midlevel_dry_score": round(midlevel_dry_score, 3),
+        "midlevel_moist_score": round(midlevel_moist_score, 3),
+        "wind_profile_mix_score": round(wind_profile_mix_score, 3),
+        "mixing_support_score": round(mixing_support_score, 3),
+        "suppression_score": round(suppression_score, 3),
+    }
+
+
+def _parse_thermo(text: str, quality: str, levels: dict[str, dict[str, float] | None]) -> dict[str, Any]:
     sbcape = _parse_metric(text, [r"\bSBCAPE\b[^0-9\-]{0,12}(-?\d+(?:\.\d+)?)"])
     mlcape = _parse_metric(text, [r"\bMLCAPE\b[^0-9\-]{0,12}(-?\d+(?:\.\d+)?)"])
     mucape = _parse_metric(text, [r"\bMUCAPE\b[^0-9\-]{0,12}(-?\d+(?:\.\d+)?)"])
     sbcin = _parse_metric(text, [r"\bSBCIN\b[^0-9\-]{0,12}(-?\d+(?:\.\d+)?)"])
     mlcin = _parse_metric(text, [r"\bMLCIN\b[^0-9\-]{0,12}(-?\d+(?:\.\d+)?)"])
 
-    return {
+    thermo = {
         "has_profile": True,
         "quality": quality,
         "sbcape_jkg": sbcape,
@@ -355,6 +445,8 @@ def _parse_thermo(text: str, quality: str) -> dict[str, Any]:
         "lfc_m": None,
         "el_m": None,
     }
+    thermo.update(_derive_layer_metrics(levels))
+    return thermo
 
 
 def _layer_findings(levels: dict[str, dict[str, float] | None]) -> tuple[list[str], str, str]:
@@ -565,7 +657,7 @@ def build_sounding_obs_context(
             return payload
 
         findings, actionable, path_bias = _layer_findings(levels)
-        thermo = _parse_thermo(profile_text, quality=quality)
+        thermo = _parse_thermo(profile_text, quality=quality, levels=levels)
 
         payload["use_sounding_obs"] = True
         payload["disable_reason"] = "ok"

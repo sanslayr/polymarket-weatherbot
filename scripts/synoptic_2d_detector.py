@@ -13,7 +13,7 @@ Input JSON keys:
   - u850_ms: [nlat][nlon]
   - v850_ms: [nlat][nlon]
   - t925_c/u925_ms/v925_ms (optional)
-  - t700_c/u700_ms/v700_ms (optional)
+  - t700_c/u700_ms/v700_ms/rh700_pct (optional)
 
 Optional:
 - previous_fields: same keys as fields (for trend sign)
@@ -54,6 +54,10 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     dlon = math.radians(lon2 - lon1)
     a = math.sin(dlat / 2.0) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlon / 2.0) ** 2
     return 2.0 * EARTH_RADIUS_KM * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+
+
+def wrapped_lon_diff_deg(lon1: float, lon2: float) -> float:
+    return abs(((float(lon1) - float(lon2) + 180.0) % 360.0) - 180.0)
 
 
 def local_extrema(field: np.ndarray, mode: str = "min", radius_i: int = 2, radius_j: int = 2) -> list[tuple[int, int]]:
@@ -332,17 +336,23 @@ def detect_dry_intrusion_700(
     lon: np.ndarray,
     t700: np.ndarray | None,
     t850: np.ndarray,
+    rh700: np.ndarray | None,
     station: dict[str, float],
 ) -> list[dict[str, Any]]:
-    if t700 is None:
+    if t700 is None or rh700 is None:
         return []
     lat_step, lon_step = grid_step_degrees(lat, lon)
     cell_area = approx_cell_area_km2(float(np.median(lat)), lat_step, lon_step)
     min_pixels = max(5, int(round(80000.0 / max(cell_area, 1.0))))
 
     lapse = t850 - t700
-    l_cut = np.nanpercentile(lapse, 80)
-    mask = lapse >= l_cut
+    finite_rh = rh700[np.isfinite(rh700)]
+    finite_lapse = lapse[np.isfinite(lapse)]
+    if finite_lapse.size < max(40, min_pixels * 2) or finite_rh.size < max(40, min_pixels * 2):
+        return []
+    l_cut = max(10.5, float(np.nanpercentile(finite_lapse, 88)))
+    rh_cut = min(45.0, float(np.nanpercentile(finite_rh, 35)))
+    mask = (lapse >= l_cut) & (rh700 <= rh_cut)
     systems: list[dict[str, Any]] = []
     for comp in connected_components(mask):
         if len(comp) < min_pixels:
@@ -351,6 +361,17 @@ def detect_dry_intrusion_700(
         dist = haversine_km(station["lat"], station["lon"], c_lat, c_lon)
         geo = build_geo_context(station, c_lat, c_lon, dist)
         lv = float(np.nanmean([lapse[i, j] for i, j in comp]))
+        rhv = float(np.nanmean([rh700[i, j] for i, j in comp]))
+        # 700hPa "dry intrusion" from thermal structure alone is noisy.
+        # Keep only stronger/closer clusters unless the lapse signal is clearly extreme.
+        if lv < 10.5:
+            continue
+        if rhv > 45.0:
+            continue
+        if dist > 220 and lv < 11.5:
+            continue
+        if dist > 650 and lv < 12.2:
+            continue
         systems.append(
             {
                 "system_type": "dry_intrusion_700",
@@ -359,6 +380,7 @@ def detect_dry_intrusion_700(
                 "center_lat": geo["center_lat"],
                 "center_lon": geo["center_lon"],
                 "lapse_t850_t700_c": round(lv, 2),
+                "rh700_pct": round(rhv, 1),
                 "area_pixels": len(comp),
                 "distance_to_station_km": geo["distance_km"],
                 "region_name": station_sector_label(station["lat"], station["lon"], c_lat, c_lon, dist),
@@ -618,23 +640,113 @@ def detect_500_axes(
     return systems[:6]
 
 
-def diagnose_planetary(lat: np.ndarray, z500: np.ndarray, u850: np.ndarray) -> list[dict[str, Any]]:
+def _nearest_station_grid_indices(lat: np.ndarray, lon: np.ndarray, station: dict[str, float]) -> tuple[int, int]:
+    i = int(np.argmin(np.abs(lat - float(station["lat"]))))
+    j = int(np.argmin(np.array([wrapped_lon_diff_deg(v, float(station["lon"])) for v in lon], dtype=float)))
+    return i, j
+
+
+def _local_lon_mask(lon: np.ndarray, station_lon: float, half_window_deg: float = 12.0) -> np.ndarray:
+    diffs = np.array([wrapped_lon_diff_deg(v, station_lon) for v in lon], dtype=float)
+    mask = diffs <= float(half_window_deg)
+    if int(np.sum(mask)) < 3:
+        j = int(np.argmin(diffs))
+        mask[max(0, j - 1) : min(len(lon), j + 2)] = True
+    return mask
+
+
+def _poleward_edge_lat(lat_vals: np.ndarray, z_col: np.ndarray, threshold_gpm: float, hemi_sign: float) -> float | None:
+    valid = np.isfinite(z_col)
+    hits = lat_vals[valid & (z_col >= threshold_gpm)]
+    if hits.size == 0:
+        return None
+    if hemi_sign >= 0:
+        return float(np.max(hits))
+    return float(np.min(hits))
+
+
+def diagnose_planetary(
+    lat: np.ndarray,
+    lon: np.ndarray,
+    z500: np.ndarray,
+    u850: np.ndarray,
+    station: dict[str, float],
+) -> list[dict[str, Any]]:
     systems: list[dict[str, Any]] = []
     lat2d = lat[:, None] + np.zeros_like(z500)
 
-    subtropical_band = (lat2d >= 20) & (lat2d <= 35)
+    station_lat = float(station["lat"])
+    station_lon = float(station["lon"])
+    hemi_sign = 1.0 if station_lat >= 0.0 else -1.0
+    lon_mask = _local_lon_mask(lon, station_lon, half_window_deg=12.0)
+    if hemi_sign >= 0:
+        subtropical_band = (lat2d >= 15.0) & (lat2d <= 40.0) & lon_mask[None, :]
+    else:
+        subtropical_band = (lat2d <= -15.0) & (lat2d >= -40.0) & lon_mask[None, :]
+
     if np.any(subtropical_band):
-        p90 = float(np.percentile(z500[subtropical_band], 90))
-        if p90 >= 5860:  # gpm proxy in meter space would be 5860 m
-            systems.append(
-                {
-                    "system_type": "subtropical_high",
-                    "scale": "planetary",
-                    "level": "500",
-                    "intensity_gpm": round(p90, 1),
-                    "description": "subtropical high ridge signal over 20-35N",
-                }
-            )
+        band_values = z500[subtropical_band & np.isfinite(z500)]
+        if band_values.size:
+            station_i, station_j = _nearest_station_grid_indices(lat, lon, station)
+            station_z500 = float(z500[station_i, station_j])
+            band_p75 = float(np.percentile(band_values, 75))
+            band_p90 = float(np.percentile(band_values, 90))
+            station_pct = float(100.0 * np.mean(band_values <= station_z500))
+
+            local_edges_586: list[float] = []
+            local_edges_588: list[float] = []
+            for j in np.where(lon_mask)[0]:
+                z_col = np.asarray(z500[:, j], dtype=float)
+                lat_mask = ((lat >= 15.0) & (lat <= 40.0)) if hemi_sign >= 0 else ((lat <= -15.0) & (lat >= -40.0))
+                lat_vals = lat[lat_mask]
+                z_vals = z_col[lat_mask]
+                edge586 = _poleward_edge_lat(lat_vals, z_vals, 5860.0, hemi_sign)
+                edge588 = _poleward_edge_lat(lat_vals, z_vals, 5880.0, hemi_sign)
+                if edge586 is not None:
+                    local_edges_586.append(edge586)
+                if edge588 is not None:
+                    local_edges_588.append(edge588)
+
+            edge586_local = None if not local_edges_586 else float(np.percentile(local_edges_586, 75))
+            edge588_local = None if not local_edges_588 else float(np.percentile(local_edges_588, 75))
+            edge586_margin = None if edge586_local is None else float(hemi_sign * (edge586_local - station_lat))
+            edge588_margin = None if edge588_local is None else float(hemi_sign * (edge588_local - station_lat))
+
+            relation = "outside"
+            support_score = 0.0
+            if edge588_margin is not None and edge588_margin >= 0.8 and station_pct >= 78.0 and station_z500 >= max(5880.0, band_p75):
+                relation = "core"
+                support_score = 1.0
+            elif edge586_margin is not None and edge586_margin >= 0.6 and station_pct >= 65.0 and station_z500 >= 5860.0:
+                relation = "inner"
+                support_score = 0.78
+            elif edge586_margin is not None and edge586_margin >= -2.0 and station_pct >= 52.0:
+                relation = "edge"
+                support_score = 0.52
+            elif station_z500 >= 5860.0 and station_pct >= 82.0:
+                relation = "edge"
+                support_score = 0.45
+
+            if band_p90 >= 5860.0 and relation != "outside":
+                systems.append(
+                    {
+                        "system_type": "subtropical_high",
+                        "scale": "planetary",
+                        "level": "500",
+                        "intensity_gpm": round(band_p90, 1),
+                        "local_band_p75_gpm": round(band_p75, 1),
+                        "local_band_p90_gpm": round(band_p90, 1),
+                        "station_z500_gpm": round(station_z500, 1),
+                        "station_pct_in_band": round(station_pct, 1),
+                        "station_relation": relation,
+                        "station_support_score": round(support_score, 3),
+                        "edge_586_local_lat": round(edge586_local, 2) if edge586_local is not None else None,
+                        "edge_588_local_lat": round(edge588_local, 2) if edge588_local is not None else None,
+                        "edge_586_margin_deg": round(edge586_margin, 2) if edge586_margin is not None else None,
+                        "edge_588_margin_deg": round(edge588_margin, 2) if edge588_margin is not None else None,
+                        "description": "station-relative subtropical high signal",
+                    }
+                )
 
     midlat = (lat2d >= 35) & (lat2d <= 60)
     if np.any(midlat):
@@ -685,7 +797,7 @@ def analyze(payload: dict[str, Any], mode: str = "full") -> dict[str, Any]:
         prev_z500 = np.asarray(prev["z500_gpm"], dtype=float)
 
     axes = detect_500_axes(lat, lon, z500, station, prev_z500=prev_z500)
-    planetary = diagnose_planetary(lat, z500, u850)
+    planetary = diagnose_planetary(lat, lon, z500, u850, station)
 
     if run_mode == "outer500_only":
         systems = planetary + axes
@@ -698,6 +810,7 @@ def analyze(payload: dict[str, Any], mode: str = "full") -> dict[str, Any]:
         u925 = np.asarray(fields.get("u925_ms"), dtype=float) if fields.get("u925_ms") is not None else None
         v925 = np.asarray(fields.get("v925_ms"), dtype=float) if fields.get("v925_ms") is not None else None
         t700 = np.asarray(fields.get("t700_c"), dtype=float) if fields.get("t700_c") is not None else None
+        rh700 = np.asarray(fields.get("rh700_pct"), dtype=float) if fields.get("rh700_pct") is not None else None
 
         prev_mslp = None
         if prev and "mslp_hpa" in prev:
@@ -708,7 +821,7 @@ def analyze(payload: dict[str, Any], mode: str = "full") -> dict[str, Any]:
         bands = detect_850_bands(lat, lon, t850, u850, v850, station)
         fronts = detect_frontogenesis_zones(lat, lon, t850, u850, v850, t925, u925, v925, mslp, station)
         llj = detect_llj_shear_zones(lat, lon, u850, v850, u925, v925, station)
-        dry700 = detect_dry_intrusion_700(lat, lon, t700, t850, station)
+        dry700 = detect_dry_intrusion_700(lat, lon, t700, t850, rh700, station)
         baro = detect_baroclinic_coupling(lat, lon, mslp, t850, station)
         systems = planetary + lows + highs + axes + fronts + llj + dry700 + baro + bands["warm_advection"] + bands["cold_advection"]
 

@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from condition_state import build_condition_context, build_live_condition_signals
-from layer_signal_policy import h700_dry_support_factor, h700_is_moist_constraint, h700_should_surface_in_evidence
+from layer_signal_policy import h700_dry_support_factor, h700_effective_dry_factor, h700_is_moist_constraint, h700_should_surface_in_evidence
 from market_label_policy import build_market_label_policy
 from param_store import load_tmax_learning_params
 from polymarket_render_service import _build_polymarket_section
@@ -25,6 +25,39 @@ PHASE_LABELS = {
     "unknown": "窗口状态未知",
 }
 DEFAULT_TRACK_LINE = "• 临窗前继续跟踪温度斜率与风向节奏，必要时再改判。"
+
+
+def _h500_weight_score(feature: dict[str, Any] | None) -> float:
+    if not isinstance(feature, dict):
+        return 0.0
+    try:
+        return max(-1.0, min(1.0, float(feature.get("tmax_weight_score") or 0.0)))
+    except Exception:
+        return 0.0
+
+
+def _h500_regime_label(feature: dict[str, Any] | None) -> str:
+    if not isinstance(feature, dict):
+        return ""
+    return str(feature.get("regime_label") or "").strip()
+
+
+def _h500_thermal_role(feature: dict[str, Any] | None) -> str:
+    if not isinstance(feature, dict):
+        return ""
+    return str(feature.get("thermal_role") or "").strip()
+
+
+def _h500_has_key_signal(feature: dict[str, Any] | None) -> bool:
+    if not isinstance(feature, dict):
+        return False
+    if str(feature.get("impact_weight") or "") in {"medium", "high"}:
+        return True
+    role = _h500_thermal_role(feature)
+    score = abs(_h500_weight_score(feature))
+    if role in {"warm_high_subsidence", "cold_high_suppression", "trough_lift"} and score >= 0.18:
+        return True
+    return abs(_h500_weight_score(feature)) >= 0.22
 
 
 def _parse_iso_dt(v: Any) -> datetime | None:
@@ -86,6 +119,7 @@ def _build_synoptic_lines(
     candidates: list[dict[str, Any]],
     cov: float | None,
     line500: str,
+    h500_feature: dict[str, Any] | None,
     line850: str,
     extra: str,
     h700_summary: str,
@@ -96,6 +130,10 @@ def _build_synoptic_lines(
     precip_trend: str,
 ) -> list[str]:
     syn_lines = ["🧭 **环流形势对最高温影响**"]
+    h500_regime = _h500_regime_label(h500_feature)
+    h500_score = _h500_weight_score(h500_feature)
+    h500_role = _h500_thermal_role(h500_feature)
+    h500_key_signal = _h500_has_key_signal(h500_feature)
 
     def _contains_any(text: str, keys: list[str]) -> bool:
         s = str(text or "")
@@ -110,7 +148,9 @@ def _build_synoptic_lines(
             return "平流主导", "暖平流抬升"
         if _contains_any(line850, ["冷平流"]):
             return "平流主导", "冷平流切入"
-        if _contains_any(line500, ["槽", "抬升", "PVA", "涡度"]):
+        if h500_regime in {"副热带高压控制", "副热带高压边缘", "冷高压稳定压温", "高压暖脊", "高压脊"}:
+            return "高压下沉主导", "暖脊控场"
+        if h500_regime in {"低压深槽", "低压槽", "近区槽脊过渡"} or _contains_any(line500, ["抬升", "PVA", "涡度"]):
             return "动力抬升主导", "槽前触发"
         if impact == "background_only":
             return "弱信号背景", "背景噪声"
@@ -158,8 +198,10 @@ def _build_synoptic_lines(
 
         if _contains_any(txt850, ["暖平流", "冷平流", "平流"]):
             s["advection"] += 0.95
-        if _contains_any(txt500, ["槽", "抬升", "PVA", "涡度"]):
+        if h500_key_signal:
             s["dynamic"] += 0.85
+        elif _contains_any(txt500, ["副热带高压", "冷高压", "深槽", "低压槽", "暖脊", "高压脊", "抬升", "PVA", "NVA", "涡度", "下沉稳定"]):
+            s["dynamic"] += 0.55
         if _contains_any(txtx, ["封盖", "压制", "湿层", "低云", "耦合偏弱"]):
             s["stability"] += 0.9
         if _contains_any(txtx + txt850, ["锋", "锋生", "斜压"]):
@@ -295,8 +337,17 @@ def _build_synoptic_lines(
                 return "高层偏干，若日照打开，升温会突然加速"
             return "低层受封盖约束，短时升温不容易放大"
 
-        if ("dynamic" in otype) or _contains_any(str(line500), ["槽", "抬升", "涡度", "PVA"]):
+        if ("dynamic" in otype) or h500_regime in {"低压深槽", "低压槽", "近区槽脊过渡"} or _contains_any(str(line500), ["抬升", "涡度", "PVA"]):
             return "高空有触发信号，但是否落地还要看近地风云配合"
+
+        if h500_regime == "副热带高压控制":
+            return "副热带高压控制更明确，位势高度偏高，下沉增温背景更强"
+        if h500_regime == "副热带高压边缘":
+            return "副高边缘控制下，高空偏稳，但升温能否兑现仍要看低层风云配合"
+        if h500_regime == "冷高压稳定压温":
+            return "冷高压稳定背景明显，下沉虽强，但更偏压温而不是增温"
+        if h500_regime in {"高压暖脊", "高压脊"} or _contains_any(str(line500), ["暖脊", "高压脊", "NVA", "下沉稳定"]):
+            return "高压暖脊和下沉背景占优，整体更偏稳态，主要看低层开窗与混合能否兑现"
 
         if ("shear" in otype):
             return "风场切换型系统，节奏变化快，峰值时段易前后摆动"
@@ -319,6 +370,13 @@ def _build_synoptic_lines(
         t_now = _f(metar_diag.get("latest_temp"))
         td_now = _f(metar_diag.get("latest_dewpoint"))
         wx = str(metar_diag.get("latest_wx") or "").upper()
+        sounding_source = str(snd_thermo.get("profile_source") or "")
+        sounding_conf = str(snd_thermo.get("sounding_confidence") or "")
+        sounding_cap = _f(snd_thermo.get("low_level_cap_score"))
+        sounding_mix = _f(snd_thermo.get("mixing_support_score"))
+        sounding_dry = _f(snd_thermo.get("midlevel_dry_score"))
+        sounding_moist = _f(snd_thermo.get("midlevel_moist_score"))
+        sounding_wind_mix = _f(snd_thermo.get("wind_profile_mix_score"))
 
         up_adj = 0.0
         down_adj = 0.0
@@ -328,19 +386,21 @@ def _build_synoptic_lines(
         # 1) stability / inversion
         inv = 0.0
         if low_cloud is not None and low_cloud >= 70:
-            inv += 0.6
+            inv += 0.35 if sounding_source == "obs" else 0.6
         if w850 is not None and w850 <= 15:
-            inv += 0.35
+            inv += 0.18 if sounding_source == "obs" else 0.35
         if "耦合偏弱" in h925_summary:
-            inv += 0.35
+            inv += 0.20 if sounding_source == "obs" else 0.35
+        if sounding_cap is not None:
+            inv = max(inv, 0.95 * sounding_cap)
         if inv >= 0.9:
             down_adj += 0.55
             profile_score += 0.35
-            tags.append("逆温/稳定约束偏强")
+            tags.append("探空稳定层/封盖约束偏强" if sounding_source == "obs" else "逆温/稳定约束偏强")
         elif inv >= 0.45:
             down_adj += 0.25
             profile_score += 0.25
-            tags.append("低层稳定约束")
+            tags.append("探空显示低层稳定约束" if sounding_source == "obs" else "低层稳定约束")
 
         # 2) convection
         capev = snd_thermo.get("sbcape_jkg") or snd_thermo.get("mlcape_jkg") or snd_thermo.get("mucape_jkg")
@@ -362,7 +422,13 @@ def _build_synoptic_lines(
                 tags.append("近冰点相变/潜热冷却风险")
 
         # 4) moisture structure (mid-dry / upper moist hints)
-        dry_factor = h700_dry_support_factor(h700_summary)
+        dry_factor = h700_effective_dry_factor(
+            h700_summary,
+            low_cloud_pct=low_cloud,
+            cloud_code_now=cloud_code_now,
+        )
+        if sounding_dry is not None:
+            dry_factor = max(dry_factor * (0.65 if sounding_source == "obs" else 1.0), 0.95 * sounding_dry)
         if dry_factor > 0:
             profile_score += 0.18 * dry_factor
             if cloud_code_now in {"CLR", "CAVOK", "SKC", "FEW", "SCT"}:
@@ -370,16 +436,22 @@ def _build_synoptic_lines(
             else:
                 up_adj += 0.10 * dry_factor
             if dry_factor >= 0.75:
-                tags.append("中层偏干+低层开窗（增温效率提升）")
+                tags.append("探空中层偏干+低层开窗（增温效率提升）" if sounding_source == "obs" else "中层偏干+低层开窗（增温效率提升）")
             elif dry_factor >= 0.30:
-                tags.append("中层偏干背景（需配合低层开窗）")
-        elif h700_is_moist_constraint(h700_summary):
+                tags.append("探空中层偏干背景（需配合低层开窗）" if sounding_source == "obs" else "中层偏干背景（需配合低层开窗）")
+        moist_constraint = (sounding_moist is not None and sounding_moist >= 0.45) or h700_is_moist_constraint(h700_summary)
+        if moist_constraint and dry_factor <= 0:
             profile_score += 0.35
-            down_adj += 0.25
-            tags.append("中层湿层约束")
+            down_adj += 0.25 + (0.08 if sounding_moist is not None and sounding_moist >= 0.75 else 0.0)
+            tags.append("探空中层湿层约束" if sounding_source == "obs" else "中层湿层约束")
 
         # 5) shear / mixing
-        if w850 is not None:
+        mix_signal = max(sounding_mix or 0.0, sounding_wind_mix or 0.0)
+        if mix_signal >= 0.7:
+            up_adj += 0.26
+            profile_score += 0.24
+            tags.append("探空显示混合下传条件较好")
+        elif w850 is not None:
             if w850 >= 25 and (low_cloud is None or low_cloud <= 55):
                 up_adj += 0.2
                 profile_score += 0.2
@@ -393,6 +465,11 @@ def _build_synoptic_lines(
             down_adj += 0.08
             profile_score += 0.1
             tags.append("风切节奏扰动")
+        if sounding_source == "obs":
+            if sounding_conf == "H":
+                profile_score += 0.20
+            elif sounding_conf == "M":
+                profile_score += 0.12
 
         return {
             "up_adj": up_adj,
@@ -412,7 +489,11 @@ def _build_synoptic_lines(
 
         if _contains_any(extra, ["封盖", "压制", "湿层", "低云"]):
             down += 1.0
-        if h700_dry_support_factor(h700_summary) <= 0 and _contains_any(extra, ["干层", "日照", "升温加速"]):
+        if h700_effective_dry_factor(
+            h700_summary,
+            low_cloud_pct=calc_window.get("low_cloud_pct"),
+            cloud_code_now=cloud_code_now,
+        ) <= 0 and _contains_any(extra, ["干层", "日照", "升温加速"]):
             up += 0.8
 
         try:
@@ -461,15 +542,36 @@ def _build_synoptic_lines(
                 rmax = 0.0
             if rmax >= 0.9:
                 sys_score += 0.45
+        if h500_key_signal:
+            if h500_role in {"warm_high_subsidence", "cold_high_suppression", "trough_lift"}:
+                sys_score += 0.55
+            elif abs(h500_score) >= 0.28:
+                sys_score += 0.38
 
         # profile route
         profile_score = 0.0
-        if h700_summary:
-            profile_score += 0.7
+        try:
+            low_cloud_prof = float(calc_window.get("low_cloud_pct")) if calc_window.get("low_cloud_pct") is not None else None
+        except Exception:
+            low_cloud_prof = None
+        h700_eff = h700_effective_dry_factor(
+            h700_summary,
+            low_cloud_pct=low_cloud_prof,
+            cloud_code_now=cloud_code_now,
+        )
+        h700_moist = h700_is_moist_constraint(h700_summary)
+        if h700_moist:
+            profile_score += 0.42
+        elif h700_eff >= 0.85:
+            profile_score += 0.22
             if "近站" in h700_summary:
-                profile_score += 0.45
+                profile_score += 0.10
             elif "外围" in h700_summary:
-                profile_score += 0.2
+                profile_score += 0.04
+        elif h700_eff >= 0.55:
+            profile_score += 0.10
+            if "近站" in h700_summary:
+                profile_score += 0.04
         if h925_summary:
             profile_score += 0.35
             if "偏弱" in h925_summary:
@@ -600,6 +702,7 @@ def _build_synoptic_lines(
         m = re.search(r"(暖平流|冷平流)([^（]*)（([0-9.]+)，([^）]+)）", txt)
         if m:
             kind = m.group(1)
+            qual = str(m.group(2) or "").strip()
             conf_raw = float(m.group(3))
             if conf_raw >= 0.67:
                 conf = "高"
@@ -608,7 +711,8 @@ def _build_synoptic_lines(
             else:
                 conf = "低"
             eta = m.group(4)
-            return f"{kind}（置信度{conf}，可能影响时间{eta}）"
+            qual_txt = f"{qual}，" if qual else ""
+            return f"{kind}（{qual_txt}置信度{conf}，可能影响时间{eta}）"
         return txt
 
     line850_h = _humanize_850(line850)
@@ -635,29 +739,81 @@ def _build_synoptic_lines(
             "云层若放开更易再冲高",
             "高空背景信号有限",
             "高空背景一般",
+            "500hPa弱信号背景",
         ]
         return any(k in t for k in generic_tokens)
 
     evidence_bits: list[str] = []
-    if line850_h and not _is_weak_evidence(line850_h):
+    has_850_evidence = bool(line850_h and not _is_weak_evidence(line850_h))
+    has_500_evidence = bool(
+        line500
+        and (not _is_weak_evidence(line500))
+        and (not _is_generic_500(line500))
+        and (
+            h500_key_signal
+            or any(
+                k in str(line500)
+                for k in ["副热带高压", "冷高压", "深槽", "低压槽", "暖脊", "高压脊", "短波", "涡度", "PVA", "NVA", "急流", "冷涡", "切断低压", "位势高度"]
+            )
+        )
+    )
+    try:
+        low_cloud_pct = float(calc_window.get("low_cloud_pct")) if calc_window.get("low_cloud_pct") is not None else None
+    except Exception:
+        low_cloud_pct = None
+    h700_is_constraint = h700_is_moist_constraint(h700_summary)
+    h700_effective = h700_effective_dry_factor(
+        h700_summary,
+        low_cloud_pct=low_cloud_pct,
+        cloud_code_now=cloud_code_now,
+    )
+    h700_key = bool(
+        h700_summary
+        and (not _is_weak_evidence(h700_summary))
+        and h700_should_surface_in_evidence(
+            h700_summary,
+            low_cloud_pct=low_cloud_pct,
+            cloud_code_now=cloud_code_now,
+        )
+    )
+
+    if has_500_evidence:
+        evidence_bits.append(f"500hPa: {line500}")
+    if has_850_evidence:
         evidence_bits.append(f"850hPa: {line850_h}")
+    has_925_evidence = bool(h925_summary and not _is_weak_evidence(h925_summary))
+    # 700hPa more often serves as background/supporting context. Surface it only
+    # when stronger 500/850 signals are absent, or when it is a true moist-layer constraint.
+    if h700_key and (
+        h700_is_constraint
+        or (
+            (not has_500_evidence)
+            and (not has_850_evidence)
+            and (not has_925_evidence)
+            and h700_effective >= 0.85
+        )
+    ):
+        evidence_bits.append(f"700hPa: {h700_summary}")
 
-    if h700_summary and not _is_weak_evidence(h700_summary):
-        d700 = _h700_dist_km(h700_summary)
-        h700_key = h700_should_surface_in_evidence(h700_summary) or ((d700 is not None) and (d700 <= 360))
-        if h700_key:
-            evidence_bits.append(f"700hPa: {h700_summary}")
-
-    if line500 and (not _is_weak_evidence(line500)) and (not _is_generic_500(line500)):
-        strong500 = any(k in str(line500) for k in ["槽", "短波", "涡度", "PVA", "急流", "冷涡"])
-        if strong500:
-            evidence_bits.append(f"500hPa: {line500}")
-
-    if h925_summary and not _is_weak_evidence(h925_summary):
+    if has_925_evidence:
         evidence_bits.append(f"925hPa: {h925_summary}")
 
-    if extra and not _is_weak_evidence(extra) and not (h700_dry_support_factor(h700_summary) > 0 and ("偏干" in str(extra) or "700hPa" in str(extra))):
-        evidence_bits.append(f"约束: {extra}")
+        h700_duplicate = (
+            h700_dry_support_factor(h700_summary) > 0
+            and any(k in str(extra) for k in ["700hPa", "偏干", "干空气", "中层", "下传", "升温效率", "云开"])
+        )
+        h925_duplicate = bool(
+            extra
+            and (
+                str(extra).startswith("925hPa：")
+                or str(extra).startswith("925hPa:")
+                or str(extra).startswith("925hPa ")
+                or str(extra).startswith("低层耦合偏")
+                or (h925_summary and str(h925_summary) in str(extra))
+            )
+        )
+        if extra and not _is_weak_evidence(extra) and not h700_duplicate and not h925_duplicate:
+            evidence_bits.append(f"约束: {extra}")
 
     if evidence_bits:
         if len(evidence_bits) == 1:
@@ -670,9 +826,18 @@ def _build_synoptic_lines(
     def _sounding_layer_note() -> str | None:
         bits: list[str] = []
         sf = _sounding_factor_pack()
+        layer_findings = [str(x).strip() for x in (snd_thermo.get("layer_findings") or []) if str(x).strip()]
+
+        for finding in layer_findings[:2]:
+            if finding not in bits:
+                bits.append(finding)
 
         if h700_summary:
-            if h700_dry_support_factor(h700_summary) >= 0.75:
+            if h700_effective_dry_factor(
+                h700_summary,
+                low_cloud_pct=calc_window.get("low_cloud_pct"),
+                cloud_code_now=cloud_code_now,
+            ) >= 0.75:
                 bits.append("中层(600-700hPa)偏干")
             elif h700_is_moist_constraint(h700_summary):
                 bits.append("中层(700hPa)湿层约束")
@@ -719,13 +884,62 @@ def _build_synoptic_lines(
     )
 
     if compact_synoptic:
-        short_cue = "以实况触发为主"
+        regime500 = ""
+        if h500_regime == "副热带高压控制":
+            regime500 = "副热带高压控制"
+        elif h500_regime == "副热带高压边缘":
+            regime500 = "副热带高压边缘"
+        elif h500_regime == "冷高压稳定压温":
+            regime500 = "冷高压稳定压温背景"
+        elif h500_regime == "高压暖脊":
+            regime500 = "高压暖脊背景"
+        elif h500_regime == "高压脊":
+            regime500 = "高压脊背景"
+        elif h500_regime == "低压深槽":
+            regime500 = "低压深槽背景"
+        elif h500_regime == "低压槽":
+            regime500 = "低压槽背景"
+        elif h500_regime == "近区槽脊过渡":
+            regime500 = "近区槽脊过渡背景"
+
+        advec_cue = ""
+        dry_factor = 0.0
         if "暖平流" in line850 and "冷平流" not in line850:
-            short_cue = "暖平流对上沿仍有支撑"
+            advec_cue = "暖平流对上沿仍有支撑"
         elif "冷平流" in line850:
-            short_cue = "冷平流对上沿有抑制"
-        elif h700_dry_support_factor(h700_summary) >= 0.75:
-            short_cue = "中层偏干有利白天增温"
+            advec_cue = "冷平流对上沿有抑制"
+        else:
+            try:
+                low_cloud_pct = float(calc_window.get("low_cloud_pct")) if calc_window.get("low_cloud_pct") is not None else None
+            except Exception:
+                low_cloud_pct = None
+            dry_factor = h700_effective_dry_factor(
+                h700_summary,
+                low_cloud_pct=low_cloud_pct,
+                cloud_code_now=cloud_code_now,
+            )
+        if not advec_cue and (not regime500) and dry_factor >= 0.85:
+            advec_cue = "中层偏干有利白天增温"
+
+        if regime500 and advec_cue:
+            short_cue = f"{regime500}下，{advec_cue}"
+        elif regime500:
+            if "副热带高压控制" in regime500:
+                short_cue = "副热带高压控制下，下沉增温背景更明确"
+            elif "副热带高压边缘" in regime500:
+                short_cue = "副高边缘下，仍需看低层风云是否把增温兑现"
+            elif "冷高压稳定压温" in regime500:
+                short_cue = "冷高压稳定压温背景下，上沿更易受压"
+            elif "低压深槽" in regime500 or "低压槽" in regime500:
+                short_cue = f"{regime500}下，高空动力与云量风险更值得警惕"
+            elif "暖脊" in regime500 or "高压脊" in regime500:
+                short_cue = f"{regime500}下，整体更偏稳态"
+            else:
+                short_cue = f"{regime500}下，仍需看近地风云配合"
+        elif advec_cue:
+            short_cue = advec_cue
+        else:
+            short_cue = "以实况触发为主"
 
         # expose thermal-balance/window-prior constraints in human wording
         thermal_txt = ""
@@ -1418,6 +1632,7 @@ def choose_section_text(
     line500 = state["line500"]
     line850 = state["line850"]
     extra = state["extra"]
+    h500_feature = state["h500_feature"]
     h700_summary = state["h700_summary"]
     h925_summary = state["h925_summary"]
     snd_thermo = state["snd_thermo"]
@@ -1440,6 +1655,7 @@ def choose_section_text(
         candidates=candidates,
         cov=cov,
         line500=line500,
+        h500_feature=h500_feature,
         line850=line850,
         extra=extra,
         h700_summary=h700_summary,
@@ -1465,6 +1681,7 @@ def choose_section_text(
         quality=quality,
         obj=obj,
         line500=line500,
+        h500_feature=h500_feature,
         line850=line850,
         extra=extra,
         h700_summary=h700_summary,

@@ -451,6 +451,8 @@ def find_similar_days(
         score = 0.0
         reasons: list[tuple[float, str]] = []
         row_date = str(row.get("local_date") or "")
+        branch_label = _analog_branch_label(row)
+        alignment = branch_alignment(branch_label, synoptic_context)
 
         row_day_of_year = _date_to_day_of_year(row_date)
         if target_day_of_year is not None and row_day_of_year is not None:
@@ -474,17 +476,14 @@ def find_similar_days(
         if tag_bonus >= 0.7:
             reasons.append((tag_bonus, f"次级标签重合（{len(row_tags & live_tags)} 项）"))
 
-        if not live_obs_available:
-            branch_label = _analog_branch_label(row)
-            alignment = branch_alignment(branch_label, synoptic_context)
-            if alignment.get("alignment") == "supportive":
-                bonus = 1.6
-                score += bonus
-                reasons.append((bonus, f"预报背景支持 {branch_label}"))
-            elif alignment.get("alignment") == "conflicting":
-                penalty = 0.5
-                score -= penalty
-                reasons.append((-penalty, f"预报背景不支持 {branch_label}"))
+        if alignment.get("alignment") == "supportive":
+            bonus = 1.2 if live_obs_available else 1.6
+            score += bonus
+            reasons.append((bonus, f"环流背景支持 {branch_label}"))
+        elif alignment.get("alignment") == "conflicting":
+            penalty = 1.35 if live_obs_available else 1.0
+            score -= penalty
+            reasons.append((-penalty, f"环流背景不支持 {branch_label}"))
 
         hist_state = _historical_state_for_row(station_id, row, current_hour, current_minute)
         hist_wind_sector = str((hist_state or {}).get("wind_sector") or row.get("dominant_wind_sector") or "")
@@ -496,6 +495,30 @@ def find_similar_days(
             bonus = 0.6
             score += bonus
             reasons.append((bonus, f"当前时刻风向同属 {_wind_family(hist_wind_sector)} 象限"))
+        elif live_obs_available and current_state.get("wind_sector") and hist_wind_sector and _wind_family(hist_wind_sector) != _wind_family(str(current_state.get("wind_sector"))):
+            penalty = 0.45
+            score -= penalty
+            reasons.append((-penalty, f"风向象限不一致（{current_state.get('wind_sector')} / {hist_wind_sector}）"))
+
+        if live_obs_available and current_state.get("wind_dir_deg") is not None and hist_state and hist_state.get("wind_dir_deg") is not None:
+            diff = _circular_wind_diff_deg(current_state.get("wind_dir_deg"), hist_state.get("wind_dir_deg"))
+            if diff is not None:
+                if diff <= 25.0:
+                    bonus = 1.7
+                    score += bonus
+                    reasons.append((bonus, f"当前时刻风向角度接近（差 `{diff:.0f}°`）"))
+                elif diff <= 50.0:
+                    bonus = 0.9
+                    score += bonus
+                    reasons.append((bonus, f"当前时刻风向较接近（差 `{diff:.0f}°`）"))
+                elif diff >= 130.0:
+                    penalty = 1.35
+                    score -= penalty
+                    reasons.append((-penalty, f"当前时刻风向明显相反（差 `{diff:.0f}°`）"))
+                elif diff >= 90.0:
+                    penalty = 0.70
+                    score -= penalty
+                    reasons.append((-penalty, f"当前时刻风向偏差较大（差 `{diff:.0f}°`）"))
 
         if live_obs_available and current_state.get("temp_c") is not None and hist_state and hist_state.get("temp_c") is not None:
             diff = abs(float(hist_state["temp_c"]) - float(current_state["temp_c"]))
@@ -522,6 +545,10 @@ def find_similar_days(
                 bonus = 0.7
                 score += bonus
                 reasons.append((bonus, f"云结构同类（{cloud_signature_to_cn(live_sig)} / {cloud_signature_to_cn(hist_sig)}）"))
+            else:
+                penalty = 0.55
+                score -= penalty
+                reasons.append((-penalty, f"云结构不一致（{cloud_signature_to_cn(live_sig)} / {cloud_signature_to_cn(hist_sig)}）"))
 
         if live_obs_available and current_state.get("cloud_effective_cover") is not None and hist_state and hist_state.get("cloud_effective_cover") is not None:
             diff = abs(float(hist_state["cloud_effective_cover"]) - float(current_state["cloud_effective_cover"]))
@@ -536,6 +563,10 @@ def find_similar_days(
             score += bonus
             if bonus >= 0.2:
                 reasons.append((bonus, f"风速接近（差 `{diff:.1f}m/s`）"))
+            elif diff >= 5.5:
+                penalty = 0.35
+                score -= penalty
+                reasons.append((-penalty, f"风速差异较大（差 `{diff:.1f}m/s`）"))
 
         current_precip = str(current_state.get("precip_state") or "none")
         hist_precip = str((hist_state or {}).get("precip_state") or "")
@@ -547,6 +578,47 @@ def find_similar_days(
             bonus = 0.4
             score += bonus
             reasons.append((bonus, "都更接近晴空增温路径"))
+        elif live_obs_available and ((current_precip not in {"", "none"} and hist_precip in {"", "none"}) or (current_precip in {"", "none"} and hist_precip not in {"", "none"})):
+            penalty = 0.75
+            score -= penalty
+            reasons.append((-penalty, "降水/湿重置状态不一致"))
+
+        live_wind_shift = _safe_float(current_state.get("wind_dir_change_deg"))
+        row_wind_shift = _flag_true(row.get("wind_shift_transition_flag")) or (_safe_float(row.get("wind_shift_count")) or 0.0) >= 2.0
+        if live_obs_available and live_wind_shift is not None:
+            if live_wind_shift >= 50.0 and row_wind_shift:
+                bonus = 1.1
+                score += bonus
+                reasons.append((bonus, "风向切换状态一致"))
+            elif live_wind_shift >= 50.0 and not row_wind_shift:
+                penalty = 0.95
+                score -= penalty
+                reasons.append((-penalty, "当前风向切换明显，但历史日无对应切换"))
+            elif live_wind_shift <= 25.0 and row_wind_shift:
+                penalty = 0.40
+                score -= penalty
+                reasons.append((-penalty, "历史日依赖风向切换，但当前风场更稳"))
+
+        live_rad = _safe_float(current_state.get("radiation_eff"))
+        if live_obs_available and live_rad is not None:
+            row_clear = _flag_true(row.get("clean_solar_ramp_flag")) or _flag_true(row.get("dry_mixing_flag"))
+            row_cloudy = _flag_true(row.get("cloud_suppressed_flag")) or _flag_true(row.get("rain_reset_flag"))
+            if live_rad >= 0.75 and row_clear:
+                bonus = 0.55
+                score += bonus
+                reasons.append((bonus, "辐射背景与历史增温路径一致"))
+            elif live_rad >= 0.75 and row_cloudy:
+                penalty = 0.45
+                score -= penalty
+                reasons.append((-penalty, "当前辐射较好，但历史日更偏压制型"))
+            if live_rad <= 0.45 and row_cloudy:
+                bonus = 0.55
+                score += bonus
+                reasons.append((bonus, "低辐射背景与历史压制路径一致"))
+            elif live_rad <= 0.45 and row_clear:
+                penalty = 0.45
+                score -= penalty
+                reasons.append((-penalty, "当前辐射受限，但历史日更偏晴空增温"))
 
         if live_obs_available and hist_state and hist_state.get("_state_source") == "raw_hourly":
             hour_gap = abs(int(hist_state.get("_hour_gap") or 0))
@@ -585,10 +657,14 @@ def _live_state_vector(metar_diag: dict[str, Any], live_regime: dict[str, Any]) 
     return {
         "temp_c": _safe_float(signals.get("latest_temp_c")),
         "dew_c": _safe_float(signals.get("dewpoint_c")),
+        "wind_dir_deg": _safe_float(signals.get("latest_wdir_deg")),
+        "wind_dir_change_deg": _safe_float(signals.get("wind_dir_change_deg")),
         "wind_sector": live_regime.get("wind_sector") or wind_sector_from_diag(signals.get("latest_wdir_deg")),
         "wind_speed_ms": kt_to_ms(_safe_float(signals.get("latest_wspd_kt"))),
         "cloud_effective_cover": _safe_float(signals.get("cloud_effective_cover")),
         "cloud_signature": live_regime.get("cloud_signature") or _live_cloud_signature(metar_diag),
+        "radiation_eff": _safe_float(signals.get("radiation_eff")),
+        "temp_bias_c": _safe_float(signals.get("temp_bias_c")),
         "precip_state": str(signals.get("precip_state") or "none").lower(),
     }
 
@@ -1364,12 +1440,23 @@ def assess_analog_branches(
         strength = "medium"
         strength_cn = "中参考"
 
+    top_alignment = branch_alignment(str(top.get("label") or ""), synoptic_context)
+    if top_alignment.get("alignment") == "conflicting":
+        if strength == "strong":
+            strength = "medium"
+            strength_cn = "中参考"
+        elif strength == "medium":
+            strength = "weak"
+            strength_cn = "弱参考"
+
     selected_rows = top.get("rows") if strength in {"strong", "medium"} else focus
     return {
         "preferred_branch": str(top.get("label") or ""),
         "preferred_branch_rationale": str(top.get("rationale") or ""),
         "reference_strength": strength,
         "reference_strength_cn": strength_cn,
+        "preferred_branch_alignment": str(top_alignment.get("alignment") or "neutral"),
+        "preferred_branch_alignment_rationale": str(top_alignment.get("rationale") or ""),
         "synoptic_context_source": str((synoptic_context or {}).get("source") or ""),
         "top_branch_score": round(top_score, 2),
         "second_branch_score": round(second_score, 2) if second_score is not None else None,
@@ -1467,10 +1554,38 @@ def _branch_fit_score(
 
     alignment = branch_alignment(label, synoptic_context)
     if alignment.get("alignment") == "supportive":
-        score += 0.6
+        score += 0.75
         reasons.append(str(alignment.get("rationale") or "环流背景与当前分支同向"))
     elif alignment.get("alignment") == "conflicting":
-        score -= 0.2
+        score -= 1.15
+        reasons.append(str(alignment.get("rationale") or "环流背景与当前分支冲突"))
+
+    if "风向切换" in label and (wind_change is None or wind_change < 35.0):
+        score -= 0.55
+    if ("干混合" in label or "晴空增温" in label) and (
+        precip_state not in {"", "none"} or (radiation_eff is not None and radiation_eff <= 0.45)
+    ):
+        score -= 0.55
+    if "云压制" in label and (
+        (radiation_eff is not None and radiation_eff >= 0.78)
+        or (cloud_cover is not None and cloud_cover <= 0.20)
+    ):
+        score -= 0.50
+    if "云压制" in label and live_primary in {"dry_mixing", "clean_solar_ramp"}:
+        penalty = 0.0
+        if radiation_eff is not None and radiation_eff >= 0.68:
+            penalty += 0.65
+        if cloud_cover is not None and cloud_cover <= 0.45:
+            penalty += 0.45
+        if precip_state in {"", "none"}:
+            penalty += 0.25
+        if penalty > 0.0:
+            score -= penalty
+            reasons.append("当前实况更偏干混合增温，重云压制证据不足")
+    if "云压制" in label and cloud_cover is not None and radiation_eff is not None:
+        if cloud_cover <= 0.40 and radiation_eff >= 0.72:
+            score -= 0.55
+            reasons.append("云量不高且辐射效率尚可，云压制概率偏低")
 
     return score, "；".join(reasons[:3])
 
@@ -1682,6 +1797,15 @@ def _wind_family(sector: str | None) -> str | None:
     if sector == "W":
         return "W"
     return None
+
+
+def _circular_wind_diff_deg(a: Any, b: Any) -> float | None:
+    da = _safe_float(a)
+    db = _safe_float(b)
+    if da is None or db is None:
+        return None
+    raw = abs((da % 360.0) - (db % 360.0))
+    return min(raw, 360.0 - raw)
 
 
 def _historical_temp_for_hour(row: dict[str, Any], hour: int | None) -> float | None:

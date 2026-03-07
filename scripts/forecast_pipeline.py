@@ -18,6 +18,7 @@ from diagnostics_700 import diagnose_700
 from diagnostics_850 import advection_eta_local, distance_km_from_system
 from diagnostics_925 import diagnose_925
 from diagnostics_sounding import diagnose_sounding
+from sounding_obs_service import build_sounding_obs_context
 from synoptic_regime import advection_reach_score, classify_large_scale_regime
 from vertical_3d import build_3d_objects
 from contracts import (
@@ -150,27 +151,115 @@ def _classify_anchor_error(msg: str) -> str:
 
 def _build_500_background_line(diag500: dict[str, Any] | None) -> str:
     diag = dict(diag500 or {})
-    phase = str(diag.get("phase") or "").strip()
+    regime_label = str(diag.get("regime_label") or "").strip()
     hint = str(diag.get("phase_hint") or "").strip()
-    pva = str(diag.get("pva_proxy") or "").strip()
+    pva_explained = str(diag.get("pva_explained") or "").strip()
     trend = str(diag.get("trend_12_24h") or "").strip()
     confidence = str(diag.get("confidence") or "").strip()
+    height_text = str(diag.get("height_text") or "").strip()
+    notable_params = [str(item).strip() for item in (diag.get("notable_params") or []) if str(item).strip()]
 
-    if (not phase) or phase in {"中性", "弱信号背景"}:
-        if ("上升" in pva) or ("下沉" in pva):
-            return f"500hPa弱信号背景，{pva}。"
+    if (not regime_label) or regime_label in {"中性", "高空弱信号背景", "弱信号背景"}:
+        if pva_explained and pva_explained != "中性":
+            return f"500hPa弱信号背景，{pva_explained}。"
         return "高空背景信号有限。"
 
-    parts: list[str] = [f"500hPa {phase}"]
+    parts: list[str] = [f"500hPa {regime_label}"]
     if hint and hint not in {"南北向过渡"}:
         parts[0] += f"（{hint}）"
-    if pva and pva != "中性":
-        parts.append(pva)
+    if height_text:
+        parts.append(height_text)
+    if pva_explained and pva_explained != "中性":
+        parts.append(pva_explained)
+    if notable_params:
+        parts.append("，".join(notable_params[:2]))
     if trend and trend not in {"不明确"}:
         parts.append(trend)
     if confidence and confidence not in {"低"}:
         parts.append(f"{confidence}置信")
     return "；".join(parts) + "。"
+
+
+def _estimate_advection_eta_hours(distance_km: float | None, score: float, w850_kmh: float | None) -> tuple[float, float]:
+    if distance_km is None or distance_km <= 0:
+        return (0.0, 0.0)
+    base_speed = max(18.0, (w850_kmh or 30.0) * 0.55)
+    center = distance_km / base_speed
+    spread = max(1.0, 4.0 - 2.5 * score)
+    lo = max(0.0, center - spread)
+    hi = max(lo + 0.5, center + spread)
+    return (lo, hi)
+
+
+def _window_dt_bounds(primary_window: dict[str, Any], fallback_now: datetime) -> tuple[datetime, datetime]:
+    start_txt = str(primary_window.get("start_local") or "")
+    end_txt = str(primary_window.get("end_local") or "")
+    try:
+        start_dt = datetime.strptime(start_txt, "%Y-%m-%dT%H:%M")
+    except Exception:
+        start_dt = fallback_now
+    try:
+        end_dt = datetime.strptime(end_txt, "%Y-%m-%dT%H:%M")
+    except Exception:
+        end_dt = start_dt
+    if fallback_now.tzinfo is not None:
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=fallback_now.tzinfo)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=fallback_now.tzinfo)
+    if end_dt < start_dt:
+        end_dt = start_dt
+    return start_dt, end_dt
+
+
+def _select_850_advection_system(
+    systems: list[dict[str, Any]],
+    *,
+    now_local: datetime,
+    primary_window: dict[str, Any],
+    w850_kmh: float | None,
+) -> tuple[dict[str, Any] | None, float | None, str]:
+    if not systems:
+        return None, None, ""
+
+    window_start, window_end = _window_dt_bounds(primary_window, now_local)
+    window_mid = window_start + (window_end - window_start) / 2
+    best_system: dict[str, Any] | None = None
+    best_score: float | None = None
+    best_tag = ""
+
+    for system in systems:
+        reach_score, _ = advection_reach_score(system, w850_kmh)
+        distance_km = distance_km_from_system(system)
+        eta_lo_h, eta_hi_h = _estimate_advection_eta_hours(distance_km, reach_score, w850_kmh)
+        impact_start = now_local + timedelta(hours=eta_lo_h)
+        impact_end = now_local + timedelta(hours=eta_hi_h)
+
+        overlap = not (impact_end < (window_start - timedelta(hours=1.0)) or impact_start > (window_end + timedelta(hours=1.0)))
+        window_distance_h = abs(((impact_start + (impact_end - impact_start) / 2) - window_mid).total_seconds()) / 3600.0
+
+        ranking = reach_score * 1.2
+        tag = "窗口外"
+        if overlap:
+            ranking += 0.8
+            tag = "窗口期内"
+        elif window_distance_h <= 2.5:
+            ranking += 0.45
+            tag = "窗口期附近"
+        elif impact_start > window_end:
+            tag = "偏后段"
+        else:
+            tag = "偏前段"
+
+        if distance_km is not None:
+            ranking -= min(distance_km / 4000.0, 0.25)
+
+        if best_score is None or ranking > best_score:
+            best_system = system
+            best_score = ranking
+            best_tag = tag
+
+    return best_system, best_score, best_tag
 
 
 def build_forecast_decision(
@@ -179,6 +268,7 @@ def build_forecast_decision(
     target_date: str,
     model: str,
     synoptic_provider: str,
+    now_utc: datetime,
     now_local: datetime,
     station_lat: float,
     station_lon: float,
@@ -194,7 +284,8 @@ def build_forecast_decision(
     ) or {}
     diag925 = diagnose_925(primary_window, None) or {}
     temp_unit = "F" if str(getattr(station, "icao", "")).upper().startswith("K") else "C"
-    snd = diagnose_sounding(primary_window, {}, temp_unit=temp_unit) or {}
+    sounding_obs = build_sounding_obs_context(station=station, now_utc=now_utc)
+    snd = diagnose_sounding(primary_window, {}, temp_unit=temp_unit, obs_context=sounding_obs) or {}
 
     regimes = classify_large_scale_regime(synoptic, station_lat, primary_window.get("w850_kmh"))
     regime_txt = regimes[0] if regimes else "过渡背景"
@@ -208,11 +299,19 @@ def build_forecast_decision(
     advec = [s for s in syn_systems if "advection" in str(s.get("system_type", ""))]
     advec_txt = "低层输送信号一般"
     if advec:
-        a = advec[0]
+        a, ranking, window_tag = _select_850_advection_system(
+            advec,
+            now_local=now_local,
+            primary_window=primary_window,
+            w850_kmh=w850,
+        )
+        if a is None:
+            a = advec[0]
         score, lvl = advection_reach_score(a, w850)
         eta_txt = advection_eta_local(now_local, distance_km_from_system(a), score, w850)
         advec_type = "暖平流" if "warm" in str(a.get("system_type", "")) else "冷平流"
-        advec_txt = f"{advec_type}{lvl}（{score:.2f}，{eta_txt}）"
+        qual = window_tag or ("窗口期附近" if (ranking or 0.0) >= 1.4 else "远离窗口")
+        advec_txt = f"{advec_type}{qual}（{score:.2f}，{eta_txt}）"
 
     try:
         start_dt = datetime.strptime(str(primary_window.get("start_local")), "%Y-%m-%dT%H:%M")
@@ -236,15 +335,26 @@ def build_forecast_decision(
         s700_scope = str(diag700.get("dry_intrusion_scope") or "")
         s700_impact = str(diag700.get("impact") or "")
         snd_q = str(((snd.get("thermo") or {}).get("quality")) or "") if isinstance(snd, dict) else ""
+        try:
+            s700_strength = float(diag700.get("dry_intrusion_strength") or 0.0)
+        except Exception:
+            s700_strength = 0.0
+        try:
+            low_cloud_pct = float(primary_window.get("low_cloud_pct")) if primary_window.get("low_cloud_pct") is not None else None
+        except Exception:
+            low_cloud_pct = None
+        promote_dry_extra = s700_scope == "near"
+        if (not promote_dry_extra) and s700_scope == "peripheral":
+            promote_dry_extra = bool(s700_strength >= 12.5 and (low_cloud_pct is None or low_cloud_pct <= 25.0))
 
-        if s700_impact:
+        if promote_dry_extra and s700_impact:
             extra = s700_impact
-        else:
+        elif promote_dry_extra:
             extra = "中层偏干信号存在，需配合低层开窗才容易转化为地面增温"
 
-        if s700_scope in {"peripheral", "remote"}:
+        if extra and s700_scope in {"peripheral", "remote"}:
             extra = extra + "（距离较远，仅按背景弱加分处理）"
-        if snd_q == "missing_profile" and s700_scope != "near":
+        if extra and snd_q == "missing_profile" and s700_scope != "near":
             extra = extra + "（本站探空剖面缺测，未作本地湿干结构确认）"
 
     elif s700 and ("湿层" in s700 or "约束" in s700):
@@ -287,6 +397,28 @@ def build_forecast_decision(
                 "phase": phase500,
                 "phase_hint": phase_hint,
                 "pva_proxy": pva500,
+                "regime_label": str(diag500.get("regime_label") or ""),
+                "proximity": str(diag500.get("proximity") or ""),
+                "confidence": str(diag500.get("confidence") or ""),
+                "forcing_text": str(diag500.get("forcing_text") or ""),
+                "pva_explained": str(diag500.get("pva_explained") or ""),
+                "impact_weight": str(diag500.get("impact_weight") or ""),
+                "notable_params": list(diag500.get("notable_params") or []),
+                "height_text": str(diag500.get("height_text") or ""),
+                "thermal_role": str(diag500.get("thermal_role") or ""),
+                "tmax_weight_score": float(diag500.get("tmax_weight_score") or 0.0),
+                "tmax_bias_label": str(diag500.get("tmax_bias_label") or ""),
+                "subtropical_high_detected": bool(diag500.get("subtropical_high_detected")),
+                "subtropical_high_strength_gpm": diag500.get("subtropical_high_strength_gpm"),
+                "subtropical_station_z500_gpm": diag500.get("subtropical_station_z500_gpm"),
+                "subtropical_station_pct_in_band": diag500.get("subtropical_station_pct_in_band"),
+                "subtropical_relation": diag500.get("subtropical_relation"),
+                "subtropical_support_score": diag500.get("subtropical_support_score"),
+                "subtropical_edge_586_margin_deg": diag500.get("subtropical_edge_586_margin_deg"),
+                "subtropical_edge_588_margin_deg": diag500.get("subtropical_edge_588_margin_deg"),
+                "westerly_belt_detected": bool(diag500.get("westerly_belt_detected")),
+                "westerly_belt_intensity_ms": diag500.get("westerly_belt_intensity_ms"),
+                "surface_coupling": str(diag500.get("surface_coupling") or ""),
             },
             "h850": {
                 "advection": advec_txt,
@@ -299,6 +431,10 @@ def build_forecast_decision(
             },
             "sounding": {
                 "path_bias": str(snd.get("path_bias") or ""),
+                "layer_findings": list(((snd.get("thermo") or {}).get("layer_findings") if isinstance(snd, dict) else []) or []),
+                "actionable": str(((snd.get("thermo") or {}).get("actionable") if isinstance(snd, dict) else "") or ""),
+                "profile_source": str(((snd.get("thermo") or {}).get("profile_source") if isinstance(snd, dict) else "") or ""),
+                "confidence": str(((snd.get("thermo") or {}).get("sounding_confidence") if isinstance(snd, dict) else "") or ""),
                 "thermo": snd.get("thermo") if isinstance(snd, dict) else None,
             },
         },
@@ -659,6 +795,7 @@ def load_or_build_forecast_decision(
         target_date=target_date,
         model=model,
         synoptic_provider=synoptic_provider,
+        now_utc=now_utc,
         now_local=now_local,
         station_lat=station_lat,
         station_lon=station_lon,

@@ -407,7 +407,7 @@ def render_report(
         compute_key=build_request_key(station_icao=st.icao, target_date=target_date),
         query_label=f"{st.city}({st.icao})-{target_date.replace('-', '')}",
     )
-    cached_payload = runtime_control.peek_latest_result_payload()
+    cached_payload = runtime_control.peek_cached_result_payload()
     if cached_payload:
         unchanged_notice = build_unchanged_notice(
             query_label=f"{st.city}({st.icao})-{target_date.replace('-', '')}",
@@ -416,7 +416,7 @@ def render_report(
             cached_payload=cached_payload,
         )
         if unchanged_notice:
-            return unchanged_notice
+            return runtime_control.deliver_cached_or_notice(cached_payload, notice=unchanged_notice)
     preflight = runtime_control.preflight()
     if not preflight.proceed:
         return str(preflight.text or "")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ephemeral runtime controls for /look rate limiting and dedupe."""
+"""Runtime controls for /look inflight dedupe, scope-local replay, and delivery markers."""
 
 from __future__ import annotations
 
@@ -49,12 +49,37 @@ class LookRuntimeContext:
             env.get("SESSION_KEY"),
         )
         inferred_channel, inferred_kind, inferred_peer = _parse_session_key(session_key_value)
+        group_id = _pick_first(env.get("OPENCLAW_GROUP_ID"), env.get("GROUP_ID"))
+        current_channel_id = _pick_first(
+            env.get("OPENCLAW_CURRENT_CHANNEL_ID"),
+            env.get("OPENCLAW_CHAT_ID"),
+            env.get("TELEGRAM_CHAT_ID"),
+            env.get("CHAT_ID"),
+            env.get("CHANNEL_ID"),
+        )
+        inferred_peer_from_channel = _parse_peerish_value(current_channel_id)
+        inferred_kind_from_channel = _infer_peer_kind_from_value(current_channel_id)
         return cls(
-            channel=_pick_first(channel, env.get("OPENCLAW_CHANNEL"), env.get("CHANNEL"), inferred_channel),
-            peer_kind=_pick_first(peer_kind, env.get("OPENCLAW_PEER_KIND"), env.get("PEER_KIND"), inferred_kind),
+            channel=_pick_first(
+                channel,
+                env.get("OPENCLAW_CHANNEL"),
+                env.get("OPENCLAW_MESSAGE_PROVIDER"),
+                env.get("CHANNEL"),
+                inferred_channel,
+            ),
+            peer_kind=_pick_first(
+                peer_kind,
+                env.get("OPENCLAW_PEER_KIND"),
+                "group" if group_id else None,
+                inferred_kind_from_channel,
+                env.get("PEER_KIND"),
+                inferred_kind,
+            ),
             peer_id=_pick_first(
                 peer_id,
                 env.get("OPENCLAW_PEER_ID"),
+                group_id,
+                inferred_peer_from_channel,
                 env.get("OPENCLAW_CHAT_ID"),
                 env.get("TELEGRAM_CHAT_ID"),
                 env.get("CHAT_ID"),
@@ -116,9 +141,11 @@ class LookRuntimeController:
         return PreflightDecision(True, None)
 
     def success(self, text: str, *, result_meta: dict[str, Any] | None = None) -> None:
+        updated_at = time.time()
+        self._write_query_snapshot(text, result_meta=result_meta, updated_at=updated_at)
+        self._mark_delivery_for_current_conversation(updated_at=updated_at)
         if self._rate_limit_active():
-            self._write_latest_result(text, result_meta=result_meta)
-            self._write_shared_result(text, result_meta=result_meta)
+            self._write_scoped_result(text, result_meta=result_meta, updated_at=updated_at)
         self._release_inflight()
 
     def failure(self) -> None:
@@ -158,31 +185,37 @@ class LookRuntimeController:
 
     def _wait_for_inflight(self) -> str | None:
         start = time.time()
-        inflight_path = _inflight_path(self._shared_scope_key())
+        inflight_path = _inflight_path(self._result_scope_key())
         saw_inflight = False
         while True:
             payload = _read_json(inflight_path)
             if not payload:
                 if not saw_inflight:
                     return None
-                result_payload = self._read_latest_result_payload()
-                return self._format_cached_result_notice(result_payload, fallback="♻️ 相同查询刚完成，请查看上一条 /look 结果。") if result_payload else None
+                result_payload = self._read_scoped_result_payload()
+                return self._deliver_or_notice_from_payload(
+                    result_payload,
+                    fallback_notice="♻️ 相同查询刚完成，请查看上一条 /look 结果。",
+                ) if result_payload else None
             saw_inflight = True
             started_at = _safe_float(payload.get("started_at"))
             if started_at is None or (time.time() - started_at) > self.policy.rate_limit.inflight_stale_sec:
                 _unlink_if_exists(inflight_path)
                 return None
-            result_payload = self._read_latest_result_payload()
+            result_payload = self._read_scoped_result_payload()
             if result_payload:
-                return self._format_cached_result_notice(result_payload, fallback="♻️ 相同查询已在本轮完成，请查看上一条 /look 结果。")
+                return self._deliver_or_notice_from_payload(
+                    result_payload,
+                    fallback_notice="♻️ 相同查询已在本轮完成，请查看上一条 /look 结果。",
+                )
             if (time.time() - start) >= self.policy.rate_limit.inflight_wait_sec:
                 return "⏳ 同一查询正在生成中，请稍后查看上一条结果。"
             time.sleep(POLL_INTERVAL_SECONDS)
 
     def _claim_inflight(self) -> None:
-        path = _inflight_path(self._shared_scope_key())
+        path = _inflight_path(self._result_scope_key())
         payload = {
-            "scope_key": self._shared_scope_key(),
+            "scope_key": self._result_scope_key(),
             "compute_key": self.compute_key,
             "started_at": self.now,
             "pid": os.getpid(),
@@ -198,16 +231,32 @@ class LookRuntimeController:
             os.close(fd)
         self._claimed = True
 
-    def peek_latest_result_payload(self) -> dict[str, Any] | None:
-        return self._read_latest_result_payload()
+    def peek_cached_result_payload(self) -> dict[str, Any] | None:
+        if self._rate_limit_active():
+            payload = self._read_scoped_result_payload()
+            if payload:
+                return payload
+            if self._delivery_scope_key():
+                return None
+        return self._read_query_snapshot_payload()
 
-    def _write_latest_result(self, text: str, *, result_meta: dict[str, Any] | None = None) -> None:
+    def deliver_cached_or_notice(self, payload: dict[str, Any] | None, *, notice: str, fallback_text: str | None = None) -> str:
+        normalized = self._normalize_payload(payload, fallback_text=fallback_text)
+        if not normalized:
+            return notice
+        if self._current_chat_already_received_payload(normalized):
+            return notice
+        self._mark_delivery_for_current_chat(normalized)
+        return str(normalized.get("text") or "")
+
+    def _write_scoped_result(self, text: str, *, result_meta: dict[str, Any] | None = None, updated_at: float | None = None) -> None:
+        stamp = float(updated_at if updated_at is not None else time.time())
         _write_json_atomic(
-            _latest_result_path(self._shared_scope_key()),
+            _scoped_result_path(self._result_scope_key()),
             {
-                "scope_key": self._shared_scope_key(),
+                "scope_key": self._result_scope_key(),
                 "compute_key": self.compute_key,
-                "updated_at": time.time(),
+                "updated_at": stamp,
                 "text": text,
                 "query_label": self.query_label,
                 "result_meta": result_meta if isinstance(result_meta, dict) else {},
@@ -216,16 +265,13 @@ class LookRuntimeController:
             },
         )
 
-    def _write_shared_result(self, text: str, *, result_meta: dict[str, Any] | None = None) -> None:
-        ttl_seconds = self.policy.rate_limit.shared_result_ttl_sec
-        if ttl_seconds <= 0:
-            return
+    def _write_query_snapshot(self, text: str, *, result_meta: dict[str, Any] | None = None, updated_at: float | None = None) -> None:
+        stamp = float(updated_at if updated_at is not None else time.time())
         _write_json_atomic(
-            _shared_result_path(self._shared_scope_key()),
+            _query_snapshot_path(self.compute_key),
             {
-                "scope_key": self._shared_scope_key(),
                 "compute_key": self.compute_key,
-                "expires_at": time.time() + ttl_seconds,
+                "updated_at": stamp,
                 "text": text,
                 "query_label": self.query_label,
                 "result_meta": result_meta if isinstance(result_meta, dict) else {},
@@ -234,8 +280,8 @@ class LookRuntimeController:
             },
         )
 
-    def _read_latest_result_payload(self) -> dict[str, Any] | None:
-        payload = _read_json(_latest_result_path(self._shared_scope_key()))
+    def _read_scoped_result_payload(self) -> dict[str, Any] | None:
+        payload = _read_json(_scoped_result_path(self._result_scope_key()))
         if not payload:
             return None
         text = str(payload.get("text") or "").strip()
@@ -244,12 +290,9 @@ class LookRuntimeController:
         payload["text"] = text
         return payload
 
-    def _read_shared_result_payload(self) -> dict[str, Any] | None:
-        payload = _read_json(_shared_result_path(self._shared_scope_key()))
+    def _read_query_snapshot_payload(self) -> dict[str, Any] | None:
+        payload = _read_json(_query_snapshot_path(self.compute_key))
         if not payload:
-            return None
-        expires_at = _safe_float(payload.get("expires_at"))
-        if expires_at is None or expires_at < time.time():
             return None
         text = str(payload.get("text") or "").strip()
         if not text:
@@ -259,11 +302,74 @@ class LookRuntimeController:
 
     def _release_inflight(self) -> None:
         if self._claimed:
-            _unlink_if_exists(_inflight_path(self._shared_scope_key()))
+            _unlink_if_exists(_inflight_path(self._result_scope_key()))
             self._claimed = False
 
-    def _shared_scope_key(self) -> str:
-        scope = self.policy.rate_limit.shared_result_scope
+    def _current_chat_already_received_payload(self, payload: dict[str, Any]) -> bool:
+        scope_key = self._delivery_scope_key()
+        if not scope_key:
+            return False
+        marker = _read_json(_delivery_marker_path(scope_key, self.compute_key))
+        if not marker:
+            return False
+        marker_updated_at = _safe_float(marker.get("payload_updated_at"))
+        payload_updated_at = _safe_float(payload.get("updated_at"))
+        if marker_updated_at is None or payload_updated_at is None:
+            return False
+        return abs(marker_updated_at - payload_updated_at) < 1e-6
+
+    def _mark_delivery_for_current_chat(self, payload: dict[str, Any]) -> None:
+        payload_updated_at = _safe_float(payload.get("updated_at"))
+        if payload_updated_at is None:
+            return
+        self._mark_delivery_for_current_conversation(updated_at=payload_updated_at)
+
+    def _mark_delivery_for_current_conversation(self, *, updated_at: float) -> None:
+        scope_key = self._delivery_scope_key()
+        if not scope_key:
+            return
+        _write_json_atomic(
+            _delivery_marker_path(scope_key, self.compute_key),
+            {
+                "delivery_scope_key": scope_key,
+                "channel": self.context.channel,
+                "peer_kind": self.context.peer_kind,
+                "peer_id": self.context.peer_id,
+                "session_key": self.context.session_key,
+                "compute_key": self.compute_key,
+                "payload_updated_at": float(updated_at),
+                "query_label": self.query_label,
+            },
+        )
+
+    def _delivery_scope_key(self) -> str | None:
+        session_key = str(self.context.session_key or "").strip()
+        if session_key:
+            return f"session:{session_key}"
+        channel = str(self.context.channel or "").strip().lower()
+        peer_kind = str(self.context.peer_kind or "").strip().lower()
+        peer_id = str(self.context.peer_id or "").strip()
+        if channel and peer_kind and peer_id:
+            return f"peer:{channel}:{peer_kind}:{peer_id}"
+        if channel and peer_kind:
+            return f"peer-kind:{channel}:{peer_kind}"
+        if channel and peer_id:
+            return f"peerish:{channel}:{peer_id}"
+        if peer_kind and peer_id:
+            return f"peerish:{peer_kind}:{peer_id}"
+        if peer_id:
+            return f"peer:{peer_id}"
+        if channel:
+            return f"channel:{channel}"
+        if peer_kind:
+            return f"peer-kind:{peer_kind}"
+        # Some live weatherbot invocations still arrive without explicit runtime
+        # context. Fall back to a per-query delivery scope so repeated unchanged
+        # requests do not keep re-posting the full report in the same conversation.
+        return f"unknown:{self.compute_key}"
+
+    def _result_scope_key(self) -> str:
+        scope = self.policy.rate_limit.result_scope
         if scope == "group-only" and self.context.peer_id:
             return f"{RESULT_SCHEMA_VERSION}|group|{self.context.peer_id}|{self.compute_key}"
         return f"{RESULT_SCHEMA_VERSION}|telegram-groups-shared|{self.compute_key}"
@@ -280,6 +386,24 @@ class LookRuntimeController:
         if not label:
             return fallback
         return f"♻️ 已查询过 {label}，请查看上一条 /look 结果。"
+
+    def _deliver_or_notice_from_payload(self, payload: dict[str, Any] | None, *, fallback_notice: str) -> str:
+        if not payload:
+            return fallback_notice
+        return self.deliver_cached_or_notice(
+            payload,
+            notice=self._format_cached_result_notice(payload, fallback=fallback_notice),
+        )
+
+    def _normalize_payload(self, payload: dict[str, Any] | None, *, fallback_text: str | None = None) -> dict[str, Any] | None:
+        normalized = payload if isinstance(payload, dict) else None
+        if not normalized:
+            return None
+        text = str(normalized.get("text") or fallback_text or "").strip()
+        if not text:
+            return None
+        normalized["text"] = text
+        return normalized
 
 
 def build_request_key(*, station_icao: str, target_date: str, command_name: str = "look") -> str:
@@ -305,20 +429,47 @@ def _parse_session_key(session_key: str | None) -> tuple[str | None, str | None,
     return match.group("channel"), match.group("kind"), match.group("peer")
 
 
+def _parse_peerish_value(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = re.match(r"^(?:group|channel|direct|dm|peer|chat|telegram):(?P<peer>-?\d+)$", text, flags=re.IGNORECASE)
+    if match:
+        return match.group("peer")
+    if re.fullmatch(r"-?\d+", text):
+        return text
+    return None
+
+
+def _infer_peer_kind_from_value(value: str | None) -> str | None:
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if text.startswith(("group:", "channel:")):
+        return "group"
+    if text.startswith(("direct:", "dm:", "peer:", "chat:", "telegram:")):
+        return "direct"
+    return None
+
+
 def _user_state_path(scope_key: str) -> Path:
     return STATE_DIR / f"user-{_short_hash(scope_key)}.json"
 
 
-def _shared_result_path(scope_key: str) -> Path:
-    return STATE_DIR / f"shared-result-{_short_hash(scope_key)}.json"
+def _scoped_result_path(scope_key: str) -> Path:
+    return STATE_DIR / f"scoped-result-{_short_hash(scope_key)}.json"
 
 
-def _latest_result_path(scope_key: str) -> Path:
-    return STATE_DIR / f"latest-result-{_short_hash(scope_key)}.json"
+def _query_snapshot_path(compute_key: str) -> Path:
+    return STATE_DIR / f"query-snapshot-{_short_hash(compute_key)}.json"
 
 
 def _inflight_path(scope_key: str) -> Path:
     return STATE_DIR / f"inflight-{_short_hash(scope_key)}.json"
+
+
+def _delivery_marker_path(scope_key: str, compute_key: str) -> Path:
+    return STATE_DIR / f"delivery-{_short_hash(scope_key + '|' + compute_key)}.json"
 
 
 def _short_hash(value: str) -> str:

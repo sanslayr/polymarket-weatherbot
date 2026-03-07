@@ -29,6 +29,7 @@ def diagnose_700(
     """
     dry_nearest_km: float | None = None
     dry_strength: float | None = None
+    dry_rh700: float | None = None
 
     if isinstance(synoptic, dict):
         systems = ((synoptic.get("scale_summary") or {}).get("synoptic") or {}).get("systems") or []
@@ -59,15 +60,19 @@ def diagnose_700(
                     dry_strength = float(s.get("lapse_t850_t700_c"))
                 except Exception:
                     dry_strength = None
+                try:
+                    dry_rh700 = float(s.get("rh700_pct"))
+                except Exception:
+                    dry_rh700 = None
 
     if dry_nearest_km is not None:
         d = float(dry_nearest_km)
         d_txt = f"{d:.0f}km"
-        if d <= 350:
+        if d <= 220:
             scope = "near"
             summary = f"700hPa 干层信号近站（约{d_txt}）"
             impact = "中层干空气下传条件较好，云开时更易维持升温效率"
-        elif d <= 900:
+        elif d <= 650:
             scope = "peripheral"
             summary = f"700hPa 干层信号在外围（约{d_txt}）"
             impact = "作为偏暖背景加分项，需配合低层不回补云才易落地"
@@ -78,6 +83,8 @@ def diagnose_700(
 
         if dry_strength is not None and dry_strength >= 11.0:
             impact += "（干侵强度偏强）"
+        if dry_rh700 is not None and dry_rh700 <= 35.0:
+            impact += "（700hPa 相对湿度偏低）"
 
         return {
             "summary": summary,
@@ -85,6 +92,7 @@ def diagnose_700(
             "dry_intrusion_nearest_km": round(d, 1),
             "dry_intrusion_scope": scope,
             "dry_intrusion_strength": round(float(dry_strength), 2) if dry_strength is not None else None,
+            "rh700_pct": round(float(dry_rh700), 1) if dry_rh700 is not None else None,
             "source": "synoptic-700",
         }
 
