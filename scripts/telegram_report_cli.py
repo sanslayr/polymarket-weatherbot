@@ -354,7 +354,7 @@ def render_report(
     )
     runtime_control = LookRuntimeController(
         context=runtime_context,
-        request_key=build_request_key(station_icao=st.icao, target_date=target_date),
+        compute_key=build_request_key(station_icao=st.icao, target_date=target_date),
     )
     preflight = runtime_control.preflight()
     if not preflight.proceed:
