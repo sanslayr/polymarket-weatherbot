@@ -94,7 +94,7 @@ class LookRuntimeController:
 
         shared_result = self._read_shared_result_text()
         if shared_result:
-            return PreflightDecision(False, f"♻️ 复用 2 分钟内已生成的相同查询结果。\n\n{shared_result}")
+            return PreflightDecision(False, "♻️ 2 分钟内已查询过相同对象，请查看上一条 /look 结果。")
 
         cooldown_left = self._user_cooldown_remaining()
         if cooldown_left > 0:
@@ -165,14 +165,14 @@ class LookRuntimeController:
             payload = _read_json(inflight_path)
             if not payload:
                 result_text = self._read_shared_result_text()
-                return f"♻️ 复用刚完成的相同查询结果。\n\n{result_text}" if result_text else None
+                return "♻️ 相同查询刚完成，请查看上一条 /look 结果。" if result_text else None
             started_at = _safe_float(payload.get("started_at"))
             if started_at is None or (time.time() - started_at) > self.policy.rate_limit.inflight_stale_sec:
                 _unlink_if_exists(inflight_path)
                 return None
             result_text = self._read_shared_result_text()
             if result_text:
-                return f"♻️ 复用正在生成完成的相同查询结果。\n\n{result_text}"
+                return "♻️ 相同查询已在本轮完成，请查看上一条 /look 结果。"
             if (time.time() - start) >= self.policy.rate_limit.inflight_wait_sec:
                 return "⏳ 同一查询正在生成中，请稍后查看上一条结果。"
             time.sleep(POLL_INTERVAL_SECONDS)
