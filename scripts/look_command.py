@@ -4,8 +4,8 @@ from __future__ import annotations
 def render_look_help() -> str:
     return (
         "📘 /look 用法\n"
-        "- /look <城市或机场代码>\n"
-        "- 示例：/look ank | /look London | /look par\n"
+        "- /look <城市或机场代码> [YYYY-MM-DD 或 YYYYMMDD]\n"
+        "- 示例：/look ank | /look London | /look par 20260307\n"
         "\n支持城市（示例）：ank / lon / par / nyc / chi / dal / mia / atl / sea / tor / sel / ba / wel\n"
         "提示：统一单条最终报告输出，不发送预告消息。"
     )
@@ -32,6 +32,15 @@ def parse_telegram_command(text: str) -> dict[str, str]:
         "日期": "date",
     }
     skip_tokens = {"modify", "mod", "update", "set", "修改"}
+
+    def _looks_like_date_token(value: str) -> bool:
+        token = str(value or "").strip()
+        if len(token) == 8 and token.isdigit():
+            return True
+        if len(token) == 10 and token[4] == "-" and token[7] == "-":
+            y, m, d = token[0:4], token[5:7], token[8:10]
+            return y.isdigit() and m.isdigit() and d.isdigit()
+        return False
 
     i = 1
     while i < len(parts):
@@ -63,6 +72,11 @@ def parse_telegram_command(text: str) -> dict[str, str]:
         if key_norm and i + 1 < len(parts):
             params[key_norm] = parts[i + 1].strip()
             i += 2
+            continue
+
+        if _looks_like_date_token(tok):
+            params.setdefault("date", tok)
+            i += 1
             continue
 
         params.setdefault("station", tok)

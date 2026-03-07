@@ -17,7 +17,7 @@ from window_phase_engine import pick_peak_indices
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT / "cache" / "runtime"
-CACHE_TTL_HOURS = 3
+CACHE_TTL_HOURS = int(os.getenv("WEATHERBOT_HOURLY_CACHE_TTL_HOURS", "24") or "24")
 OPENMETEO_BREAKER_SECONDS = int(os.getenv("OPENMETEO_BREAKER_SECONDS", "900") or "900")
 OPENMETEO_BREAKER_FILE = CACHE_DIR / "openmeteo_breaker.json"
 

@@ -41,7 +41,7 @@ def _cache_path(*parts: str) -> Path:
     return CACHE_DIR / f"forecast_decision_{_cache_key(*parts)}.json"
 
 
-def _read_cache(*parts: str, ttl_hours: int = 6) -> dict[str, Any] | None:
+def _read_cache(*parts: str, ttl_hours: int = int(os.getenv("WEATHERBOT_FORECAST_DECISION_CACHE_TTL_HOURS", "2") or "2")) -> dict[str, Any] | None:
     if not runtime_cache_enabled():
         return None
     p = _cache_path(*parts)

@@ -1,0 +1,15 @@
+{
+  "defaults": {
+    "rate_limit": {
+      "enabled": true,
+      "apply_in_direct": false,
+      "user_cooldown_sec": 60,
+      "user_cooldown_scope": "sender-global",
+      "shared_result_ttl_sec": 120,
+      "shared_result_scope": "telegram-groups-shared",
+      "inflight_wait_sec": 20,
+      "inflight_stale_sec": 120
+    }
+  },
+  "groups": {}
+}

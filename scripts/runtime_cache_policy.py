@@ -14,10 +14,10 @@ def _env_flag(name: str, default: str) -> bool:
 
 
 def runtime_cache_enabled() -> bool:
-    # Runtime cache persistence is intentionally disabled for the live workspace.
-    return False
+    # Enable runtime cache by default for live /look latency control.
+    return _env_flag("WEATHERBOT_RUNTIME_CACHE", "1")
 
 
 def gfs_binary_cache_enabled() -> bool:
-    # Keep GRIB downloads in temp workspaces only; do not persist under cache/runtime.
-    return False
+    # Keep binary cache aligned with runtime cache unless explicitly disabled.
+    return _env_flag("WEATHERBOT_GFS_BINARY_CACHE", "1") and runtime_cache_enabled()

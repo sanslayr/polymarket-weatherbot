@@ -27,6 +27,7 @@ PROCESS_T0 = time.perf_counter()
 from forecast_pipeline import load_or_build_forecast_decision
 from realtime_pipeline import classify_window_phase
 from look_command import parse_telegram_command, render_look_help
+from look_runtime_control import LookRuntimeContext, LookRuntimeController, build_request_key
 import build_station_links as BSL
 from hourly_data_service import (
     build_post_eval_window as _build_post_eval_window,
@@ -291,7 +292,15 @@ def _render_metar_only_report(
     return f"{header}\n\n{body}\n{footer}"
 
 
-def render_report(command_text: str) -> str:
+def render_report(
+    command_text: str,
+    *,
+    channel: str | None = None,
+    peer_kind: str | None = None,
+    peer_id: str | None = None,
+    sender_id: str | None = None,
+    session_key: str | None = None,
+) -> str:
     req_start_utc = datetime.now(timezone.utc)
     t_e2e = time.perf_counter()
     bootstrap_elapsed = max(0.0, t_e2e - PROCESS_T0)
@@ -336,355 +345,385 @@ def render_report(command_text: str) -> str:
     except ValueError as exc:
         raise ValueError("date must be YYYY-MM-DD (or YYYYMMDD)") from exc
 
-    # 统一输出：固定走简版主报告（不再支持 mode/section/model/provider 参数）。
-    model = default_model_for_station(st).lower()
-    if model not in {"gfs", "ecmwf"}:
-        model = "gfs"
-    provider = "auto"
-    metar_future = _METAR_FETCH_POOL.submit(fetch_metar_24h, st.icao, force_refresh=LOOK_FORCE_LIVE_METAR)
-
-    t0 = time.perf_counter()
-    provider_used = "unknown"
-    try:
-        om, provider_used = fetch_hourly_router(st, target_date, model, provider=provider)
-    except Exception as exc:
-        # open-meteo rate-limit OR gfs provider unavailable/rate-limited => degrade to METAR-only
-        if _is_openmeteo_rate_limited_error(exc) or "gfs" in str(exc).lower() or "429" in str(exc):
-            fallback_valid_utc = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(hours=12)
-            degrade_model = "gfs" if provider in {"auto", "gfs", "gfs-grib2", "grib2"} else model
-            links_payload = BSL.build_links(
-                row=BSL.load_station(STATION_CSV, st.icao),
-                model=degrade_model,
-                now_utc=datetime.now(timezone.utc),
-                target_valid_utc=fallback_valid_utc,
-                target_date_utc=datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc),
-            )
-            _mark("hourly_fetch", time.perf_counter() - t0)
-            metar_prefetched: list[dict[str, Any]] | None = None
-            try:
-                metar_prefetched = metar_future.result(timeout=0.2)
-            except Exception:
-                metar_prefetched = None
-            return _render_metar_only_report(
-                st,
-                degrade_model,
-                links_payload,
-                reason=f"{provider} provider degraded: {exc}",
-                tz_name=tz_name_station,
-                metar24_prefetched=metar_prefetched,
-            )
-        raise
-    _mark("hourly_fetch", time.perf_counter() - t0)
-
-    global SYNOPTIC_PROVIDER
-    # Strategy: hourly forecast prefers open-meteo; 3D field prefers gfs-grib2 by default.
-    pref_3d = (os.getenv("FORECAST_3D_PROVIDER", "gfs-grib2") or "gfs-grib2").strip().lower()
-    SYNOPTIC_PROVIDER = "gfs-grib2" if pref_3d in {"gfs", "gfs-grib2", "grib2"} else provider_used
-
-    tz_name = tz_name_station or om.get("timezone", "UTC")
-    hourly_day = slice_hourly_local_day(om["hourly"], target_date)
-    windows, primary, peak_candidates = detect_tmax_windows(hourly_day)
-    if not primary:
-        raise RuntimeError("No Tmax window detected from forecast hourly data")
-
-    tz = ZoneInfo(tz_name)
-    unit_pref = "F" if str(st.icao).upper().startswith("K") else "C"
-
-    t0 = time.perf_counter()
-    metar24 = metar_future.result(timeout=45)
-    metar_text, metar_diag = metar_observation_block(
-        metar24,
-        hourly_day,
-        tz_name,
-        target_date=target_date,
-        temp_unit=unit_pref,
+    runtime_context = LookRuntimeContext.from_runtime(
+        channel=channel,
+        peer_kind=peer_kind,
+        peer_id=peer_id,
+        sender_id=sender_id,
+        session_key=session_key,
     )
-    mgm_ref = _fetch_mgm_reference(st) if str(st.icao).upper() == "LTAC" else None
-    if mgm_ref:
-        def _fmt_temp_ref(v_c: Any) -> str:
-            try:
-                v = float(v_c)
-            except Exception:
-                return str(v_c)
-            if unit_pref == "F":
-                return f"{(v * 9.0 / 5.0 + 32.0):.1f}°F"
-            return f"{v:.1f}°C"
+    runtime_control = LookRuntimeController(
+        context=runtime_context,
+        request_key=build_request_key(station_icao=st.icao, target_date=target_date),
+    )
+    preflight = runtime_control.preflight()
+    if not preflight.proceed:
+        return str(preflight.text or "")
+
+    # 统一输出：固定走简版主报告（不再支持 mode/section/model/provider 参数）。
+    try:
+        model = default_model_for_station(st).lower()
+        if model not in {"gfs", "ecmwf"}:
+            model = "gfs"
+        provider = "auto"
+        metar_future = _METAR_FETCH_POOL.submit(fetch_metar_24h, st.icao, force_refresh=LOOK_FORCE_LIVE_METAR)
+
+        t0 = time.perf_counter()
+        provider_used = "unknown"
         try:
-            t = float(mgm_ref.get("temp_c")) if mgm_ref.get("temp_c") is not None else None
-        except Exception:
-            t = None
-        vz = str(mgm_ref.get("veri_zamani") or "")
-        vz_txt = vz[11:16] + "Z" if ("T" in vz and len(vz) >= 16) else "--:--Z"
-        extra = [f"- MGM参考（{vz_txt}）"]
-        if t is not None:
-            extra.append(f"T={_fmt_temp_ref(t)}")
-        rh = mgm_ref.get("rh")
-        if rh is not None:
-            extra.append(f"RH={rh}%")
-        w = mgm_ref.get("wind_kmh")
-        if w is not None:
-            try:
-                extra.append(f"Wind={float(w):.1f}km/h")
-            except Exception:
-                pass
-        metar_text = metar_text + "\n" + "，".join(extra)
-        metar_diag["mgm_reference"] = mgm_ref
-    try:
-        metar_diag["station_lat"] = float(st.lat)
-        metar_diag["station_lon"] = float(st.lon)
-    except Exception:
-        pass
-    _mark("metar_fetch_parse", time.perf_counter() - t0)
-
-    # 实况纠偏：当实况显著高于模型峰值时，优先以实况峰值时段重锚窗口。
-    try:
-        obs_max = float(metar_diag.get("observed_max_temp_c")) if metar_diag.get("observed_max_temp_c") is not None else None
-    except Exception:
-        obs_max = None
-    try:
-        model_peak = float(primary.get("peak_temp_c"))
-    except Exception:
-        model_peak = None
-
-    if obs_max is not None and model_peak is not None and (obs_max - model_peak) >= 1.5:
-        tmax_local_s = str(metar_diag.get("observed_max_time_local") or metar_diag.get("latest_report_local") or "")
-        try:
-            tmax_local = datetime.fromisoformat(tmax_local_s)
-        except Exception:
-            tmax_local = datetime.now(tz)
-        sdt = tmax_local - timedelta(hours=1)
-        edt = tmax_local + timedelta(hours=2)
-        primary["start_local"] = sdt.strftime("%Y-%m-%dT%H:%M")
-        primary["end_local"] = edt.strftime("%Y-%m-%dT%H:%M")
-        primary["peak_local"] = tmax_local.strftime("%Y-%m-%dT%H:%M")
-        primary["peak_temp_c"] = max(model_peak, obs_max)
-        metar_diag["obs_correction_applied"] = True
-
-    analysis_window = dict(primary)
-    try:
-        gate_pre = classify_window_phase(primary, metar_diag)
-        if str(gate_pre.get("phase") or "") == "post":
-            post_focus = _build_post_focus_window(hourly_day, metar_diag)
-            if isinstance(post_focus, dict) and post_focus.get("peak_local"):
-                analysis_window = post_focus
-                metar_diag["post_focus_window_active"] = True
-                metar_diag["post_window_mode"] = "focus_rebreak"
-                metar_diag["post_focus_peak_local"] = str(post_focus.get("peak_local") or "")
+            om, provider_used = fetch_hourly_router(st, target_date, model, provider=provider)
+        except Exception as exc:
+            # open-meteo rate-limit OR gfs provider unavailable/rate-limited => degrade to METAR-only
+            if _is_openmeteo_rate_limited_error(exc) or "gfs" in str(exc).lower() or "429" in str(exc):
+                fallback_valid_utc = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(hours=12)
+                degrade_model = "gfs" if provider in {"auto", "gfs", "gfs-grib2", "grib2"} else model
+                links_payload = BSL.build_links(
+                    row=BSL.load_station(STATION_CSV, st.icao),
+                    model=degrade_model,
+                    now_utc=datetime.now(timezone.utc),
+                    target_valid_utc=fallback_valid_utc,
+                    target_date_utc=datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc),
+                )
+                _mark("hourly_fetch", time.perf_counter() - t0)
+                metar_prefetched: list[dict[str, Any]] | None = None
                 try:
-                    pf = float(post_focus.get("peak_temp_c"))
-                    metar_diag["post_focus_peak_temp_c"] = pf
-                    try:
-                        obs_mx = float(metar_diag.get("observed_max_temp_c")) if metar_diag.get("observed_max_temp_c") is not None else None
-                    except Exception:
-                        obs_mx = None
-                    if obs_mx is not None and pf <= obs_mx - 0.4:
-                        metar_diag["post_window_mode"] = "no_rebreak_eval"
+                    metar_prefetched = metar_future.result(timeout=0.2)
+                except Exception:
+                    metar_prefetched = None
+                result_text = _render_metar_only_report(
+                    st,
+                    degrade_model,
+                    links_payload,
+                    reason=f"{provider} provider degraded: {exc}",
+                    tz_name=tz_name_station,
+                    metar24_prefetched=metar_prefetched,
+                )
+                runtime_control.success(result_text)
+                return result_text
+            raise
+        _mark("hourly_fetch", time.perf_counter() - t0)
+
+        global SYNOPTIC_PROVIDER
+        # Strategy: hourly forecast prefers open-meteo; 3D field prefers gfs-grib2 by default.
+        pref_3d = (os.getenv("FORECAST_3D_PROVIDER", "gfs-grib2") or "gfs-grib2").strip().lower()
+        SYNOPTIC_PROVIDER = "gfs-grib2" if pref_3d in {"gfs", "gfs-grib2", "grib2"} else provider_used
+
+        tz_name = tz_name_station or om.get("timezone", "UTC")
+        hourly_day = slice_hourly_local_day(om["hourly"], target_date)
+        windows, primary, peak_candidates = detect_tmax_windows(hourly_day)
+        if not primary:
+            raise RuntimeError("No Tmax window detected from forecast hourly data")
+
+        tz = ZoneInfo(tz_name)
+        unit_pref = "F" if str(st.icao).upper().startswith("K") else "C"
+
+        t0 = time.perf_counter()
+        metar24 = metar_future.result(timeout=45)
+        metar_text, metar_diag = metar_observation_block(
+            metar24,
+            hourly_day,
+            tz_name,
+            target_date=target_date,
+            temp_unit=unit_pref,
+        )
+        mgm_ref = _fetch_mgm_reference(st) if str(st.icao).upper() == "LTAC" else None
+        if mgm_ref:
+            def _fmt_temp_ref(v_c: Any) -> str:
+                try:
+                    v = float(v_c)
+                except Exception:
+                    return str(v_c)
+                if unit_pref == "F":
+                    return f"{(v * 9.0 / 5.0 + 32.0):.1f}°F"
+                return f"{v:.1f}°C"
+            try:
+                t = float(mgm_ref.get("temp_c")) if mgm_ref.get("temp_c") is not None else None
+            except Exception:
+                t = None
+            vz = str(mgm_ref.get("veri_zamani") or "")
+            vz_txt = vz[11:16] + "Z" if ("T" in vz and len(vz) >= 16) else "--:--Z"
+            extra = [f"- MGM参考（{vz_txt}）"]
+            if t is not None:
+                extra.append(f"T={_fmt_temp_ref(t)}")
+            rh = mgm_ref.get("rh")
+            if rh is not None:
+                extra.append(f"RH={rh}%")
+            w = mgm_ref.get("wind_kmh")
+            if w is not None:
+                try:
+                    extra.append(f"Wind={float(w):.1f}km/h")
                 except Exception:
                     pass
-            else:
-                post_eval = _build_post_eval_window(hourly_day, metar_diag)
-                if isinstance(post_eval, dict) and post_eval.get("peak_local"):
-                    analysis_window = post_eval
-                    metar_diag["post_focus_window_active"] = True
-                    metar_diag["post_window_mode"] = "no_rebreak_eval"
-    except Exception:
+            metar_text = metar_text + "\n" + "，".join(extra)
+            metar_diag["mgm_reference"] = mgm_ref
+        try:
+            metar_diag["station_lat"] = float(st.lat)
+            metar_diag["station_lon"] = float(st.lon)
+        except Exception:
+            pass
+        _mark("metar_fetch_parse", time.perf_counter() - t0)
+
+        # 实况纠偏：当实况显著高于模型峰值时，优先以实况峰值时段重锚窗口。
+        try:
+            obs_max = float(metar_diag.get("observed_max_temp_c")) if metar_diag.get("observed_max_temp_c") is not None else None
+        except Exception:
+            obs_max = None
+        try:
+            model_peak = float(primary.get("peak_temp_c"))
+        except Exception:
+            model_peak = None
+
+        if obs_max is not None and model_peak is not None and (obs_max - model_peak) >= 1.5:
+            tmax_local_s = str(metar_diag.get("observed_max_time_local") or metar_diag.get("latest_report_local") or "")
+            try:
+                tmax_local = datetime.fromisoformat(tmax_local_s)
+            except Exception:
+                tmax_local = datetime.now(tz)
+            sdt = tmax_local - timedelta(hours=1)
+            edt = tmax_local + timedelta(hours=2)
+            primary["start_local"] = sdt.strftime("%Y-%m-%dT%H:%M")
+            primary["end_local"] = edt.strftime("%Y-%m-%dT%H:%M")
+            primary["peak_local"] = tmax_local.strftime("%Y-%m-%dT%H:%M")
+            primary["peak_temp_c"] = max(model_peak, obs_max)
+            metar_diag["obs_correction_applied"] = True
+
         analysis_window = dict(primary)
-
-    peak_local_dt = datetime.strptime(analysis_window["peak_local"], "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
-    peak_utc = peak_local_dt.astimezone(timezone.utc)
-    now_for_links_utc = datetime.now(timezone.utc)
-    window_candidate_utc: list[datetime] = []
-    for k in ("start_local", "peak_local", "end_local"):
-        raw = str(analysis_window.get(k) or "").strip()
-        if not raw:
-            continue
         try:
-            dt_local = datetime.strptime(raw, "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
-            window_candidate_utc.append(dt_local.astimezone(timezone.utc))
+            gate_pre = classify_window_phase(primary, metar_diag)
+            if str(gate_pre.get("phase") or "") == "post":
+                post_focus = _build_post_focus_window(hourly_day, metar_diag)
+                if isinstance(post_focus, dict) and post_focus.get("peak_local"):
+                    analysis_window = post_focus
+                    metar_diag["post_focus_window_active"] = True
+                    metar_diag["post_window_mode"] = "focus_rebreak"
+                    metar_diag["post_focus_peak_local"] = str(post_focus.get("peak_local") or "")
+                    try:
+                        pf = float(post_focus.get("peak_temp_c"))
+                        metar_diag["post_focus_peak_temp_c"] = pf
+                        try:
+                            obs_mx = float(metar_diag.get("observed_max_temp_c")) if metar_diag.get("observed_max_temp_c") is not None else None
+                        except Exception:
+                            obs_mx = None
+                        if obs_mx is not None and pf <= obs_mx - 0.4:
+                            metar_diag["post_window_mode"] = "no_rebreak_eval"
+                    except Exception:
+                        pass
+                else:
+                    post_eval = _build_post_eval_window(hourly_day, metar_diag)
+                    if isinstance(post_eval, dict) and post_eval.get("peak_local"):
+                        analysis_window = post_eval
+                        metar_diag["post_focus_window_active"] = True
+                        metar_diag["post_window_mode"] = "no_rebreak_eval"
         except Exception:
-            continue
-    sounding_target_utc = (
-        min(window_candidate_utc, key=lambda t: abs((t - now_for_links_utc).total_seconds()))
-        if window_candidate_utc
-        else peak_utc
-    )
+            analysis_window = dict(primary)
 
-    analysis_model = model
-    link_model = "gfs" if SYNOPTIC_PROVIDER == "gfs-grib2" else analysis_model
-    links_payload = BSL.build_links(
-        row=BSL.load_station(STATION_CSV, st.icao),
-        model=link_model,
-        now_utc=now_for_links_utc,
-        target_valid_utc=peak_utc,
-        sounding_target_valid_utc=sounding_target_utc,
-        target_date_utc=datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc),
-    )
+        peak_local_dt = datetime.strptime(analysis_window["peak_local"], "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
+        peak_utc = peak_local_dt.astimezone(timezone.utc)
+        now_for_links_utc = datetime.now(timezone.utc)
+        window_candidate_utc: list[datetime] = []
+        for k in ("start_local", "peak_local", "end_local"):
+            raw = str(analysis_window.get(k) or "").strip()
+            if not raw:
+                continue
+            try:
+                dt_local = datetime.strptime(raw, "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
+                window_candidate_utc.append(dt_local.astimezone(timezone.utc))
+            except Exception:
+                continue
+        sounding_target_utc = (
+            min(window_candidate_utc, key=lambda t: abs((t - now_for_links_utc).total_seconds()))
+            if window_candidate_utc
+            else peak_utc
+        )
 
-    poly_prefetch_future = None
-    try:
-        purl = str((links_payload.get("links") or {}).get("polymarket_event") or "")
-        if purl:
-            poly_prefetch_future = _POLY_PREFETCH_POOL.submit(
-                _prefetch_polymarket_event,
-                purl,
-                force_refresh=LOOK_FORCE_LIVE_POLYMARKET,
-            )
-    except Exception:
+        analysis_model = model
+        link_model = "gfs" if SYNOPTIC_PROVIDER == "gfs-grib2" else analysis_model
+        links_payload = BSL.build_links(
+            row=BSL.load_station(STATION_CSV, st.icao),
+            model=link_model,
+            now_utc=now_for_links_utc,
+            target_valid_utc=peak_utc,
+            sounding_target_valid_utc=sounding_target_utc,
+            target_date_utc=datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc),
+        )
+
         poly_prefetch_future = None
-
-    now_utc = datetime.now(timezone.utc)
-    now_local = now_utc.astimezone(tz)
-
-    t0 = time.perf_counter()
-    forecast_decision, _synoptic, _synoptic_error = load_or_build_forecast_decision(
-        station=st,
-        target_date=target_date,
-        model=model,
-        synoptic_provider=SYNOPTIC_PROVIDER,
-        now_utc=now_utc,
-        now_local=now_local,
-        station_lat=st.lat,
-        station_lon=st.lon,
-        primary_window=analysis_window,
-        tz_name=tz_name,
-        run_synoptic_fn=run_synoptic_section,
-        perf_log=_mark,
-    )
-    forecast_elapsed = time.perf_counter() - t0
-    _mark("forecast_pipeline", forecast_elapsed)
-    lat_hemi = "N" if st.lat >= 0 else "S"
-    lon_hemi = "E" if st.lon >= 0 else "W"
-    rt = str(links_payload.get("runtime_utc") or "")
-    rt_fmt = rt
-    if len(rt) == 10 and rt.isdigit():
-        rt_fmt = f"{rt[0:4]}/{rt[4:6]}/{rt[6:8]} {rt[8:10]}Z"
-
-    fc_cache = perf_local.get("forecast.cache_read", 0.0)
-    fc_syn = perf_local.get("forecast.synoptic_build", 0.0)
-    fc_dec = perf_local.get("forecast.decision_build", 0.0)
-    fc_write = perf_local.get("forecast.cache_write", 0.0)
-    fc_fallback = perf_local.get("forecast.synoptic_fallback_cache", 0.0)
-
-    terrain_tag = _terrain_tag_for(st.icao)
-    site_tag = _site_tag_for(st.icao)
-    direction_factor = _direction_factor_for(st.icao)
-    factor_summary = _factor_summary_for(st.icao)
-    head_geo = f"{abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}"
-    if site_tag:
-        head_geo = f"{head_geo} ({site_tag})"
-    elif terrain_tag:
-        head_geo = f"{head_geo} ({terrain_tag})"
-
-    gate_now = classify_window_phase(primary, metar_diag)
-    phase_now = str(gate_now.get("phase") or "unknown")
-    compact_synoptic = phase_now in {"near_window", "in_window"}
-
-    header_lines = [
-        f"📍 **{st.icao} ({st.city}) | {head_geo}**",
-        f"生成时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC | {now_local.strftime('%H:%M')} Local (UTC{now_local.strftime('%z')[:3]})",
-    ]
-    if not compact_synoptic:
-        header_lines.append(
-            f"分析基准模型: {analysis_model.upper()}（运行时次: {rt_fmt}） | 小时预报源: {provider_used} | 3D场源: {SYNOPTIC_PROVIDER}"
-        )
-        if direction_factor:
-            header_lines.append(f"方位因子: {direction_factor}")
-
-    try:
-        quality = (forecast_decision.get("quality") or {}) if isinstance(forecast_decision, dict) else {}
-        missing = set(quality.get("missing_layers") or [])
-        degraded = str(quality.get("source_state") or "") == "degraded"
-        syn_fail = ("synoptic" in missing) or degraded
-        err_txt = str(_synoptic_error or "")
-        breaker_active, breaker_until, breaker_reason = _openmeteo_breaker_info()
-        rate_limited = (
-            ("429" in err_txt)
-            or ("Too Many Requests" in err_txt)
-            or ("breaker active" in err_txt)
-            or breaker_active
-            or (breaker_active and (("429" in str(breaker_reason)) or ("grid_429" in str(breaker_reason))))
-        )
-        if syn_fail and rate_limited:
-            if breaker_until is not None:
-                header_lines.append(
-                    f"⚠️ 数据提醒：Open-Meteo 请求过多（429），环流层已降级；预计 {breaker_until.strftime('%H:%M:%S')} UTC 后恢复"
-                )
-            else:
-                header_lines.append("⚠️ 数据提醒：Open-Meteo 请求过多（429），环流层已降级。")
-    except Exception:
-        pass
-
-    header_lines.append("**🦞龙虾学习中，不提供交易建议🦞**")
-
-    header = "\n".join(header_lines)
-
-    poly_prefetched_event = None
-    if poly_prefetch_future is not None:
         try:
-            poly_prefetched_event = poly_prefetch_future.result(timeout=0.05)
-        except FuturesTimeoutError:
-            poly_prefetched_event = None
+            purl = str((links_payload.get("links") or {}).get("polymarket_event") or "")
+            if purl:
+                poly_prefetch_future = _POLY_PREFETCH_POOL.submit(
+                    _prefetch_polymarket_event,
+                    purl,
+                    force_refresh=LOOK_FORCE_LIVE_POLYMARKET,
+                )
         except Exception:
-            poly_prefetched_event = None
+            poly_prefetch_future = None
 
-    historical_context = _attach_historical_context(
-        metar_diag,
-        station_icao=st.icao,
-        target_date=target_date,
-        forecast_decision=forecast_decision,
-    )
+        now_utc = datetime.now(timezone.utc)
+        now_local = now_utc.astimezone(tz)
 
-    t0 = time.perf_counter()
-    body = choose_section_text(
-        primary,
-        metar_text,
-        metar_diag,
-        links_payload["links"]["polymarket_event"],
-        forecast_decision=forecast_decision,
-        compact_synoptic=compact_synoptic,
-        temp_unit=unit_pref,
-        synoptic_window=analysis_window,
-        polymarket_prefetched_event=poly_prefetched_event,
-    )
-    _mark("render_body", time.perf_counter() - t0)
-    total_elapsed = time.perf_counter() - t_e2e
-
-    links = links_payload["links"]
-    footer = (
-        f"🔗[Polymarket]({links['polymarket_event']}) | "
-        f"[METAR]({links['metar_24h']}) | "
-        f"[Wunderground]({links['wunderground']}) | "
-        f"[探空图（Tropicaltidbits）]({links['sounding_tropicaltidbits']})"
-    )
-
-    show_perf = str(os.getenv("LOOK_SHOW_PERF", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
-    if show_perf:
-        perf_line = (
-            f"⏱️ 模块耗时: total {total_elapsed:.2f}s | bootstrap {bootstrap_elapsed:.2f}s | process {total_elapsed + bootstrap_elapsed:.2f}s"
-            f" | hourly {float(perf_local.get('hourly_fetch', 0.0) or 0.0):.2f}s"
-            f" | metar {float(perf_local.get('metar_fetch_parse', 0.0) or 0.0):.2f}s"
-            f" | forecast {float(perf_local.get('forecast_pipeline', 0.0) or 0.0):.2f}s"
-            f" (syn {float(perf_local.get('forecast.synoptic_build', 0.0) or 0.0):.2f}s"
-            f", dec {float(perf_local.get('forecast.decision_build', 0.0) or 0.0):.2f}s"
-            f", cacheR {float(perf_local.get('forecast.cache_read', 0.0) or 0.0):.2f}s"
-            f", cacheW {float(perf_local.get('forecast.cache_write', 0.0) or 0.0):.2f}s)"
-            f" | render {float(perf_local.get('render_body', 0.0) or 0.0):.2f}s"
+        t0 = time.perf_counter()
+        forecast_decision, _synoptic, _synoptic_error = load_or_build_forecast_decision(
+            station=st,
+            target_date=target_date,
+            model=model,
+            synoptic_provider=SYNOPTIC_PROVIDER,
+            now_utc=now_utc,
+            now_local=now_local,
+            station_lat=st.lat,
+            station_lon=st.lon,
+            primary_window=analysis_window,
+            tz_name=tz_name,
+            run_synoptic_fn=run_synoptic_section,
+            perf_log=_mark,
         )
-        header = f"{header}\n{perf_line}"
+        forecast_elapsed = time.perf_counter() - t0
+        _mark("forecast_pipeline", forecast_elapsed)
+        lat_hemi = "N" if st.lat >= 0 else "S"
+        lon_hemi = "E" if st.lon >= 0 else "W"
+        rt = str(links_payload.get("runtime_utc") or "")
+        rt_fmt = rt
+        if len(rt) == 10 and rt.isdigit():
+            rt_fmt = f"{rt[0:4]}/{rt[4:6]}/{rt[6:8]} {rt[8:10]}Z"
 
-    return f"{header}\n\n{body}\n{footer}"
+        terrain_tag = _terrain_tag_for(st.icao)
+        site_tag = _site_tag_for(st.icao)
+        direction_factor = _direction_factor_for(st.icao)
+        head_geo = f"{abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}"
+        if site_tag:
+            head_geo = f"{head_geo} ({site_tag})"
+        elif terrain_tag:
+            head_geo = f"{head_geo} ({terrain_tag})"
+
+        gate_now = classify_window_phase(primary, metar_diag)
+        phase_now = str(gate_now.get("phase") or "unknown")
+        compact_synoptic = phase_now in {"near_window", "in_window"}
+
+        header_lines = [
+            f"📍 **{st.icao} ({st.city}) | {head_geo}**",
+            f"生成时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC | {now_local.strftime('%H:%M')} Local (UTC{now_local.strftime('%z')[:3]})",
+        ]
+        if not compact_synoptic:
+            header_lines.append(
+                f"分析基准模型: {analysis_model.upper()}（运行时次: {rt_fmt}） | 小时预报源: {provider_used} | 3D场源: {SYNOPTIC_PROVIDER}"
+            )
+            if direction_factor:
+                header_lines.append(f"方位因子: {direction_factor}")
+
+        try:
+            quality = (forecast_decision.get("quality") or {}) if isinstance(forecast_decision, dict) else {}
+            missing = set(quality.get("missing_layers") or [])
+            degraded = str(quality.get("source_state") or "") == "degraded"
+            syn_fail = ("synoptic" in missing) or degraded
+            err_txt = str(_synoptic_error or "")
+            breaker_active, breaker_until, breaker_reason = _openmeteo_breaker_info()
+            rate_limited = (
+                ("429" in err_txt)
+                or ("Too Many Requests" in err_txt)
+                or ("breaker active" in err_txt)
+                or breaker_active
+                or (breaker_active and (("429" in str(breaker_reason)) or ("grid_429" in str(breaker_reason))))
+            )
+            if syn_fail and rate_limited:
+                if breaker_until is not None:
+                    header_lines.append(
+                        f"⚠️ 数据提醒：Open-Meteo 请求过多（429），环流层已降级；预计 {breaker_until.strftime('%H:%M:%S')} UTC 后恢复"
+                    )
+                else:
+                    header_lines.append("⚠️ 数据提醒：Open-Meteo 请求过多（429），环流层已降级。")
+        except Exception:
+            pass
+
+        header_lines.append("**🦞龙虾学习中，不提供交易建议🦞**")
+
+        header = "\n".join(header_lines)
+
+        poly_prefetched_event = None
+        if poly_prefetch_future is not None:
+            try:
+                poly_prefetched_event = poly_prefetch_future.result(timeout=0.05)
+            except FuturesTimeoutError:
+                poly_prefetched_event = None
+            except Exception:
+                poly_prefetched_event = None
+
+        historical_context = _attach_historical_context(
+            metar_diag,
+            station_icao=st.icao,
+            target_date=target_date,
+            forecast_decision=forecast_decision,
+        )
+
+        t0 = time.perf_counter()
+        body = choose_section_text(
+            primary,
+            metar_text,
+            metar_diag,
+            links_payload["links"]["polymarket_event"],
+            forecast_decision=forecast_decision,
+            compact_synoptic=compact_synoptic,
+            temp_unit=unit_pref,
+            synoptic_window=analysis_window,
+            polymarket_prefetched_event=poly_prefetched_event,
+        )
+        _mark("render_body", time.perf_counter() - t0)
+        total_elapsed = time.perf_counter() - t_e2e
+
+        links = links_payload["links"]
+        footer = (
+            f"🔗[Polymarket]({links['polymarket_event']}) | "
+            f"[METAR]({links['metar_24h']}) | "
+            f"[Wunderground]({links['wunderground']}) | "
+            f"[探空图（Tropicaltidbits）]({links['sounding_tropicaltidbits']})"
+        )
+
+        show_perf = str(os.getenv("LOOK_SHOW_PERF", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+        if show_perf:
+            perf_line = (
+                f"⏱️ 模块耗时: total {total_elapsed:.2f}s | bootstrap {bootstrap_elapsed:.2f}s | process {total_elapsed + bootstrap_elapsed:.2f}s"
+                f" | hourly {float(perf_local.get('hourly_fetch', 0.0) or 0.0):.2f}s"
+                f" | metar {float(perf_local.get('metar_fetch_parse', 0.0) or 0.0):.2f}s"
+                f" | forecast {float(perf_local.get('forecast_pipeline', 0.0) or 0.0):.2f}s"
+                f" (syn {float(perf_local.get('forecast.synoptic_build', 0.0) or 0.0):.2f}s"
+                f", dec {float(perf_local.get('forecast.decision_build', 0.0) or 0.0):.2f}s"
+                f", cacheR {float(perf_local.get('forecast.cache_read', 0.0) or 0.0):.2f}s"
+                f", cacheW {float(perf_local.get('forecast.cache_write', 0.0) or 0.0):.2f}s)"
+                f" | render {float(perf_local.get('render_body', 0.0) or 0.0):.2f}s"
+            )
+            header = f"{header}\n{perf_line}"
+
+        result_text = f"{header}\n\n{body}\n{footer}"
+        runtime_control.success(result_text)
+        return result_text
+    except Exception:
+        runtime_control.failure()
+        raise
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Generate report text from Telegram-style command")
     p.add_argument("--command", required=True, help="Telegram command text, e.g. '/look Ankara model=ecmwf'")
+    p.add_argument("--channel", help="Optional runtime channel, e.g. telegram")
+    p.add_argument("--peer-kind", help="Optional runtime peer kind, e.g. group|direct")
+    p.add_argument("--peer-id", help="Optional runtime peer/chat id")
+    p.add_argument("--sender-id", help="Optional runtime sender id")
+    p.add_argument("--session-key", help="Optional OpenClaw session key")
     return p
 
 
 def main() -> None:
     args = build_parser().parse_args()
     try:
-        print(render_report(args.command))
+        print(
+            render_report(
+                args.command,
+                channel=args.channel,
+                peer_kind=args.peer_kind,
+                peer_id=args.peer_id,
+                sender_id=args.sender_id,
+                session_key=args.session_key,
+            )
+        )
     except Exception as exc:
         print(f"❌ /look 执行失败: {exc}")
 

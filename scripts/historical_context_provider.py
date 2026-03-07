@@ -120,6 +120,53 @@ def archive_raw_dir() -> Path | None:
     return None
 
 
+def _has_live_observation_context(metar_diag: dict[str, Any]) -> bool:
+    if bool((metar_diag or {}).get("metar_unavailable")):
+        return False
+    signals = build_live_condition_signals(metar_diag or {})
+    return any(
+        signals.get(key) is not None
+        for key in ("latest_temp_c", "dewpoint_c", "latest_rh", "latest_wspd_kt", "cloud_effective_cover")
+    )
+
+
+def _is_humid_sticky(*, latest_temp: float | None, dewpoint: float | None, latest_rh: float | None) -> bool:
+    if latest_temp is None:
+        return False
+    if dewpoint is not None and latest_temp >= 18.0 and dewpoint >= 16.0:
+        return True
+    if dewpoint is not None and latest_temp >= 22.0 and dewpoint >= 14.0:
+        return True
+    if latest_rh is not None and latest_temp >= 20.0 and latest_rh >= 78.0:
+        return True
+    return False
+
+
+def _is_cool_humid_stagnation(
+    *,
+    latest_temp: float | None,
+    latest_rh: float | None,
+    latest_wspd: float | None,
+    cloud_cover: float | None,
+) -> bool:
+    if latest_temp is None or latest_rh is None:
+        return False
+    if latest_temp > 14.0 or latest_rh < 78.0:
+        return False
+    if latest_wspd is not None and latest_wspd <= 6.0:
+        return True
+    if cloud_cover is not None and cloud_cover >= 0.55:
+        return True
+    return False
+
+
+def _forecast_path_label(forecast_decision: dict[str, Any] | None) -> str:
+    if not isinstance(forecast_decision, dict):
+        return "预报路径未定"
+    decision = (forecast_decision.get("decision") or {}) if isinstance(forecast_decision, dict) else {}
+    return str(decision.get("main_path") or "预报路径未定")
+
+
 @lru_cache(maxsize=64)
 def _load_station_daily_rows(station_id: str) -> tuple[dict[str, str], ...]:
     station_key = str(station_id or "").upper()
@@ -214,7 +261,14 @@ def build_historical_context(
         forecast_decision=forecast_decision,
         external_context=synoptic_context,
     )
-    analogs = find_similar_days(station_key, target_date, metar_diag, live_regime, limit=analog_limit)
+    analogs = find_similar_days(
+        station_key,
+        target_date,
+        metar_diag,
+        live_regime,
+        synoptic_context=normalized_synoptic_context,
+        limit=analog_limit,
+    )
 
     analog_tmax_values = [_safe_float(row.get("tmax_c")) for row in analogs]
     analog_tmax_values = [value for value in analog_tmax_values if value is not None]
@@ -234,11 +288,18 @@ def build_historical_context(
             f"峰值时刻 {_fmt_hour(_safe_float(monthly_row.get('peak_hour_median')))}，"
             f"午间低云 {_fmt_pct(_safe_float(monthly_row.get('midday_low_ceiling_share')))}"
         )
-    summary_lines.append(
-        "当前实况匹配："
-        f"{live_regime['primary_regime_cn']}（标签：{', '.join(live_regime['tags_cn']) or '过渡'}）"
-    )
-    summary_lines.append("检索口径：按日历日期邻近度加权，不预设季节窗口")
+    if _has_live_observation_context(metar_diag):
+        summary_lines.append(
+            "当前实况匹配："
+            f"{live_regime['primary_regime_cn']}（标签：{', '.join(live_regime['tags_cn']) or '过渡'}）"
+        )
+        summary_lines.append("检索口径：按日历日期邻近度加权，并结合当前实况温湿风云匹配")
+    else:
+        summary_lines.append(
+            "当前阶段：实况不足，按预报背景主导匹配"
+            f"（路径：{_forecast_path_label(forecast_decision)}）"
+        )
+        summary_lines.append("检索口径：按日历日期邻近度加权，并结合环流背景与路径分支匹配")
     if analog_tmax_values:
         analog_tmax_mean = sum(analog_tmax_values) / len(analog_tmax_values)
         analog_peak_mean = (sum(analog_peak_values) / len(analog_peak_values)) if analog_peak_values else None
@@ -323,9 +384,16 @@ def infer_live_regime(metar_diag: dict[str, Any]) -> dict[str, Any]:
         tags.append("cloud_suppressed")
     if local_hour is not None and local_hour >= 14 and temp_trend is not None and temp_trend >= 0.30:
         tags.append("late_surge")
-    if dewpoint is not None and dewpoint >= 18.0:
+    if _is_humid_sticky(latest_temp=latest_temp, dewpoint=dewpoint, latest_rh=latest_rh):
         tags.append("humid_sticky")
-    elif latest_rh is not None and latest_rh >= 75.0:
+    elif _is_cool_humid_stagnation(
+        latest_temp=latest_temp,
+        latest_rh=latest_rh,
+        latest_wspd=latest_wspd,
+        cloud_cover=cloud_cover,
+    ):
+        tags.append("light_wind_stagnation")
+    elif latest_rh is not None and latest_rh >= 78.0 and latest_wspd is not None and latest_wspd <= 4.0:
         tags.append("humid_sticky")
     if latest_temp is not None and dewpoint is not None and (latest_temp - dewpoint) >= 8.0 and (radiation_eff is not None and radiation_eff >= 0.65):
         tags.append("dry_mixing")
@@ -369,9 +437,11 @@ def find_similar_days(
     metar_diag: dict[str, Any],
     live_regime: dict[str, Any],
     *,
+    synoptic_context: dict[str, Any] | None = None,
     limit: int = 3,
 ) -> list[dict[str, str]]:
     signals = build_live_condition_signals(metar_diag)
+    live_obs_available = _has_live_observation_context(metar_diag)
     current_hour = extract_hour(signals.get("latest_report_local"))
     current_minute = extract_minute(signals.get("latest_report_local"))
     target_day_of_year = _target_day_of_year(target_date)
@@ -393,43 +463,55 @@ def find_similar_days(
             calendar_gap = None
 
         row_regime = str(row.get("primary_regime") or "")
-        if row_regime == live_regime.get("primary_regime"):
+        if live_obs_available and row_regime == live_regime.get("primary_regime"):
             bonus = 2.8
             score += bonus
             reasons.append((bonus, f"局地日型一致（{regime_to_cn(row_regime)}）"))
         row_tags = {item.strip() for item in str(row.get("regime_tags") or "").split(";") if item.strip()}
         live_tags = set(live_regime.get("tags") or [])
-        tag_bonus = 0.7 * len(row_tags & live_tags)
+        tag_bonus = 0.7 * len(row_tags & live_tags) if live_obs_available else 0.0
         score += tag_bonus
         if tag_bonus >= 0.7:
             reasons.append((tag_bonus, f"次级标签重合（{len(row_tags & live_tags)} 项）"))
 
+        if not live_obs_available:
+            branch_label = _analog_branch_label(row)
+            alignment = branch_alignment(branch_label, synoptic_context)
+            if alignment.get("alignment") == "supportive":
+                bonus = 1.6
+                score += bonus
+                reasons.append((bonus, f"预报背景支持 {branch_label}"))
+            elif alignment.get("alignment") == "conflicting":
+                penalty = 0.5
+                score -= penalty
+                reasons.append((-penalty, f"预报背景不支持 {branch_label}"))
+
         hist_state = _historical_state_for_row(station_id, row, current_hour, current_minute)
         hist_wind_sector = str((hist_state or {}).get("wind_sector") or row.get("dominant_wind_sector") or "")
-        if current_state.get("wind_sector") and hist_wind_sector == current_state.get("wind_sector"):
+        if live_obs_available and current_state.get("wind_sector") and hist_wind_sector == current_state.get("wind_sector"):
             bonus = 1.2
             score += bonus
             reasons.append((bonus, f"当前时刻风向一致（{hist_wind_sector}）"))
-        elif current_state.get("wind_sector") and _wind_family(hist_wind_sector) == _wind_family(str(current_state.get("wind_sector"))):
+        elif live_obs_available and current_state.get("wind_sector") and _wind_family(hist_wind_sector) == _wind_family(str(current_state.get("wind_sector"))):
             bonus = 0.6
             score += bonus
             reasons.append((bonus, f"当前时刻风向同属 {_wind_family(hist_wind_sector)} 象限"))
 
-        if current_state.get("temp_c") is not None and hist_state and hist_state.get("temp_c") is not None:
+        if live_obs_available and current_state.get("temp_c") is not None and hist_state and hist_state.get("temp_c") is not None:
             diff = abs(float(hist_state["temp_c"]) - float(current_state["temp_c"]))
             bonus = 1.6 * max(0.0, 1.0 - diff / 6.5)
             score += bonus
             if bonus >= 0.45:
                 reasons.append((bonus, f"当前时刻温度接近（差 `{diff:.1f}°C`）"))
 
-        if current_state.get("dew_c") is not None and hist_state and hist_state.get("dew_c") is not None:
+        if live_obs_available and current_state.get("dew_c") is not None and hist_state and hist_state.get("dew_c") is not None:
             diff = abs(float(hist_state["dew_c"]) - float(current_state["dew_c"]))
             bonus = 1.1 * max(0.0, 1.0 - diff / 5.5)
             score += bonus
             if bonus >= 0.35:
                 reasons.append((bonus, f"当前时刻露点接近（差 `{diff:.1f}°C`）"))
 
-        if current_state.get("cloud_signature") and hist_state and hist_state.get("cloud_signature"):
+        if live_obs_available and current_state.get("cloud_signature") and hist_state and hist_state.get("cloud_signature"):
             live_sig = str(current_state["cloud_signature"])
             hist_sig = str(hist_state["cloud_signature"])
             if live_sig == hist_sig:
@@ -441,14 +523,14 @@ def find_similar_days(
                 score += bonus
                 reasons.append((bonus, f"云结构同类（{cloud_signature_to_cn(live_sig)} / {cloud_signature_to_cn(hist_sig)}）"))
 
-        if current_state.get("cloud_effective_cover") is not None and hist_state and hist_state.get("cloud_effective_cover") is not None:
+        if live_obs_available and current_state.get("cloud_effective_cover") is not None and hist_state and hist_state.get("cloud_effective_cover") is not None:
             diff = abs(float(hist_state["cloud_effective_cover"]) - float(current_state["cloud_effective_cover"]))
             bonus = 0.8 * max(0.0, 1.0 - diff)
             score += bonus
             if bonus >= 0.35:
                 reasons.append((bonus, f"云量强度接近（差 `{diff:.2f}`）"))
 
-        if current_state.get("wind_speed_ms") is not None and hist_state and hist_state.get("wind_speed_ms") is not None:
+        if live_obs_available and current_state.get("wind_speed_ms") is not None and hist_state and hist_state.get("wind_speed_ms") is not None:
             diff = abs(float(hist_state["wind_speed_ms"]) - float(current_state["wind_speed_ms"]))
             bonus = 0.7 * max(0.0, 1.0 - diff / 4.5)
             score += bonus
@@ -457,16 +539,16 @@ def find_similar_days(
 
         current_precip = str(current_state.get("precip_state") or "none")
         hist_precip = str((hist_state or {}).get("precip_state") or "")
-        if current_precip not in {"", "none"} and hist_precip not in {"", "none"}:
+        if live_obs_available and current_precip not in {"", "none"} and hist_precip not in {"", "none"}:
             bonus = 0.8
             score += bonus
             reasons.append((bonus, "实况与历史都带降水/湿重置"))
-        elif current_precip in {"", "none"} and row.get("clean_solar_ramp_flag", "").lower() == "true":
+        elif live_obs_available and current_precip in {"", "none"} and row.get("clean_solar_ramp_flag", "").lower() == "true":
             bonus = 0.4
             score += bonus
             reasons.append((bonus, "都更接近晴空增温路径"))
 
-        if hist_state and hist_state.get("_state_source") == "raw_hourly":
+        if live_obs_available and hist_state and hist_state.get("_state_source") == "raw_hourly":
             hour_gap = abs(int(hist_state.get("_hour_gap") or 0))
             bonus = 0.6 if hour_gap == 0 else 0.2
             score += bonus
@@ -1368,7 +1450,8 @@ def _branch_fit_score(
     if "湿热滞留" in label:
         dew_c = _safe_float(signals.get("dewpoint_c"))
         rh = _safe_float(signals.get("latest_rh"))
-        if (dew_c is not None and dew_c >= 18.0) or (rh is not None and rh >= 75.0):
+        temp_c = _safe_float(signals.get("latest_temp_c"))
+        if _is_humid_sticky(latest_temp=temp_c, dewpoint=dew_c, latest_rh=rh):
             score += 0.8
             reasons.append("当前湿度背景偏高")
         if live_primary == "humid_sticky":
