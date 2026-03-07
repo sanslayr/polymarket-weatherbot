@@ -148,6 +148,31 @@ def _classify_anchor_error(msg: str) -> str:
     return "unknown"
 
 
+def _build_500_background_line(diag500: dict[str, Any] | None) -> str:
+    diag = dict(diag500 or {})
+    phase = str(diag.get("phase") or "").strip()
+    hint = str(diag.get("phase_hint") or "").strip()
+    pva = str(diag.get("pva_proxy") or "").strip()
+    trend = str(diag.get("trend_12_24h") or "").strip()
+    confidence = str(diag.get("confidence") or "").strip()
+
+    if (not phase) or phase in {"中性", "弱信号背景"}:
+        if ("上升" in pva) or ("下沉" in pva):
+            return f"500hPa弱信号背景，{pva}。"
+        return "高空背景信号有限。"
+
+    parts: list[str] = [f"500hPa {phase}"]
+    if hint and hint not in {"南北向过渡"}:
+        parts[0] += f"（{hint}）"
+    if pva and pva != "中性":
+        parts.append(pva)
+    if trend and trend not in {"不明确"}:
+        parts.append(trend)
+    if confidence and confidence not in {"低"}:
+        parts.append(f"{confidence}置信")
+    return "；".join(parts) + "。"
+
+
 def build_forecast_decision(
     *,
     station: Any,
@@ -203,25 +228,22 @@ def build_forecast_decision(
     else:
         phase_txt = "实况主导"
 
-    if "NVA" in pva500 or "下沉" in pva500 or "脊后" in phase_hint:
-        p500_human = "高空下沉背景偏多，上冲动能容易被压制"
-    else:
-        p500_human = "高空仍有抬升触发条件，云层若放开更易再冲高"
+    p500_human = _build_500_background_line(diag500)
 
     extra = None
     s700 = str(diag700.get("summary") or "")
-    if s700 and "干层" in s700:
+    if s700 and ("干层" in s700 or "偏干" in s700):
         s700_scope = str(diag700.get("dry_intrusion_scope") or "")
         s700_impact = str(diag700.get("impact") or "")
         snd_q = str(((snd.get("thermo") or {}).get("quality")) or "") if isinstance(snd, dict) else ""
 
         if s700_impact:
-            extra = f"700hPa：{s700_impact}"
+            extra = s700_impact
         else:
-            extra = "700hPa 干空气偏明显：云开则升温加速，云不开则作用难落地"
+            extra = "中层偏干信号存在，需配合低层开窗才容易转化为地面增温"
 
         if s700_scope in {"peripheral", "remote"}:
-            extra = extra + "（距离较远，按背景加分处理）"
+            extra = extra + "（距离较远，仅按背景弱加分处理）"
         if snd_q == "missing_profile" and s700_scope != "near":
             extra = extra + "（本站探空剖面缺测，未作本地湿干结构确认）"
 

@@ -99,8 +99,8 @@ def diagnose_700(
         }
     if cloud <= 20:
         return {
-            "summary": "700hPa 干层特征偏明显",
-            "impact": "云量维持弱，白天增温更易维持",
+            "summary": "中层偏干代理信号（低云维持偏弱）",
+            "impact": "仅作弱增温背景参考，不视作700hPa干侵已落地",
             "source": "cloud-proxy",
         }
     return None

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from condition_state import build_condition_context, build_live_condition_signals
+from layer_signal_policy import h700_dry_support_factor, h700_is_moist_constraint, h700_should_surface_in_evidence
 from market_label_policy import build_market_label_policy
 from param_store import load_tmax_learning_params
 from polymarket_render_service import _build_polymarket_section
@@ -361,16 +362,18 @@ def _build_synoptic_lines(
                 tags.append("近冰点相变/潜热冷却风险")
 
         # 4) moisture structure (mid-dry / upper moist hints)
-        mid_dry = "干层" in h700_summary
-        if mid_dry:
-            profile_score += 0.45
+        dry_factor = h700_dry_support_factor(h700_summary)
+        if dry_factor > 0:
+            profile_score += 0.18 * dry_factor
             if cloud_code_now in {"CLR", "CAVOK", "SKC", "FEW", "SCT"}:
-                up_adj += 0.45
-                tags.append("中层偏干+云开（增温效率高）")
+                up_adj += 0.28 * dry_factor
             else:
-                up_adj += 0.15
-                tags.append("中层偏干（但低层云仍有限制）")
-        elif ("湿层" in h700_summary) or ("约束" in h700_summary):
+                up_adj += 0.10 * dry_factor
+            if dry_factor >= 0.75:
+                tags.append("中层偏干+低层开窗（增温效率提升）")
+            elif dry_factor >= 0.30:
+                tags.append("中层偏干背景（需配合低层开窗）")
+        elif h700_is_moist_constraint(h700_summary):
             profile_score += 0.35
             down_adj += 0.25
             tags.append("中层湿层约束")
@@ -409,7 +412,7 @@ def _build_synoptic_lines(
 
         if _contains_any(extra, ["封盖", "压制", "湿层", "低云"]):
             down += 1.0
-        if _contains_any(extra, ["干层", "日照", "升温加速"]):
+        if h700_dry_support_factor(h700_summary) <= 0 and _contains_any(extra, ["干层", "日照", "升温加速"]):
             up += 0.8
 
         try:
@@ -612,7 +615,7 @@ def _build_synoptic_lines(
 
     def _is_weak_evidence(s: str) -> bool:
         t = str(s or "")
-        weak_tokens = ["信号一般", "信号有限", "中性", "背景", "不明", "弱"]
+        weak_tokens = ["信号一般", "信号有限", "高空背景信号有限", "高空背景一般", "低层输送信号一般", "弱信号背景", "背景噪声", "不明确"]
         return any(k in t for k in weak_tokens)
 
     def _h700_dist_km(s: str) -> float | None:
@@ -641,7 +644,7 @@ def _build_synoptic_lines(
 
     if h700_summary and not _is_weak_evidence(h700_summary):
         d700 = _h700_dist_km(h700_summary)
-        h700_key = ("近站" in h700_summary) or ((d700 is not None) and (d700 <= 360)) or ("湿层" in h700_summary) or ("约束" in h700_summary)
+        h700_key = h700_should_surface_in_evidence(h700_summary) or ((d700 is not None) and (d700 <= 360))
         if h700_key:
             evidence_bits.append(f"700hPa: {h700_summary}")
 
@@ -653,7 +656,7 @@ def _build_synoptic_lines(
     if h925_summary and not _is_weak_evidence(h925_summary):
         evidence_bits.append(f"925hPa: {h925_summary}")
 
-    if extra and not _is_weak_evidence(extra):
+    if extra and not _is_weak_evidence(extra) and not (h700_dry_support_factor(h700_summary) > 0 and ("偏干" in str(extra) or "700hPa" in str(extra))):
         evidence_bits.append(f"约束: {extra}")
 
     if evidence_bits:
@@ -669,9 +672,9 @@ def _build_synoptic_lines(
         sf = _sounding_factor_pack()
 
         if h700_summary:
-            if "干层" in h700_summary:
+            if h700_dry_support_factor(h700_summary) >= 0.75:
                 bits.append("中层(600-700hPa)偏干")
-            elif ("湿层" in h700_summary) or ("约束" in h700_summary):
+            elif h700_is_moist_constraint(h700_summary):
                 bits.append("中层(700hPa)湿层约束")
 
         if snd_thermo.get("has_profile"):
@@ -721,7 +724,7 @@ def _build_synoptic_lines(
             short_cue = "暖平流对上沿仍有支撑"
         elif "冷平流" in line850:
             short_cue = "冷平流对上沿有抑制"
-        elif "干层" in h700_summary:
+        elif h700_dry_support_factor(h700_summary) >= 0.75:
             short_cue = "中层偏干有利白天增温"
 
         # expose thermal-balance/window-prior constraints in human wording

@@ -12,6 +12,7 @@ from realtime_pipeline import classify_window_phase
 from historical_payload import get_historical_payload, get_weighted_reference
 from historical_strategy import blend_historical_range
 from historical_context_provider import _analog_branch_label
+from layer_signal_policy import h700_dry_support_factor, h700_is_moist_constraint
 
 
 def _parse_iso_dt(v: Any) -> datetime | None:
@@ -242,16 +243,18 @@ def _render_sounding_factor_pack(
             profile_score += 0.2
             tags.append("近冰点相变/潜热冷却风险")
 
-    mid_dry = "干层" in h700_summary
-    if mid_dry:
-        profile_score += 0.45
+    dry_factor = h700_dry_support_factor(h700_summary)
+    if dry_factor > 0:
+        profile_score += 0.18 * dry_factor
         if cloud_code_now in {"CLR", "CAVOK", "SKC", "FEW", "SCT"}:
-            up_adj += 0.45
-            tags.append("中层偏干+云开（增温效率高）")
+            up_adj += 0.28 * dry_factor
         else:
-            up_adj += 0.15
-            tags.append("中层偏干（但低层云仍有限制）")
-    elif ("湿层" in h700_summary) or ("约束" in h700_summary):
+            up_adj += 0.10 * dry_factor
+        if dry_factor >= 0.75:
+            tags.append("中层偏干+低层开窗（增温效率提升）")
+        elif dry_factor >= 0.30:
+            tags.append("中层偏干背景（需配合低层开窗）")
+    elif h700_is_moist_constraint(h700_summary):
         profile_score += 0.35
         down_adj += 0.25
         tags.append("中层湿层约束")
@@ -302,7 +305,7 @@ def _render_signal_scores(
 
     if _contains_any_text(extra, ["封盖", "压制", "湿层", "低云"]):
         down += 1.0
-    if _contains_any_text(extra, ["干层", "日照", "升温加速"]):
+    if h700_dry_support_factor(h700_summary) <= 0 and _contains_any_text(extra, ["干层", "日照", "升温加速"]):
         up += 0.8
 
     try:
@@ -863,13 +866,13 @@ def _build_peak_range_module(
     if _is_generic_500_text(line500):
         circ_weak_forced = True
     strong_cold_adv = ("冷平流" in line850) and ("暖平流" not in line850)
-    dry_support = ("干层" in h700_summary)
+    dry_support = h700_dry_support_factor(h700_summary)
 
     circ_context_score = 0.55
     if circ_weak_forced:
         circ_context_score += 0.22
-    if dry_support:
-        circ_context_score += 0.18
+    if dry_support > 0:
+        circ_context_score += 0.10 * dry_support
     if ("暖平流" in line850) and b_cons > -0.4:
         circ_context_score += 0.08
     if strong_dyn:
@@ -948,8 +951,8 @@ def _build_peak_range_module(
     warm_support = 0.0
     if "暖平流" in line850:
         warm_support += 0.6
-    if "干层" in h700_summary:
-        warm_support += 0.4
+    if dry_support > 0:
+        warm_support += 0.18 * dry_support
     if rad_eff is not None:
         if rad_eff >= rt_rad_recover:
             warm_support += 0.55

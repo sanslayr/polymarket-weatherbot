@@ -183,6 +183,74 @@ def _fetch_mgm_reference(st: Station) -> dict[str, Any] | None:
         return None
 
 
+def _wind_dir_text_cn(direction_deg: Any) -> str:
+    try:
+        deg = float(direction_deg) % 360.0
+    except Exception:
+        return "风向不定"
+    dirs = [
+        "北风", "东北偏北风", "东北风", "东北偏东风",
+        "东风", "东南偏东风", "东南风", "东南偏南风",
+        "南风", "西南偏南风", "西南风", "西南偏西风",
+        "西风", "西北偏西风", "西北风", "西北偏北风",
+    ]
+    idx = int(((deg + 11.25) % 360.0) // 22.5)
+    return dirs[idx]
+
+
+def _render_mgm_reference_line(mgm_ref: dict[str, Any], unit_pref: str) -> str:
+    def _fmt_temp_ref(v_c: Any) -> str:
+        try:
+            v = float(v_c)
+        except Exception:
+            return str(v_c)
+        if unit_pref == "F":
+            return f"{(v * 9.0 / 5.0 + 32.0):.1f}°F"
+        return f"{v:.1f}°C"
+
+    fields = []
+    vz = str(mgm_ref.get("veri_zamani") or "")
+    vz_txt = "--:-- Local"
+    if vz:
+        try:
+            parsed = datetime.fromisoformat(vz.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            vz_txt = parsed.astimezone(ZoneInfo("Europe/Istanbul")).strftime("%H:%M Local")
+        except Exception:
+            if "T" in vz and len(vz) >= 16:
+                vz_txt = vz[11:16] + " Local"
+    fields.append(f"- MGM参考（{vz_txt}）")
+
+    try:
+        temp_c = float(mgm_ref.get("temp_c")) if mgm_ref.get("temp_c") is not None else None
+    except Exception:
+        temp_c = None
+    if temp_c is not None:
+        fields.append(f"气温={_fmt_temp_ref(temp_c)}")
+
+    rh = mgm_ref.get("rh")
+    if rh is not None:
+        fields.append(f"湿度={rh}%")
+
+    wind_dir = mgm_ref.get("wind_dir")
+    if wind_dir not in (None, ""):
+        try:
+            deg = float(wind_dir)
+            fields.append(f"风向={_wind_dir_text_cn(deg)}（{deg:.0f}°）")
+        except Exception:
+            fields.append(f"风向={wind_dir}")
+
+    wind_kmh = mgm_ref.get("wind_kmh")
+    if wind_kmh is not None:
+        try:
+            fields.append(f"风速={float(wind_kmh):.1f}km/h")
+        except Exception:
+            fields.append(f"风速={wind_kmh}km/h")
+
+    return "，".join(fields)
+
+
 def _is_openmeteo_rate_limited_error(exc: Exception) -> bool:
     msg = str(exc)
     return ("429" in msg) or ("Too Many Requests" in msg) or ("open-meteo breaker active" in msg)
@@ -206,26 +274,7 @@ def _render_metar_only_report(
     )
     mgm_ref = _fetch_mgm_reference(st) if str(st.icao).upper() == "LTAC" else None
     if mgm_ref:
-        def _fmt_temp_ref(v_c: Any) -> str:
-            try:
-                v = float(v_c)
-            except Exception:
-                return str(v_c)
-            if unit_pref == "F":
-                return f"{(v * 9.0 / 5.0 + 32.0):.1f}°F"
-            return f"{v:.1f}°C"
-        try:
-            t = float(mgm_ref.get("temp_c")) if mgm_ref.get("temp_c") is not None else None
-        except Exception:
-            t = None
-        vz = str(mgm_ref.get("veri_zamani") or "")
-        vz_txt = vz[11:16] + "Z" if ("T" in vz and len(vz) >= 16) else "--:--Z"
-        bits = [f"- MGM参考（{vz_txt}）"]
-        if t is not None:
-            bits.append(f"T={_fmt_temp_ref(t)}")
-        if mgm_ref.get("rh") is not None:
-            bits.append(f"RH={mgm_ref.get('rh')}%")
-        metar_text = metar_text + "\n" + "，".join(bits)
+        metar_text = metar_text + "\n" + _render_mgm_reference_line(mgm_ref, unit_pref)
 
     lat_hemi = "N" if st.lat >= 0 else "S"
     lon_hemi = "E" if st.lon >= 0 else "W"
@@ -447,33 +496,7 @@ def render_report(
         )
         mgm_ref = _fetch_mgm_reference(st) if str(st.icao).upper() == "LTAC" else None
         if mgm_ref:
-            def _fmt_temp_ref(v_c: Any) -> str:
-                try:
-                    v = float(v_c)
-                except Exception:
-                    return str(v_c)
-                if unit_pref == "F":
-                    return f"{(v * 9.0 / 5.0 + 32.0):.1f}°F"
-                return f"{v:.1f}°C"
-            try:
-                t = float(mgm_ref.get("temp_c")) if mgm_ref.get("temp_c") is not None else None
-            except Exception:
-                t = None
-            vz = str(mgm_ref.get("veri_zamani") or "")
-            vz_txt = vz[11:16] + "Z" if ("T" in vz and len(vz) >= 16) else "--:--Z"
-            extra = [f"- MGM参考（{vz_txt}）"]
-            if t is not None:
-                extra.append(f"T={_fmt_temp_ref(t)}")
-            rh = mgm_ref.get("rh")
-            if rh is not None:
-                extra.append(f"RH={rh}%")
-            w = mgm_ref.get("wind_kmh")
-            if w is not None:
-                try:
-                    extra.append(f"Wind={float(w):.1f}km/h")
-                except Exception:
-                    pass
-            metar_text = metar_text + "\n" + "，".join(extra)
+            metar_text = metar_text + "\n" + _render_mgm_reference_line(mgm_ref, unit_pref)
             metar_diag["mgm_reference"] = mgm_ref
         try:
             metar_diag["station_lat"] = float(st.lat)
