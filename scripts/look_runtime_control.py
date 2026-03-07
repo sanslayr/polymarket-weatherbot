@@ -80,9 +80,10 @@ class PreflightDecision:
 
 
 class LookRuntimeController:
-    def __init__(self, *, context: LookRuntimeContext, compute_key: str) -> None:
+    def __init__(self, *, context: LookRuntimeContext, compute_key: str, query_label: str | None = None) -> None:
         self.context = context
         self.compute_key = compute_key
+        self.query_label = str(query_label or "").strip()
         self.now = time.time()
         self._claimed = False
         self.policy = resolve_look_group_policy(context.peer_id if context.is_group else None)
@@ -91,10 +92,6 @@ class LookRuntimeController:
     def preflight(self) -> PreflightDecision:
         if not self._rate_limit_active():
             return PreflightDecision(True, None)
-
-        shared_result = self._read_shared_result_text()
-        if shared_result:
-            return PreflightDecision(False, "♻️ 2 分钟内已查询过相同对象，请查看上一条 /look 结果。")
 
         cooldown_left = self._user_cooldown_remaining()
         if cooldown_left > 0:
@@ -118,9 +115,10 @@ class LookRuntimeController:
         self._touch_user_state()
         return PreflightDecision(True, None)
 
-    def success(self, text: str) -> None:
+    def success(self, text: str, *, result_meta: dict[str, Any] | None = None) -> None:
         if self._rate_limit_active():
-            self._write_shared_result(text)
+            self._write_latest_result(text, result_meta=result_meta)
+            self._write_shared_result(text, result_meta=result_meta)
         self._release_inflight()
 
     def failure(self) -> None:
@@ -161,18 +159,22 @@ class LookRuntimeController:
     def _wait_for_inflight(self) -> str | None:
         start = time.time()
         inflight_path = _inflight_path(self._shared_scope_key())
+        saw_inflight = False
         while True:
             payload = _read_json(inflight_path)
             if not payload:
-                result_text = self._read_shared_result_text()
-                return "♻️ 相同查询刚完成，请查看上一条 /look 结果。" if result_text else None
+                if not saw_inflight:
+                    return None
+                result_payload = self._read_latest_result_payload()
+                return self._format_cached_result_notice(result_payload, fallback="♻️ 相同查询刚完成，请查看上一条 /look 结果。") if result_payload else None
+            saw_inflight = True
             started_at = _safe_float(payload.get("started_at"))
             if started_at is None or (time.time() - started_at) > self.policy.rate_limit.inflight_stale_sec:
                 _unlink_if_exists(inflight_path)
                 return None
-            result_text = self._read_shared_result_text()
-            if result_text:
-                return "♻️ 相同查询已在本轮完成，请查看上一条 /look 结果。"
+            result_payload = self._read_latest_result_payload()
+            if result_payload:
+                return self._format_cached_result_notice(result_payload, fallback="♻️ 相同查询已在本轮完成，请查看上一条 /look 结果。")
             if (time.time() - start) >= self.policy.rate_limit.inflight_wait_sec:
                 return "⏳ 同一查询正在生成中，请稍后查看上一条结果。"
             time.sleep(POLL_INTERVAL_SECONDS)
@@ -196,7 +198,25 @@ class LookRuntimeController:
             os.close(fd)
         self._claimed = True
 
-    def _write_shared_result(self, text: str) -> None:
+    def peek_latest_result_payload(self) -> dict[str, Any] | None:
+        return self._read_latest_result_payload()
+
+    def _write_latest_result(self, text: str, *, result_meta: dict[str, Any] | None = None) -> None:
+        _write_json_atomic(
+            _latest_result_path(self._shared_scope_key()),
+            {
+                "scope_key": self._shared_scope_key(),
+                "compute_key": self.compute_key,
+                "updated_at": time.time(),
+                "text": text,
+                "query_label": self.query_label,
+                "result_meta": result_meta if isinstance(result_meta, dict) else {},
+                "policy_id": self.policy.policy_id,
+                "source_peer_id": self.context.peer_id,
+            },
+        )
+
+    def _write_shared_result(self, text: str, *, result_meta: dict[str, Any] | None = None) -> None:
         ttl_seconds = self.policy.rate_limit.shared_result_ttl_sec
         if ttl_seconds <= 0:
             return
@@ -207,12 +227,24 @@ class LookRuntimeController:
                 "compute_key": self.compute_key,
                 "expires_at": time.time() + ttl_seconds,
                 "text": text,
+                "query_label": self.query_label,
+                "result_meta": result_meta if isinstance(result_meta, dict) else {},
                 "policy_id": self.policy.policy_id,
                 "source_peer_id": self.context.peer_id,
             },
         )
 
-    def _read_shared_result_text(self) -> str | None:
+    def _read_latest_result_payload(self) -> dict[str, Any] | None:
+        payload = _read_json(_latest_result_path(self._shared_scope_key()))
+        if not payload:
+            return None
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            return None
+        payload["text"] = text
+        return payload
+
+    def _read_shared_result_payload(self) -> dict[str, Any] | None:
         payload = _read_json(_shared_result_path(self._shared_scope_key()))
         if not payload:
             return None
@@ -220,7 +252,10 @@ class LookRuntimeController:
         if expires_at is None or expires_at < time.time():
             return None
         text = str(payload.get("text") or "").strip()
-        return text or None
+        if not text:
+            return None
+        payload["text"] = text
+        return payload
 
     def _release_inflight(self) -> None:
         if self._claimed:
@@ -239,6 +274,12 @@ class LookRuntimeController:
         if scope == "sender-per-group" and self.context.peer_id:
             return f"{sender}|{self.context.peer_id}"
         return sender
+
+    def _format_cached_result_notice(self, payload: dict[str, Any] | None, *, fallback: str) -> str:
+        label = str((payload or {}).get("query_label") or self.query_label or "").strip()
+        if not label:
+            return fallback
+        return f"♻️ 已查询过 {label}，请查看上一条 /look 结果。"
 
 
 def build_request_key(*, station_icao: str, target_date: str, command_name: str = "look") -> str:
@@ -270,6 +311,10 @@ def _user_state_path(scope_key: str) -> Path:
 
 def _shared_result_path(scope_key: str) -> Path:
     return STATE_DIR / f"shared-result-{_short_hash(scope_key)}.json"
+
+
+def _latest_result_path(scope_key: str) -> Path:
+    return STATE_DIR / f"latest-result-{_short_hash(scope_key)}.json"
 
 
 def _inflight_path(scope_key: str) -> Path:

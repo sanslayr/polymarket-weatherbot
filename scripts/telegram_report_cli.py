@@ -26,6 +26,7 @@ PROCESS_T0 = time.perf_counter()
 
 from forecast_pipeline import load_or_build_forecast_decision
 from realtime_pipeline import classify_window_phase
+from look_change_guard import build_cached_result_meta, build_unchanged_notice
 from look_command import parse_telegram_command, render_look_help
 from look_runtime_control import LookRuntimeContext, LookRuntimeController, build_request_key
 import build_station_links as BSL
@@ -355,7 +356,18 @@ def render_report(
     runtime_control = LookRuntimeController(
         context=runtime_context,
         compute_key=build_request_key(station_icao=st.icao, target_date=target_date),
+        query_label=f"{st.city}({st.icao})-{target_date.replace('-', '')}",
     )
+    cached_payload = runtime_control.peek_latest_result_payload()
+    if cached_payload:
+        unchanged_notice = build_unchanged_notice(
+            query_label=f"{st.city}({st.icao})-{target_date.replace('-', '')}",
+            icao=st.icao,
+            model=default_model_for_station(st),
+            cached_payload=cached_payload,
+        )
+        if unchanged_notice:
+            return unchanged_notice
     preflight = runtime_control.preflight()
     if not preflight.proceed:
         return str(preflight.text or "")
@@ -398,7 +410,14 @@ def render_report(
                     tz_name=tz_name_station,
                     metar24_prefetched=metar_prefetched,
                 )
-                runtime_control.success(result_text)
+                runtime_control.success(
+                    result_text,
+                    result_meta=build_cached_result_meta(
+                        icao=st.icao,
+                        model=degrade_model,
+                        metar24=metar_prefetched,
+                    ),
+                )
                 return result_text
             raise
         _mark("hourly_fetch", time.perf_counter() - t0)
@@ -693,7 +712,14 @@ def render_report(
             header = f"{header}\n{perf_line}"
 
         result_text = f"{header}\n\n{body}\n{footer}"
-        runtime_control.success(result_text)
+        runtime_control.success(
+            result_text,
+            result_meta=build_cached_result_meta(
+                icao=st.icao,
+                model=model,
+                metar24=metar24,
+            ),
+        )
         return result_text
     except Exception:
         runtime_control.failure()

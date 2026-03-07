@@ -118,9 +118,9 @@ def blend_historical_range(
     base_core_half = max(0.1, (float(core_hi) - float(core_lo)) / 2.0)
     base_disp_half = max(base_core_half, (float(disp_hi) - float(disp_lo)) / 2.0)
 
-    ref_weight = {"weak": 0.18, "medium": 0.42, "strong": 0.68}.get(strength, 0.18)
-    ref_cap = {"weak": 0.45, "medium": 0.95, "strong": 1.55}.get(strength, 0.45)
-    width_blend = {"weak": 0.10, "medium": 0.30, "strong": 0.45}.get(strength, 0.10)
+    ref_weight = {"weak": 0.10, "medium": 0.24, "strong": 0.40}.get(strength, 0.10)
+    ref_cap = {"weak": 0.25, "medium": 0.55, "strong": 0.90}.get(strength, 0.25)
+    width_blend = {"weak": 0.05, "medium": 0.14, "strong": 0.22}.get(strength, 0.05)
     notes: list[str] = []
 
     branch_policy = _branch_policy(branch_assessment)
@@ -137,8 +137,8 @@ def blend_historical_range(
     notes.extend(station_policy["reasons"])
 
     if synoptic_alignment == "supportive":
-        ref_weight += 0.06
-        ref_cap += 0.15
+        ref_weight += 0.03
+        ref_cap += 0.08
         notes.append("环流背景支持当前分支")
     elif synoptic_alignment == "conflicting":
         ref_weight = max(0.08, ref_weight - 0.10)
@@ -146,11 +146,17 @@ def blend_historical_range(
         width_blend *= 1.08
         notes.append("环流背景与当前分支存在冲突")
 
-    phase_scale = {"far": 0.70, "near_window": 1.0, "in_window": 1.08, "post": 0.55}.get(phase_now, 0.85)
+    phase_scale = {"far": 0.55, "near_window": 0.80, "in_window": 0.85, "post": 0.40}.get(phase_now, 0.70)
     if phase_now == "post":
         notes.append("峰值窗已过，历史参考只作轻修正")
 
     same_hour_delta = abs(_safe_float(weighted.get("live_temp_delta_c")) or 0.0)
+    live_temp = _safe_float(weighted.get("live_temp_c"))
+    hist_same_hour_temp = _safe_float(weighted.get("historical_same_hour_temp_c"))
+    obs_max = _safe_float(metar_diag.get("observed_max_temp_c"))
+    temp_trend = _safe_float(metar_diag.get("temp_trend_smooth_c"))
+    if temp_trend is None:
+        temp_trend = _safe_float(metar_diag.get("temp_trend_1step_c"))
     if same_hour_delta >= 3.5:
         ref_weight *= 0.45
         ref_cap *= 0.65
@@ -170,14 +176,52 @@ def blend_historical_range(
     elif analog_count >= 3 and str(branch_policy.get("mode") or "") in {"converged", "preferred"}:
         ref_weight *= 1.04
 
-    ref_weight = _clamp(ref_weight, 0.08, 0.88)
-    ref_cap = _clamp(ref_cap, 0.25, 2.10)
-    width_blend = _clamp(width_blend, 0.05, 0.65)
+    ref_low = _safe_float(weighted.get("recommended_tmax_p25_c"))
+    ref_high = _safe_float(weighted.get("recommended_tmax_p75_c"))
+    ref_spread = (ref_high - ref_low) if (ref_low is not None and ref_high is not None and ref_high > ref_low) else None
+
+    # Late-window/settled observations should dominate over wide warm-side analog spread.
+    # This prevents the historical module from reopening the upper tail after the live profile
+    # has already flattened near the observed daily high.
+    strong_warm_reference_mismatch = bool(
+        phase_now in {"near_window", "in_window", "post"}
+        and same_hour_delta >= 4.0
+        and live_temp is not None
+        and hist_same_hour_temp is not None
+        and hist_same_hour_temp >= live_temp + 3.0
+        and ref_spread is not None
+        and ref_spread >= 6.0
+    )
+    settled_obs_guard = bool(
+        phase_now in {"near_window", "in_window", "post"}
+        and obs_max is not None
+        and live_temp is not None
+        and live_temp <= obs_max + 0.05
+        and (not bool(metar_diag.get("post_focus_window_active")))
+        and (not bool(metar_diag.get("nocturnal_reheat_signal")))
+        and (
+            bool(metar_diag.get("rounded_top_cap_applied"))
+            or bool(metar_diag.get("late_end_cap_applied"))
+            or (temp_trend is not None and temp_trend <= 0.15)
+        )
+    )
+    if strong_warm_reference_mismatch:
+        ref_weight *= 0.60
+        ref_cap = min(ref_cap, 0.55)
+        width_blend = min(width_blend, 0.18)
+        notes.append("历史同小时显著偏暖，区间仅保留轻量修正")
+    if settled_obs_guard:
+        ref_weight *= 0.50
+        ref_cap = min(ref_cap, 0.35 if phase_now != "post" else 0.25)
+        width_blend = min(width_blend, 0.05 if strong_warm_reference_mismatch else 0.10)
+        notes.append("实况已接近/达到日高平台，历史参考不再放大上沿")
+
+    ref_weight = _clamp(ref_weight, 0.05, 0.65)
+    ref_cap = _clamp(ref_cap, 0.15, 0.95)
+    width_blend = _clamp(width_blend, 0.03, 0.30)
 
     shift = _clamp((recommended - base_center) * ref_weight * phase_scale, -ref_cap, ref_cap)
 
-    ref_low = _safe_float(weighted.get("recommended_tmax_p25_c"))
-    ref_high = _safe_float(weighted.get("recommended_tmax_p75_c"))
     if ref_low is not None and ref_high is not None and ref_high > ref_low:
         ref_half = max(0.1, (ref_high - ref_low) / 2.0)
         core_half = base_core_half * (1.0 - width_blend) + ref_half * width_blend

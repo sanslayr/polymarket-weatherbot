@@ -18,7 +18,7 @@ DEFAULT_POLICY_DOC: dict[str, Any] = {
             "apply_in_direct": False,
             "user_cooldown_sec": 60,
             "user_cooldown_scope": "sender-global",
-            "shared_result_ttl_sec": 120,
+            "shared_result_ttl_sec": 0,
             "shared_result_scope": "telegram-groups-shared",
             "inflight_wait_sec": 20,
             "inflight_stale_sec": 120,
@@ -64,7 +64,7 @@ def resolve_look_group_policy(peer_id: str | None) -> LookGroupPolicy:
                 allowed={"sender-global", "sender-per-group"},
                 fallback="sender-global",
             ),
-            shared_result_ttl_sec=max(0, _to_int(rate_limit_raw.get("shared_result_ttl_sec"), 120)),
+            shared_result_ttl_sec=max(0, _to_int(rate_limit_raw.get("shared_result_ttl_sec"), 0)),
             shared_result_scope=_normalize_choice(
                 rate_limit_raw.get("shared_result_scope"),
                 allowed={"telegram-groups-shared", "group-only"},

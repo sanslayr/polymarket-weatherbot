@@ -100,7 +100,7 @@ def _date_span_text(dates: list[str]) -> str:
         ordered = cleaned
     if len(ordered) == 1:
         return ordered[0]
-    return f"{ordered[0]}&{ordered[-1]}"
+    return f"{ordered[0]} & {ordered[-1]}"
 
 
 def _reference_degree_text(text: str) -> str:
@@ -1365,6 +1365,36 @@ def _build_peak_range_module(
         decisive_hourly_report = True
 
     metar_diag["decisive_hourly_report"] = bool(decisive_hourly_report)
+    clear_sky_settled = False
+    h_since_obs_peak = None
+    t_now_compact = None
+    if obs_max is not None and clear_sky_stable and phase_now in {"near_window", "in_window", "post"}:
+        try:
+            latest_local_txt = str(metar_diag.get("latest_report_local") or "")
+            obs_peak_local_txt = str(metar_diag.get("observed_max_time_local") or "")
+            h_since_obs_peak = _hours_between_iso(latest_local_txt, obs_peak_local_txt, nonneg=True)
+        except Exception:
+            h_since_obs_peak = None
+        try:
+            t_now_compact = float(metar_diag.get("latest_temp")) if metar_diag.get("latest_temp") is not None else None
+        except Exception:
+            t_now_compact = None
+        if (
+            h_since_obs_peak is not None
+            and h_since_obs_peak >= 0.40
+            and t_now_compact is not None
+            and t_now_compact <= float(obs_max) - 0.4
+            and t_cons <= min(rt_weak, 0.12)
+            and (t_acc is None or t_acc <= 0.0)
+            and (not bool(metar_diag.get("nocturnal_reheat_signal")))
+            and (not warm_reheat_hint)
+            and (not bool(metar_diag.get("metar_speci_active")))
+            and (not bool(metar_diag.get("metar_speci_likely")))
+            and precip_state not in {"moderate", "heavy", "convective"}
+            and cloud_code_now not in {"BKN", "OVC", "VV"}
+        ):
+            clear_sky_settled = True
+    metar_diag["clear_sky_settled"] = bool(clear_sky_settled)
 
     if (
         obs_max is not None
@@ -1379,6 +1409,8 @@ def _build_peak_range_module(
     ):
         compact_settled_mode = True
     elif decisive_hourly_report and obs_max is not None:
+        compact_settled_mode = True
+    elif clear_sky_settled and obs_max is not None:
         compact_settled_mode = True
 
     core_lo, core_hi, disp_lo, disp_hi, historical_blend = _apply_historical_reference(
@@ -1459,13 +1491,18 @@ def _build_peak_range_module(
                 settle_up = 0.35
             if bool(metar_diag.get("nocturnal_reheat_signal")):
                 settle_up = max(settle_up, 0.40)
+            if bool(metar_diag.get("clear_sky_settled")):
+                settle_up = min(settle_up, 0.18)
             settle_hi = _soft_snap(min(hi, max(settle_lo + 0.10, float(obs_max) + settle_up)))
 
         settle_lo, settle_hi = _enforce_obs_floor_range(float(settle_lo), float(settle_hi), 0.10)
 
+        settle_reason = "按已观测最高温锚定；峰值窗已过"
+        if bool(metar_diag.get("clear_sky_settled")) and phase_now in {"near_window", "in_window"}:
+            settle_reason = "按已观测最高温锚定；晴空辐射主导下峰值基本确认"
         peak_range_block = [
             "🌡️ **可能最高温区间（仅供参考）**",
-            f"- **{fmt_range_fn(settle_lo, settle_hi)}**（按已观测最高温锚定；峰值窗已过）",
+            f"- **{fmt_range_fn(settle_lo, settle_hi)}**（{settle_reason}）",
         ]
 
     if bool(metar_diag.get("obs_correction_applied")):
