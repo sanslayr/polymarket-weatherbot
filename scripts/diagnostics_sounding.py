@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from boundary_layer_regime import build_model_sounding_proxy
+
 
 def _fmt_temp_unit(value_c: Any, unit: str) -> str:
     try:
@@ -30,6 +32,9 @@ def diagnose_sounding(
     *,
     temp_unit: str = "C",
     obs_context: dict[str, Any] | None = None,
+    h700_summary: str = "",
+    h925_summary: str = "",
+    cloud_code_now: str = "",
 ) -> dict[str, Any]:
     t850 = primary_window.get("t850_c")
     w850 = primary_window.get("w850_kmh")
@@ -98,6 +103,26 @@ def diagnose_sounding(
                 items.append(f"探空分层：{txt}")
         if thermo.get("actionable"):
             items.append(f"探空提示：{thermo['actionable']}")
+    else:
+        proxy_thermo = build_model_sounding_proxy(
+            primary_window,
+            metar_diag,
+            h700_summary=h700_summary,
+            h925_summary=h925_summary,
+            cloud_code_now=cloud_code_now,
+        )
+        thermo.update(proxy_thermo)
+        thermo["quality"] = str(thermo.get("quality") or "model_proxy")
+        thermo["profile_source"] = str(thermo.get("profile_source") or "model_proxy")
+        thermo["layer_findings"] = list(proxy_thermo.get("layer_findings") or [])
+        thermo["actionable"] = str(proxy_thermo.get("actionable") or "")
+
+        for finding in thermo["layer_findings"][:2]:
+            txt = str(finding).strip()
+            if txt:
+                items.append(f"模式层结：{txt}")
+        if thermo.get("actionable"):
+            items.append(f"层结提示：{thermo['actionable']}")
 
     profile_value_keys = {
         "sbcape_jkg",

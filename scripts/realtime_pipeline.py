@@ -100,8 +100,27 @@ def classify_window_phase(primary_window: dict[str, Any], metar_diag: dict[str, 
     }
 
 
-def select_realtime_triggers(primary_window: dict[str, Any], metar_diag: dict[str, Any], *, temp_unit: str = "C") -> list[str]:
-    phase = classify_window_phase(primary_window, metar_diag).get("phase", "unknown")
+def select_realtime_triggers(
+    primary_window: dict[str, Any],
+    metar_diag: dict[str, Any],
+    *,
+    temp_unit: str = "C",
+    temp_phase_decision: dict[str, Any] | None = None,
+) -> list[str]:
+    if isinstance(temp_phase_decision, dict):
+        temp_state = temp_phase_decision
+    else:
+        from temperature_phase_decision import build_temperature_phase_decision
+
+        temp_state = build_temperature_phase_decision(primary_window, metar_diag)
+    phase = str(temp_state.get("phase") or classify_window_phase(primary_window, metar_diag).get("phase", "unknown"))
+    daily_peak_state = str(temp_state.get("daily_peak_state") or "open")
+    keep_second_peak_open = bool(temp_state.get("should_keep_second_peak_open"))
+    early_peak_wording = bool(temp_state.get("should_use_early_peak_wording"))
+    rebound_mode = str(temp_state.get("rebound_mode") or "none")
+    dominant_shape = str(temp_state.get("dominant_shape") or "")
+    plateau_hold_state = str(temp_state.get("plateau_hold_state") or "none")
+    should_discuss_second_peak = bool(temp_state.get("should_discuss_second_peak"))
     t_src = metar_diag.get("temp_trend_smooth_c") if metar_diag.get("temp_trend_smooth_c") is not None else metar_diag.get("temp_trend_1step_c")
     t_tr = float(t_src or 0.0)
     p_tr = float(metar_diag.get("pressure_trend_1step_hpa") or 0.0)
@@ -117,7 +136,12 @@ def select_realtime_triggers(primary_window: dict[str, Any], metar_diag: dict[st
     out: list[str] = []
     if phase in {"near_window", "in_window"}:
         if peak_lock:
-            out.append("• 温度转负 + 云层回补 + 风场转差 → 高点基本定局，后续以上沿回落为主。")
+            if daily_peak_state == "locked":
+                out.append("• 温度转负 + 云层回补 + 风场转差 → 高点基本定局，后续以上沿回落为主。")
+            elif early_peak_wording:
+                out.append("• 早段高点已出现，短线再冲动能转弱；但全天是否锁定仍待午前后云量、降水与风场确认。")
+            else:
+                out.append("• 短线升温动能转弱；若后续云量不再开窗且风场继续偏差，全天高点才会逐步转向锁定。")
         if upside:
             out.append("• 升温斜率维持正值且云层开窗 → 最高温上沿存在小幅上修风险。")
         if shift:
@@ -140,6 +164,20 @@ def select_realtime_triggers(primary_window: dict[str, Any], metar_diag: dict[st
         wet_now = (precip_state in {"light", "moderate", "heavy", "convective"}) or (precip_trend in {"new", "intensify", "steady", "end"})
         cloudy_now = cloud_code in {"BKN", "OVC", "VV"}
 
+        if daily_peak_state == "locked" and (peak_lock or t_tr <= 0):
+            out.append("• 窗口后阶段：高点大概率已定，后续以回落或横盘为主。")
+            return out[:3]
+        if early_peak_wording:
+            out.append("• 早段高点已出现，短线再冲动能转弱；但全天是否锁定仍待午前后云量、降水与风场确认。")
+            if keep_second_peak_open:
+                if should_discuss_second_peak:
+                    out.append("• 若午前后出现真实开云并恢复正斜率，仍可回摸前高或形成弱二峰。")
+            return out[:3]
+        if keep_second_peak_open:
+            if should_discuss_second_peak:
+                out.append("• 当前更像早峰后整理；若后续开云并恢复正斜率，仍可回摸前高或形成弱二峰。")
+            return out[:3]
+
         if obs_max is not None and t_now is not None:
             need = max(0.0, obs_max - t_now + 0.1)
             if need >= 0.8:
@@ -152,9 +190,10 @@ def select_realtime_triggers(primary_window: dict[str, Any], metar_diag: dict[st
             elif t_tr >= 0.3 and (not wet_now) and (not cloudy_now):
                 out.append("• 已贴近前高：若下一报继续升温且不回补云层，存在小幅反超机会。")
             else:
-                out.append("• 窗口后阶段：高点大概率已定，后续以回落或横盘为主。")
+                if daily_peak_state == "locked":
+                    out.append("• 窗口后阶段：高点大概率已定，后续以回落或横盘为主。")
         else:
-            if peak_lock or t_tr <= 0:
+            if daily_peak_state == "locked" and (peak_lock or t_tr <= 0):
                 out.append("• 窗口后阶段：高点大概率已定，后续以回落或横盘为主。")
     else:
         # far/unknown: lightweight dynamic cues (avoid rigid template outputs)

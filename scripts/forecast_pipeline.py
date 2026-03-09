@@ -285,7 +285,14 @@ def build_forecast_decision(
     diag925 = diagnose_925(primary_window, None) or {}
     temp_unit = "F" if str(getattr(station, "icao", "")).upper().startswith("K") else "C"
     sounding_obs = build_sounding_obs_context(station=station, now_utc=now_utc)
-    snd = diagnose_sounding(primary_window, {}, temp_unit=temp_unit, obs_context=sounding_obs) or {}
+    snd = diagnose_sounding(
+        primary_window,
+        {},
+        temp_unit=temp_unit,
+        obs_context=sounding_obs,
+        h700_summary=str(diag700.get("summary") or ""),
+        h925_summary=str(diag925.get("summary") or ""),
+    ) or {}
 
     regimes = classify_large_scale_regime(synoptic, station_lat, primary_window.get("w850_kmh"))
     regime_txt = regimes[0] if regimes else "过渡背景"

@@ -13,7 +13,7 @@ import build_station_links as BSL
 from cache_envelope import extract_payload, make_cache_doc
 from runtime_cache_policy import runtime_cache_enabled
 from station_catalog import Station
-from window_phase_engine import pick_peak_indices
+from temperature_shape_analysis import analyze_temperature_shape
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT / "cache" / "runtime"
@@ -279,75 +279,40 @@ def slice_hourly_local_day(hourly: dict[str, Any], target_date: str) -> dict[str
     return out
 
 
-def _build_window_at_index(hourly: dict[str, Any], idx: int, band_c: float = 0.4) -> dict[str, Any]:
-    times = hourly["time"]
-    t2m = hourly["temperature_2m"]
-    t850 = hourly["temperature_850hPa"]
-    wspd850 = hourly["wind_speed_850hPa"]
-    wdir850 = hourly["wind_direction_850hPa"]
-    clow = hourly["cloud_cover_low"]
-    pmsl = hourly["pressure_msl"]
+def detect_tmax_windows(
+    hourly: dict[str, Any],
+    *,
+    temp_shape_analysis: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
+    shape = temp_shape_analysis if isinstance(temp_shape_analysis, dict) else analyze_temperature_shape(hourly)
+    forecast = dict(shape.get("forecast") or {})
+    raw_candidates = list(forecast.get("candidates") or [])
+    raw_windows = list(forecast.get("windows") or [])
 
-    left = max(0, idx - 3)
-    right = min(len(t2m) - 1, idx + 3)
-    k0 = max(range(left, right + 1), key=lambda x: t2m[x])
-
-    base = t2m[k0]
-    s = k0
-    e = k0
-    while s - 1 >= 0 and t2m[s - 1] >= base - band_c:
-        s -= 1
-    while e + 1 < len(t2m) and t2m[e + 1] >= base - band_c:
-        e += 1
-
-    k = max(range(s, e + 1), key=lambda x: t2m[x])
-    return {
-        "start_local": times[s],
-        "end_local": times[e],
-        "peak_local": times[k],
-        "peak_temp_c": t2m[k],
-        "t850_c": t850[k],
-        "w850_kmh": wspd850[k],
-        "wd850_deg": wdir850[k],
-        "low_cloud_pct": clow[k],
-        "pmsl_hpa": pmsl[k],
-    }
-
-
-def detect_tmax_windows(hourly: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
-    times = hourly["time"]
-    t2m = hourly["temperature_2m"]
-
-    tmax = max(t2m)
-    idx = [i for i, v in enumerate(t2m) if v >= tmax - 0.5]
-    windows: list[dict[str, Any]] = []
-    if idx:
-        s = idx[0]
-        p = idx[0]
-        for i in idx[1:]:
-            if i == p + 1:
-                p = i
-            else:
-                k = max(range(s, p + 1), key=lambda x: t2m[x])
-                windows.append(_build_window_at_index(hourly, k, band_c=0.5))
-                s = i
-                p = i
-        k = max(range(s, p + 1), key=lambda x: t2m[x])
-        windows.append(_build_window_at_index(hourly, k, band_c=0.5))
-
-    picked = pick_peak_indices(hourly, limit=4, min_separation_hours=2)
-
+    windows: list[dict[str, Any]] = [dict(window) for window in raw_windows if isinstance(window, dict)]
     candidates: list[dict[str, Any]] = []
-    for i, s, info in picked:
-        w = _build_window_at_index(hourly, i, band_c=0.4)
+    for candidate in raw_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        window = dict(candidate.get("window") or {})
         candidates.append({
-            "score": round(float(s), 3),
-            "hour_local": times[i],
-            "window": w,
-            "factors": info,
+            "score": round(float(candidate.get("score") or 0.0), 3),
+            "hour_local": str(candidate.get("peak_local") or ""),
+            "window": window,
+            "factors": dict(candidate.get("score_factors") or {}),
+            "cluster_kind": str(candidate.get("cluster_kind") or ""),
+            "window_hours": candidate.get("window_hours"),
+            "near_top_hours": candidate.get("near_top_hours"),
+            "temp_gap_to_primary_c": candidate.get("temp_gap_to_primary_c"),
+            "gap_hours_to_primary": candidate.get("gap_hours_to_primary"),
+            "valley_dip_to_primary_c": candidate.get("valley_dip_to_primary_c"),
         })
 
-    primary = candidates[0]["window"] if candidates else (windows[0] if windows else {})
+    primary = dict(forecast.get("primary_window") or {})
+    if not primary and candidates:
+        primary = dict(candidates[0].get("window") or {})
+    if not primary and windows:
+        primary = dict(windows[0])
     return windows, primary, candidates
 
 

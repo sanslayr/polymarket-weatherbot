@@ -94,6 +94,17 @@ def _load_station_priors() -> dict[str, dict[str, str]]:
         return {str(row.get("station_id") or "").upper(): row for row in csv.DictReader(handle)}
 
 
+def get_station_prior(station_id: str) -> dict[str, str] | None:
+    station_key = str(station_id or "").upper()
+    if not station_key:
+        return None
+    priors = _load_station_priors()
+    row = priors.get(station_key)
+    if not isinstance(row, dict):
+        return None
+    return dict(row)
+
+
 @lru_cache(maxsize=1)
 def _load_monthly_rows() -> list[dict[str, str]]:
     path = _required_path(MONTHLY_FILE)

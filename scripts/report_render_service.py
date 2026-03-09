@@ -10,18 +10,21 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from condition_state import build_condition_context, build_live_condition_signals
+from boundary_layer_regime import build_boundary_layer_regime
 from layer_signal_policy import h700_dry_support_factor, h700_effective_dry_factor, h700_is_moist_constraint, h700_should_surface_in_evidence
 from market_label_policy import build_market_label_policy
 from param_store import load_tmax_learning_params
 from polymarket_render_service import _build_polymarket_section
 from realtime_pipeline import classify_window_phase, select_realtime_triggers
 from report_peak_module import _build_peak_range_module
+from temperature_phase_decision import build_temperature_phase_decision
 
 PHASE_LABELS = {
     "far": "远离窗口",
     "near_window": "接近窗口",
     "in_window": "窗口内",
     "post": "窗口后",
+    "early_peak_watch": "早峰后观察",
     "unknown": "窗口状态未知",
 }
 DEFAULT_TRACK_LINE = "• 临窗前继续跟踪温度斜率与风向节奏，必要时再改判。"
@@ -1020,10 +1023,23 @@ def _build_vars_and_market_blocks(
     fmt_range,
     fmt_temp,
     polymarket_prefetched_event: tuple[bool, list[dict[str, Any]]] | None,
+    temp_phase_decision: dict[str, Any],
+    boundary_layer_regime: dict[str, Any] | None = None,
 ) -> tuple[list[str], str, str]:
-    vars_block = [f"⚠️ **关注变量**（{PHASE_LABELS.get(phase_now, PHASE_LABELS['unknown'])}）"]
+    display_phase = str(temp_phase_decision.get("display_phase") or phase_now)
+    vars_block = [f"⚠️ **关注变量**（{PHASE_LABELS.get(display_phase, PHASE_LABELS['unknown'])}）"]
     obs_analysis_lines: list[str] = []
     signals = build_live_condition_signals(metar_diag)
+    daily_peak_state = str(temp_phase_decision.get("daily_peak_state") or "open")
+    use_early_peak_wording = bool(temp_phase_decision.get("should_use_early_peak_wording"))
+    keep_second_peak_open = bool(temp_phase_decision.get("should_keep_second_peak_open"))
+    rebound_mode = str(temp_phase_decision.get("rebound_mode") or "none")
+    dominant_shape = str(temp_phase_decision.get("dominant_shape") or "")
+    plateau_hold_state = str(temp_phase_decision.get("plateau_hold_state") or "none")
+    should_discuss_second_peak = bool(temp_phase_decision.get("should_discuss_second_peak"))
+    bl_regime = boundary_layer_regime if isinstance(boundary_layer_regime, dict) else {}
+    bl_regime_key = str(bl_regime.get("regime_key") or "")
+    bl_tracking_line = str(bl_regime.get("tracking_line") or "").strip()
 
     t_bias = signals.get("temp_bias_c")
     t_tr = signals.get("temp_trend_c")
@@ -1142,15 +1158,17 @@ def _build_vars_and_market_blocks(
 
     if cadence_line:
         focus.append((0.86, cadence_line))
+    if bl_regime_key in {"boundary_layer_clearing", "static_stable", "mixing_depth"} and bl_tracking_line:
+        focus.append((0.99, f"• {bl_tracking_line}"))
 
     if key_report_slots:
         slot_txt = " / ".join(key_report_slots[:2])
-        if phase_now == "post" and obs_max is not None:
+        if daily_peak_state == "locked" and phase_now == "post" and obs_max is not None:
             focus.append((0.95, f"• 关键发报点（{slot_txt} Local）：若连续报维持横盘/回落，高点基本锁定；仅在斜率再放大并伴随风云重排时才重开上修。"))
         else:
             focus.append((0.95, f"• 关键发报点（{slot_txt} Local）：这些报点对“是否封顶/是否上修”影响最大，建议优先盯。"))
     elif next_key_report_txt and phase_now in {"near_window", "in_window", "post"} and (not bool(metar_diag.get("metar_speci_active"))):
-        if phase_now == "post" and obs_max is not None:
+        if daily_peak_state == "locked" and phase_now == "post" and obs_max is not None:
             focus.append((0.93, f"• 重点看 {next_key_report_txt} Local：若继续横盘/回落，高点基本锁定；仅当温度重新抬升并伴随风云再配合，才可能改写前高。"))
         else:
             focus.append((0.93, f"• 下一关键报约 {next_key_report_txt} Local（按该站常规发报节律推算；该报点对是否封顶更关键）。"))
@@ -1200,9 +1218,8 @@ def _build_vars_and_market_blocks(
     # 晴空辐射日圆弧顶信号（防惯性高估）
     if bool(metar_diag.get("rounded_top_cap_applied")):
         focus.append((1.02, "• 实况斜率已走平/转弱（圆弧顶特征）→ 上沿再上修空间有限，优先防高估。"))
-
     # 窗口已过后的惯性上冲抑制信号
-    if bool(metar_diag.get("late_end_cap_applied")):
+    if bool(metar_diag.get("late_end_cap_applied")) and daily_peak_state == "locked":
         focus.append((1.01, "• 峰值窗已过且斜率未再放大 → 继续上冲概率偏低。"))
 
     # 夜间增温复核：暖平流+混合/云被/露点/气压组合触发时，保留小幅回升可能
@@ -1300,7 +1317,12 @@ def _build_vars_and_market_blocks(
 
     # P1 short-term triggers (window-gated)
     try:
-        rt_triggers = select_realtime_triggers(primary_window, metar_diag, temp_unit=unit)
+        rt_triggers = select_realtime_triggers(
+            primary_window,
+            metar_diag,
+            temp_unit=unit,
+            temp_phase_decision=temp_phase_decision,
+        )
         if next_key_report_txt and phase_now in {"near_window", "in_window", "post"} and (not bool(metar_diag.get("metar_speci_active"))):
             if cad_min is not None and 20.0 <= cad_min <= 90.0:
                 cad_txt = f"约每{int(round(cad_min / 5.0) * 5)}分钟"
@@ -1401,6 +1423,14 @@ def _build_vars_and_market_blocks(
     except Exception as _e:
         vars_block = _fallback_vars(_e)
 
+    if use_early_peak_wording:
+        obs_analysis_lines.append("• 当前更像早峰后整理：短线再冲动能转弱，但这还不足以单独确认全天最高温已经锁定。")
+        if keep_second_peak_open:
+            if should_discuss_second_peak:
+                obs_analysis_lines.append("• 若午前后低云破碎、降水退出或风场转得更有利，仍应保留弱二峰或回摸前高的空间。")
+    elif daily_peak_state == "lean_locked":
+        obs_analysis_lines.append("• 目前更偏向早段高点守住全天上沿，但在下一关键报和午前后风云演变确认前，仍不宜按已封顶处理。")
+
     if compact_settled_mode and obs_max is not None:
         if obs_floor is not None and obs_ceil is not None and (obs_ceil - obs_floor) >= 0.30:
             anchor_txt = fmt_range(float(obs_floor), float(obs_ceil))
@@ -1417,9 +1447,7 @@ def _build_vars_and_market_blocks(
                 key_txt = "本轮"
             obs_analysis_lines.append(f"• 该站小时关键报（{key_txt} Local）已给出平稳信号，后续再创新高难度上升。")
 
-        vars_block = [
-            "⚠️ **关注变量**（窗口后）",
-        ]
+        vars_block = [f"⚠️ **关注变量**（{PHASE_LABELS.get(display_phase, PHASE_LABELS['unknown'])}）"]
         if next_key_report_txt:
             if (not bool(metar_diag.get("metar_speci_active"))) and (not bool(metar_diag.get("metar_speci_likely"))):
                 vars_block.append(f"• 重点看 {next_key_report_txt} Local：温度是否维持横盘/回落（若是，则高点基本锁定）。")
@@ -1521,6 +1549,7 @@ def choose_section_text(
     temp_unit: str = "C",
     synoptic_window: dict[str, Any] | None = None,
     polymarket_prefetched_event: tuple[bool, list[dict[str, Any]]] | None = None,
+    temp_shape_analysis: dict[str, Any] | None = None,
 ) -> str:
     """Render-only section builder.
 
@@ -1665,12 +1694,42 @@ def choose_section_text(
         precip_state=precip_state,
         precip_trend=precip_trend,
     )
+    boundary_layer_regime = build_boundary_layer_regime(
+        primary_window=primary_window,
+        metar_diag=metar_diag,
+        snd_thermo=snd_thermo,
+        h700_summary=h700_summary,
+        h925_summary=h925_summary,
+        line850=line850,
+        extra=extra,
+        h500_regime=str((h500_feature or {}).get("regime_label") or ""),
+        object_type=str((obj or {}).get("type") or ""),
+        cloud_code_now=cloud_code_now,
+    )
+    regime_lines: list[str] = []
+    regime_headline = str(boundary_layer_regime.get("headline") or "").strip()
+    layer_summary = str(boundary_layer_regime.get("layer_summary") or "").strip()
+    sounding_mode = str(boundary_layer_regime.get("sounding_mode") or "")
+    if regime_headline:
+        regime_lines.append(f"- **主导机制**：{regime_headline}")
+    if layer_summary:
+        layer_label = "探空层结" if sounding_mode == "obs" else "层结/模式剖面"
+        regime_lines.append(f"- **{layer_label}**：{layer_summary}")
+    if syn_lines and regime_lines:
+        syn_lines = syn_lines[:1] + regime_lines + syn_lines[1:]
 
     metar_block = _build_metar_block(
         metar_diag=metar_diag,
         metar_text=metar_text,
         unit=unit,
         fmt_temp=_fmt_temp,
+    )
+
+    temp_phase_decision = build_temperature_phase_decision(
+        primary_window,
+        metar_diag,
+        line850=line850,
+        temp_shape_analysis=temp_shape_analysis,
     )
 
     peak_data = _build_peak_range_module(
@@ -1712,6 +1771,7 @@ def choose_section_text(
         rt_night_score_min=rt_night_score_min,
         solar_clear_score_fn=solar_clear_score_fn,
         fmt_range_fn=fmt_range_fn,
+        temp_phase_decision=temp_phase_decision,
     )
     peak_range_block = peak_data["peak_range_block"]
     obs_max = peak_data["obs_max"]
@@ -1766,6 +1826,8 @@ def choose_section_text(
         fmt_range=fmt_range_fn,
         fmt_temp=_fmt_temp,
         polymarket_prefetched_event=polymarket_prefetched_event,
+        temp_phase_decision=temp_phase_decision,
+        boundary_layer_regime=boundary_layer_regime,
     )
 
     parts = [

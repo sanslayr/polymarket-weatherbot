@@ -62,9 +62,47 @@
 - `scripts/realtime_pipeline.py`
   - far/near/in/post window 相位判定
   - 触发器筛选
+- `scripts/temperature_window_resolver.py`
+  - 预报峰值窗与实时观测之间的仲裁层
+  - 把“模型主窗”与“实况已出现的平台/已观测峰值”统一成单一 `resolved_window`
+  - 当前覆盖两类重锚：
+    - `obs_peak_reanchor`：实况峰值显著高于模型峰值
+    - `obs_plateau_reanchor`：模型晚段尾部偏晚，但站点已到常见峰值时段且实况横盘守高
+  - 额外消费 `temperature_shape_analysis`：
+    - `forecast_multi_peak_state` 用于区分“真多峰”与“晚段尾部”
+    - `observed_plateau_state` 用于识别“前高附近已持续横盘”的长平台
+  - 目标：避免把“晚间模型尾部”继续透传到温度区间与相位文案
+- `scripts/temperature_shape_analysis.py`
+  - 温度形态层（forecast curve shape + observed near-peak hold）
+  - 明确拆分：
+    - `shape_type`：`single_peak / multi_peak / plateau_peak / broad_plateau`
+    - `multi_peak_state`：只在存在分离峰谷时才升到 `possible/likely`
+    - `plateau_state`：识别“峰值附近宽平台”，避免把平台误写成二峰
+    - `observed.plateau_state`：识别“前高附近持续横盘/守高”
+  - 输出统一供 `hourly_data_service`、`temperature_window_resolver`、`temperature_phase_decision` 复用
+- `scripts/boundary_layer_regime.py`
+  - 边界层/静稳主导判定层
+  - 统一输出：
+    - `boundary_layer_clearing / static_stable / mixing_depth / advection / synoptic`
+    - `dominant_question`（散云题 / 静稳题 / 混合题 / 输送题 / 环流题）
+    - `layer_summary`（把实测或模式 proxy 层结翻成正文）
+  - 同时承载 `model_proxy` 剖面：
+    - 无实测探空时，不再让 sounding 维度整体空白
+    - 用 METAR + 925/700 代理 + 低云/弱风/温露差信号补出低层稳层/混合/中层湿干判断
+- `scripts/temperature_phase_decision.py`
+  - 实时温度相位决策层
+  - 明确拆分：
+    - `short_term_state`：未来 1-2 报的再冲/转弱判断
+    - `daily_peak_state`：全天最高温是否允许提高到“已锁定”语气
+    - `second_peak_potential`：是否保留白天二峰/回摸前高空间
+    - `rebound_mode`：`second_peak / retest / none`，区分“真二峰”与“高位平台/回摸前高”
+    - `dominant_shape`：`single_peak / single_peak_tail / peak_plateau / retest / tail_oscillation / multi_peak_watch`
+    - `should_discuss_second_peak`：只有“二峰议题真实存在”时才允许正文显式提二峰
+  - 结合站点历史先验（如 `late_peak_share` / `cloud_break_day_share`）与实时云雨/风场，避免把“早峰后回落”直接写成“全天封顶”
 - `scripts/report_render_service.py::choose_section_text`
   - 报告输出协议：
     - 环流背景（主导/次级/关键证据/探空提示）
+    - 主导机制 / 层结-模式剖面结论
     - METAR
     - 最高温主带 + 条件尾部
     - 关注变量

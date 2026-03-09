@@ -60,6 +60,8 @@ from station_catalog import (
     station_timezone_name,
     terrain_tag_for as _terrain_tag_for,
 )
+from temperature_shape_analysis import analyze_temperature_shape
+from temperature_window_resolver import resolve_temperature_window
 
 ROOT = Path(__file__).resolve().parent.parent
 STATION_CSV = ROOT / "station_links.csv"
@@ -478,9 +480,6 @@ def render_report(
 
         tz_name = tz_name_station or om.get("timezone", "UTC")
         hourly_day = slice_hourly_local_day(om["hourly"], target_date)
-        windows, primary, peak_candidates = detect_tmax_windows(hourly_day)
-        if not primary:
-            raise RuntimeError("No Tmax window detected from forecast hourly data")
 
         tz = ZoneInfo(tz_name)
         unit_pref = "F" if str(st.icao).upper().startswith("K") else "C"
@@ -498,6 +497,7 @@ def render_report(
         if mgm_ref:
             metar_text = metar_text + "\n" + _render_mgm_reference_line(mgm_ref, unit_pref)
             metar_diag["mgm_reference"] = mgm_ref
+        metar_diag["station_icao"] = str(st.icao).upper()
         try:
             metar_diag["station_lat"] = float(st.lat)
             metar_diag["station_lon"] = float(st.lon)
@@ -505,28 +505,30 @@ def render_report(
             pass
         _mark("metar_fetch_parse", time.perf_counter() - t0)
 
-        # 实况纠偏：当实况显著高于模型峰值时，优先以实况峰值时段重锚窗口。
-        try:
-            obs_max = float(metar_diag.get("observed_max_temp_c")) if metar_diag.get("observed_max_temp_c") is not None else None
-        except Exception:
-            obs_max = None
-        try:
-            model_peak = float(primary.get("peak_temp_c"))
-        except Exception:
-            model_peak = None
+        temp_shape_analysis = analyze_temperature_shape(
+            hourly_day,
+            metar_diag=metar_diag,
+            station_icao=st.icao,
+        )
+        windows, primary, peak_candidates = detect_tmax_windows(
+            hourly_day,
+            temp_shape_analysis=temp_shape_analysis,
+        )
+        if not primary:
+            raise RuntimeError("No Tmax window detected from forecast hourly data")
 
-        if obs_max is not None and model_peak is not None and (obs_max - model_peak) >= 1.5:
-            tmax_local_s = str(metar_diag.get("observed_max_time_local") or metar_diag.get("latest_report_local") or "")
-            try:
-                tmax_local = datetime.fromisoformat(tmax_local_s)
-            except Exception:
-                tmax_local = datetime.now(tz)
-            sdt = tmax_local - timedelta(hours=1)
-            edt = tmax_local + timedelta(hours=2)
-            primary["start_local"] = sdt.strftime("%Y-%m-%dT%H:%M")
-            primary["end_local"] = edt.strftime("%Y-%m-%dT%H:%M")
-            primary["peak_local"] = tmax_local.strftime("%Y-%m-%dT%H:%M")
-            primary["peak_temp_c"] = max(model_peak, obs_max)
+        window_resolution = resolve_temperature_window(
+            primary,
+            hourly_day,
+            metar_diag,
+            station_icao=st.icao,
+            temp_shape_analysis=temp_shape_analysis,
+        )
+        primary = dict(window_resolution.get("resolved_window") or primary)
+        metar_diag["analysis_window_override_active"] = bool(window_resolution.get("override_active"))
+        metar_diag["analysis_window_mode"] = str(window_resolution.get("mode") or "forecast_primary")
+        metar_diag["analysis_window_reason_codes"] = list(window_resolution.get("reason_codes") or [])
+        if str(window_resolution.get("mode") or "") == "obs_peak_reanchor":
             metar_diag["obs_correction_applied"] = True
 
         analysis_window = dict(primary)
@@ -707,6 +709,7 @@ def render_report(
             temp_unit=unit_pref,
             synoptic_window=analysis_window,
             polymarket_prefetched_event=poly_prefetched_event,
+            temp_shape_analysis=temp_shape_analysis,
         )
         _mark("render_body", time.perf_counter() - t0)
         total_elapsed = time.perf_counter() - t_e2e

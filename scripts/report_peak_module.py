@@ -13,6 +13,7 @@ from historical_payload import get_historical_payload, get_weighted_reference
 from historical_strategy import blend_historical_range
 from historical_context_provider import _analog_branch_label
 from layer_signal_policy import h700_effective_dry_factor, h700_is_moist_constraint
+from temperature_phase_decision import build_temperature_phase_decision
 
 
 def _parse_iso_dt(v: Any) -> datetime | None:
@@ -455,6 +456,7 @@ def _build_peak_range_module(
     rt_night_score_min: float,
     solar_clear_score_fn,
     fmt_range_fn,
+    temp_phase_decision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     peak_c = float(calc_window.get('peak_temp_c') or 0.0)
     obs_max = None
@@ -478,8 +480,19 @@ def _build_peak_range_module(
     if obs_floor is not None and obs_ceil is not None and obs_floor > obs_ceil:
         obs_floor, obs_ceil = obs_ceil, obs_floor
 
-    gate = classify_window_phase(primary_window, metar_diag)
+    temp_state = temp_phase_decision if isinstance(temp_phase_decision, dict) else build_temperature_phase_decision(
+        primary_window,
+        metar_diag,
+        line850=line850,
+    )
+    gate = dict(temp_state.get("gate") or classify_window_phase(primary_window, metar_diag))
     phase_now = str(gate.get('phase') or 'unknown')
+    daily_peak_state = str(temp_state.get("daily_peak_state") or "open")
+    use_early_peak_wording = bool(temp_state.get("should_use_early_peak_wording"))
+    rebound_mode = str(temp_state.get("rebound_mode") or "none")
+    dominant_shape = str(temp_state.get("dominant_shape") or "")
+    plateau_hold_state = str(temp_state.get("plateau_hold_state") or "none")
+    should_discuss_second_peak = bool(temp_state.get("should_discuss_second_peak"))
     h500_score = _h500_weight_score(h500_feature)
 
     # horizon to fused peak (used by uncertainty and market-label confidence gating)
@@ -1488,11 +1501,12 @@ def _build_peak_range_module(
         and (not warm_reheat_hint)
         and (not bool(metar_diag.get("metar_speci_likely")))
         and precip_state not in {"moderate", "heavy", "convective"}
+        and daily_peak_state == "locked"
     ):
         compact_settled_mode = True
-    elif decisive_hourly_report and obs_max is not None:
+    elif decisive_hourly_report and obs_max is not None and daily_peak_state == "locked":
         compact_settled_mode = True
-    elif clear_sky_settled and obs_max is not None:
+    elif clear_sky_settled and obs_max is not None and daily_peak_state == "locked":
         compact_settled_mode = True
 
     core_lo, core_hi, disp_lo, disp_hi, historical_blend = _apply_historical_reference(
@@ -1586,9 +1600,16 @@ def _build_peak_range_module(
             "🌡️ **可能最高温区间（仅供参考）**",
             f"- **{fmt_range_fn(settle_lo, settle_hi)}**（{settle_reason}）",
         ]
+    elif use_early_peak_wording:
+        peak_range_block.append("- 注：当前更像已先出现早峰，短线动能转弱；全天是否锁定仍待午前后风云演变确认。")
 
+    analysis_window_mode = str(metar_diag.get("analysis_window_mode") or "")
+    if analysis_window_mode == "obs_plateau_reanchor":
+        peak_range_block.append("- 注：已按实况横盘重锚峰值窗，未直接沿用模型晚段尾部。")
     if bool(metar_diag.get("obs_correction_applied")):
         peak_range_block.append("- 注：已应用实况纠偏（模型峰值偏低，窗口锚定到当日实况峰值时段）。")
+    if should_discuss_second_peak:
+        peak_range_block.append("- 注：当前路径更偏分离式多峰，后段仍需防次峰改写前高。")
     if historical_blend and (historical_blend.get("applied") or historical_blend.get("display")):
         strength_cn = {"weak": "弱参考", "medium": "中参考", "strong": "强参考"}.get(
             str(historical_blend.get("strength") or ""),
@@ -1661,4 +1682,5 @@ def _build_peak_range_module(
         "core_lo": float(core_lo),
         "core_hi": float(core_hi),
         "historical_blend": historical_blend,
+        "temp_phase_decision": temp_state,
     }
