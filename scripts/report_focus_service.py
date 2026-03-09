@@ -118,6 +118,7 @@ def build_report_focus_bundle(
     consistency = dict(peak_summary.get("consistency") or {})
     confidence = dict(peak_summary.get("confidence") or {})
     boundary_layer_regime = dict(snapshot.get("boundary_layer_regime") or {})
+    thermo = dict(boundary_layer_regime.get("thermo") or {})
     state = dict(snapshot.get("condition_state") or {})
 
     display_phase = str(temp_phase.get("display_phase") or peak_summary.get("phase_now") or "unknown")
@@ -129,6 +130,7 @@ def build_report_focus_bundle(
     overnight_carryover_high = bool(timing.get("overnight_carryover_high"))
     future_candidate_role = str(shape.get("future_candidate_role") or "")
     regime_key = str(boundary_layer_regime.get("regime_key") or "")
+    vertical_regime = str(thermo.get("vertical_regime") or "")
     new_high_prob = _safe_float((weather_posterior.get("event_probs") or {}).get("new_high_next_60m")) or 0.0
     lock_prob = _safe_float((weather_posterior.get("event_probs") or {}).get("lock_by_window_end")) or 0.0
     trend_horizon = _trend_horizon_phrase(metar_diag)
@@ -144,10 +146,13 @@ def build_report_focus_bundle(
         _push_focus_candidate(focus_candidates, score, tracking_line)
 
     if before_typical_peak and overnight_carryover_high and future_candidate_role == "primary_remaining_peak":
+        early_peak_line = "白天主峰仍未到来，先看后段升温何时真正展开，再判断还能不能继续上冲。"
+        if regime_key == "boundary_layer_clearing" or vertical_regime == "low_cloud_clearing":
+            early_peak_line = "白天主峰仍未到来，先看低云/雾层何时真正松动，再判断后段升温能否顺利展开。"
         _push_focus_candidate(
             focus_candidates,
             0.9,
-            "白天主峰仍未到来，先看低云/雾层何时真正松动，再判断后段升温能否顺利展开。",
+            early_peak_line,
         )
     elif display_phase == "far" and before_typical_peak and future_candidate_role == "primary_remaining_peak":
         _push_focus_candidate(
@@ -210,7 +215,7 @@ def build_report_focus_bundle(
 
     obs_analysis_lines: list[str] = []
     if bool(temp_phase.get("should_use_early_peak_wording")) and lock_prob < 0.70:
-        obs_analysis_lines.append("• 当前更像已先出现早峰，短线动能转弱；全天是否锁定仍待后续风云演变确认。")
+        obs_analysis_lines.append("• 当前更像已先出现早峰，短线动能转弱；全天是否锁定仍待后续实况确认。")
     elif daily_peak_state == "lean_locked":
         obs_analysis_lines.append("• 当前更偏向已接近全天高点，但仍需下一关键报确认是否真正锁定。")
     elif daily_peak_state == "locked":

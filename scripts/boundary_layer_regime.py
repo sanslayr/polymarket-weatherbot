@@ -56,6 +56,7 @@ def _humanize_layer_finding(text: Any) -> str:
         ("700hPa附近偏湿，云层维持条件偏强", "中层也偏湿，云层更容易维持"),
         ("925–850混合潜力尚可，一旦见光后段升温效率可改善", "一旦见到日照，低层空气有机会更快翻动，后段升温会顺一些"),
         ("925–850混合偏弱，升温更依赖低云何时真正破碎", "低层空气不太容易翻动，升温更要看低云何时真正散开"),
+        ("925–850混合偏弱，午后升温更要看少云能否维持", "低层空气不太容易完全混匀，午后升温更要看升温势头能否维持"),
         ("模式剖面信号中性，优先跟踪下一报温度斜率与云量开合", "层结信号不突出，先看下一报温度和云量怎么走"),
         ("925–850hPa存在稳定层（封盖信号），冲高持续性受限", "低层上方还有一层稳定空气，升温往上冲会比较吃力"),
         ("低层湿层上接中层干层", "近地面偏湿，但再往上会转干"),
@@ -67,6 +68,17 @@ def _humanize_layer_finding(text: Any) -> str:
         if src in out:
             out = out.replace(src, dst)
     return out
+
+
+def _vertical_regime_summary(vertical_regime: str) -> str:
+    return {
+        "low_cloud_clearing": "低层偏湿，低云和雾什么时候真正减弱更关键",
+        "static_stable": "近地面这层空气偏稳，升温不容易一下子放大",
+        "dry_clear_mixed": "低层空气不太容易完全混匀，后段升温更看风场和升温势头",
+        "moist_capped": "低层偏湿偏稳，升温容易受压",
+        "mixed_supportive": "低层一旦混合起来，后段升温会更顺",
+        "neutral": "层结信号不算突出，先看实况升温节奏怎么走",
+    }.get(str(vertical_regime or ""), "")
 
 
 def build_model_sounding_proxy(
@@ -191,10 +203,20 @@ def build_model_sounding_proxy(
         layer_findings.append("700hPa附近偏干，若开云可帮助侵蚀低云。")
     elif midlevel_moist_score >= 0.55:
         layer_findings.append("700hPa附近偏湿，云层维持条件偏强。")
+    dry_clear_signature = bool(
+        (low_cloud_pct is not None and low_cloud_pct <= 35.0)
+        and (latest_rh is not None and latest_rh <= 75.0)
+        and (dewpoint_spread is not None and dewpoint_spread >= 4.0)
+        and cloud_code_now in {"CLR", "SKC", "FEW", "SCT", "CAVOK"}
+    )
+
     if mixing_support_score >= 0.65:
         layer_findings.append("925–850混合潜力尚可，一旦见光后段升温效率可改善。")
     elif mixing_support_score <= 0.35:
-        layer_findings.append("925–850混合偏弱，升温更依赖低云何时真正破碎。")
+        if dry_clear_signature:
+            layer_findings.append("925–850混合偏弱，午后升温更要看少云能否维持。")
+        else:
+            layer_findings.append("925–850混合偏弱，升温更依赖低云何时真正破碎。")
     if not layer_findings:
         layer_findings.append("模式剖面信号中性，优先跟踪下一报温度斜率与云量开合。")
 
@@ -207,6 +229,23 @@ def build_model_sounding_proxy(
     else:
         actionable = "当前更偏边界层节奏控制，优先看云底、温露差与风速是否同步改善。"
         path_bias = "高位收敛"
+
+    if low_level_cap_score >= 0.65 and (
+        (latest_rh is not None and latest_rh >= 90.0)
+        or (dewpoint_spread is not None and dewpoint_spread <= 1.5)
+        or (low_cloud_pct is not None and low_cloud_pct >= 70.0)
+    ):
+        vertical_regime = "low_cloud_clearing"
+    elif low_level_cap_score >= 0.55:
+        vertical_regime = "static_stable"
+    elif dry_clear_signature and low_level_cap_score < 0.45 and mixing_support_score < 0.65:
+        vertical_regime = "dry_clear_mixed"
+    elif midlevel_moist_score >= 0.55 and low_level_cap_score >= 0.35:
+        vertical_regime = "moist_capped"
+    elif mixing_support_score >= 0.65:
+        vertical_regime = "mixed_supportive"
+    else:
+        vertical_regime = "neutral"
 
     return {
         "has_profile": True,
@@ -234,6 +273,7 @@ def build_model_sounding_proxy(
         "mixing_support_score": round(mixing_support_score, 3),
         "suppression_score": round(suppression_score, 3),
         "layer_findings": layer_findings[:3],
+        "vertical_regime": vertical_regime,
         "actionable": actionable,
         "path_bias": path_bias,
     }
@@ -427,6 +467,13 @@ def build_boundary_layer_regime(
     elif ranked and ranked[0][1] >= 0.90:
         confidence = "medium"
 
+    dry_clear_signature = bool(
+        (low_cloud_pct is not None and low_cloud_pct <= 35.0)
+        and (latest_rh is not None and latest_rh <= 75.0)
+        and (dewpoint_spread is not None and dewpoint_spread >= 4.0)
+        and cloud_code_now in {"CLR", "SKC", "FEW", "SCT", "CAVOK"}
+    )
+
     if regime_key == "boundary_layer_clearing":
         headline = "今天先看低云和雾何时散开；在它们真正减弱前，升温会比较慢，最高温也更容易被压住。"
         tracking_line = "优先看低云底是否抬升、温露差是否拉大、风速是否略增；若未来1-2报仍未明显开云，上沿需下修。"
@@ -466,7 +513,9 @@ def build_boundary_layer_regime(
     else:
         background_bits: list[str] = []
         if low_cloud_pct is not None and low_cloud_pct >= 50.0:
-            background_bits.append("低层云量能否进一步减弱")
+            background_bits.append("云量会不会重新增多")
+        elif dry_clear_signature:
+            background_bits.append("午后升温效率能否继续维持")
         if adv_state in {"confirmed", "probable"} or adv_role in {"dominant", "influence"}:
             direction = thermal_advection_direction(adv_review, line850=line850)
             if direction == "cold":
@@ -475,23 +524,27 @@ def build_boundary_layer_regime(
                 background_bits.append("偏暖输送是否继续落地")
             else:
                 background_bits.append("低层输送是否继续重排")
+        if latest_wspd is not None and latest_wspd >= 8.0:
+            background_bits.append("低层风场能否继续带动升温")
         if not background_bits:
-            background_bits.append("云量配置")
-            background_bits.append("低层输送")
+            background_bits.append("云量变化")
+            background_bits.append("低层风场")
 
-        if h500_regime:
+        if len(background_bits) >= 2:
             headline = (
-                f"今日缺少单一的低层清除、静稳或平流主导触发，最高温更受{h500_regime}背景下的"
-                + "、".join(background_bits[:2])
-                + "与午后升温效率共同影响。"
+                "今天没有特别单一的主导因素，先看"
+                + background_bits[0]
+                + "，再看"
+                + background_bits[1]
+                + "；这会一起决定午后还能不能继续升温。"
             )
         else:
             headline = (
-                "今日缺少单一的低层清除、静稳或平流主导触发，最高温更受"
-                + "、".join(background_bits[:2])
-                + "与午后升温效率共同影响。"
+                "今天没有特别单一的主导因素，先看"
+                + background_bits[0]
+                + "；这会决定午后还能不能继续升温。"
             )
-        tracking_line = "优先看云量是否继续减少、近地风场是否持续重排，以及实况温度斜率能否顺着模式路径放大，再决定是否重估上沿。"
+        tracking_line = "优先看云量、近地风场和温度斜率能否继续配合；若三者同步走强，再考虑上修后段上沿。"
 
     layer_bits: list[str] = []
     for finding in list(thermo.get("layer_findings") or []):
@@ -502,6 +555,18 @@ def build_boundary_layer_regime(
         txt = _humanize_layer_finding(finding)
         if txt and txt not in layer_bits:
             layer_bits.append(txt)
+    vertical_regime = str(thermo.get("vertical_regime") or "")
+    if dry_clear_signature:
+        layer_bits = [
+            "低层空气不太容易完全混匀，午后升温更要看升温势头能否维持"
+            if ("低云何时真正散开" in txt or "低云何时真正破碎" in txt)
+            else txt
+            for txt in layer_bits
+        ]
+    primary_layer_summary = _vertical_regime_summary(vertical_regime)
+    if primary_layer_summary:
+        layer_bits = [txt for txt in layer_bits if txt != primary_layer_summary]
+        layer_bits.insert(0, primary_layer_summary)
     if not layer_bits:
         if cap_score >= 0.65:
             layer_bits.append("近地面这层空气还比较稳")
@@ -509,7 +574,7 @@ def build_boundary_layer_regime(
             layer_bits.append("中层偏干")
         elif mid_moist_score >= 0.55:
             layer_bits.append("中层偏湿")
-    layer_summary = "；".join(layer_bits[:3]) + "。" if layer_bits else ""
+    layer_summary = "；".join(layer_bits[:2]) + "。" if layer_bits else ""
 
     reason_codes: list[str] = []
     if regime_key in {"boundary_layer_clearing", "static_stable"}:

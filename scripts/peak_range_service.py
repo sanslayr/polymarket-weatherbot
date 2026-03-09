@@ -1370,7 +1370,7 @@ def build_peak_range_summary(
 
     annotations: list[str] = []
     if (settled_range is None) and use_early_peak_wording:
-        annotations.append("- 注：当前更像已先出现早峰，短线动能转弱；全天是否锁定仍待午前后风云演变确认。")
+        annotations.append("- 注：当前更像已先出现早峰，短线动能转弱；全天是否锁定仍待后续实况确认。")
     analysis_window_mode = str(metar_diag.get("analysis_window_mode") or "")
     if analysis_window_mode == "obs_plateau_reanchor":
         annotations.append("- 注：已按实况横盘重锚峰值窗，未直接沿用模型晚段尾部。")

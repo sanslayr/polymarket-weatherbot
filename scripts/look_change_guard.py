@@ -8,7 +8,7 @@ import requests
 from hourly_data_service import model_cycle_tag
 from metar_utils import metar_obs_time_utc
 
-REPORT_RESULT_VERSION = "look-report-v2026-03-09-6"
+REPORT_RESULT_VERSION = "look-report-v2026-03-09-8"
 
 
 def build_cached_result_meta(*, icao: str, model: str, metar24: list[dict[str, Any]] | None) -> dict[str, Any]:

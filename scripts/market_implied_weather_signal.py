@@ -128,6 +128,12 @@ def infer_market_implied_report_signal(
             first_live_threshold = _to_float(first_live_bucket.get("threshold_c"))
             first_live_label = str(first_live_bucket.get("bucket_label") or "")
             first_live_kind = str(first_live_bucket.get("bucket_kind") or "")
+            collapsed_prefix_labels = [str(bucket.get("bucket_label") or "") for bucket in triggered_prefix]
+            collapsed_prefix_prev_bids = {
+                str(bucket.get("bucket_label") or ""): _to_float(bucket.get("prev_best_bid"))
+                for bucket in triggered_prefix
+                if str(bucket.get("bucket_label") or "").strip()
+            }
             signal_type = "report_temp_top_bucket_lock_in" if first_live_kind == "at_or_above" else "report_temp_scan_floor_stop"
             return {
                 "schema_version": MARKET_IMPLIED_WEATHER_SIGNAL_SCHEMA_VERSION,
@@ -146,8 +152,10 @@ def infer_market_implied_report_signal(
                     "first_live_bucket_label": first_live_label,
                     "first_live_bucket_threshold_c": first_live_threshold,
                     "first_live_bucket_kind": first_live_kind,
+                    "first_live_bucket_bid": _to_float(first_live_bucket.get("best_bid")),
                     "collapsed_prefix_count": len(triggered_prefix),
-                    "collapsed_prefix_labels": [str(bucket.get("bucket_label") or "") for bucket in triggered_prefix],
+                    "collapsed_prefix_labels": collapsed_prefix_labels,
+                    "collapsed_prefix_prev_bids": collapsed_prefix_prev_bids,
                     "price_floor": float(price_floor),
                     "ask_collapse_threshold": float(ask_collapse_threshold),
                     "trigger_mode": "ascending_scan_stop_on_first_live_bucket",

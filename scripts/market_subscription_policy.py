@@ -18,6 +18,7 @@ def build_market_subscription_plan(
     observed_max_temp_c: float | None,
     report_window_active: bool = False,
     daily_peak_state: str = "open",
+    core_only: bool = False,
 ) -> dict[str, Any]:
     markets = [dict(item) for item in (market_catalog_snapshot.get("markets") or []) if isinstance(item, dict)]
     observed = _to_float(observed_max_temp_c)
@@ -75,7 +76,7 @@ def build_market_subscription_plan(
             if upside_scan_asset_ids:
                 reason_codes.append("upside_scan_enabled")
 
-    if report_window_active:
+    if report_window_active and not core_only:
         reason_codes.append("report_window_active")
         lower_neighbor = None
         if core_market is not None:
@@ -98,16 +99,18 @@ def build_market_subscription_plan(
     core_watch_asset_ids = [item for item in core_watch_asset_ids if item]
     upside_scan_asset_ids = [item for item in upside_scan_asset_ids if item and item not in core_watch_asset_ids]
 
+    monitor_mode = "core" if core_only else ("report_window_expand" if report_window_active else ("core_plus_upside" if upside_scan_asset_ids else "core"))
+
     return {
-        "monitor_mode": "report_window_expand" if report_window_active else ("core_plus_upside" if upside_scan_asset_ids else "core"),
+        "monitor_mode": monitor_mode,
         "reason_codes": reason_codes,
         "core_watch_asset_ids": core_watch_asset_ids,
-        "upside_scan_asset_ids": upside_scan_asset_ids,
+        "upside_scan_asset_ids": [] if core_only else upside_scan_asset_ids,
         "drop_asset_ids": [
             str(m.get("yes_token_id") or "")
             for m in live_markets
             if str(m.get("yes_token_id") or "").strip()
             and str(m.get("yes_token_id") or "") not in core_watch_asset_ids
-            and str(m.get("yes_token_id") or "") not in upside_scan_asset_ids
+            and str(m.get("yes_token_id") or "") not in ([] if core_only else upside_scan_asset_ids)
         ],
     }

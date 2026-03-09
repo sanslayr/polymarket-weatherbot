@@ -168,14 +168,14 @@ def select_realtime_triggers(
             out.append("• 窗口后阶段：高点大概率已定，后续以回落或横盘为主。")
             return out[:3]
         if early_peak_wording:
-            out.append("• 早段高点已出现，短线再冲动能转弱；但全天是否锁定仍待午前后云量、降水与风场确认。")
+            out.append("• 早段高点已出现，短线再冲动能转弱；但全天是否锁定仍待后续实况确认。")
             if keep_second_peak_open:
                 if should_discuss_second_peak:
-                    out.append("• 若午前后出现真实开云并恢复正斜率，仍可回摸前高或形成弱二峰。")
+                    out.append("• 若后续条件重新转有利并恢复正斜率，仍可回摸前高或形成弱二峰。")
             return out[:3]
         if keep_second_peak_open:
             if should_discuss_second_peak:
-                out.append("• 当前更像早峰后整理；若后续开云并恢复正斜率，仍可回摸前高或形成弱二峰。")
+                out.append("• 当前更像早峰后整理；若后续条件重新转有利并恢复正斜率，仍可回摸前高或形成弱二峰。")
             return out[:3]
 
         if obs_max is not None and t_now is not None:

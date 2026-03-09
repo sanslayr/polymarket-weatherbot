@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from market_price_format import format_price_cents, infer_market_tick_cents
+
 
 def _parse_dt(value: Any) -> datetime | None:
     text = str(value or "").strip()
@@ -31,10 +33,12 @@ def _format_signal_time(
     local_dt = _parse_dt(observed_at_local)
     if local_dt is None:
         return utc_text
-    local_text = local_dt.strftime("%Y/%m/%d %H:%M:%S")
+    local_text = local_dt.strftime("%H:%M:%S")
     local_label = str(local_tz_label or "Local").strip() or "Local"
     if (local_dt.utcoffset() or timezone.utc.utcoffset(None)).total_seconds() == 0:
         return utc_text
+    if local_dt.date() != utc_dt.astimezone(local_dt.tzinfo).date():
+        local_text = local_dt.strftime("%Y/%m/%d %H:%M:%S")
     return f"{utc_text} | {local_text} {local_label}"
 
 
@@ -60,6 +64,57 @@ def format_market_signal_alert(
         local_tz_label=local_tz_label,
     )
 
+    collapse_line = ""
+
+    def _collapse_text(bucket_label: str, *, bid_now: Any, ask_now: Any) -> str:
+        parts: list[str] = []
+        bid_v = None
+        ask_v = None
+        try:
+            bid_v = float(bid_now) if bid_now not in (None, "") else None
+        except Exception:
+            bid_v = None
+        try:
+            ask_v = float(ask_now) if ask_now not in (None, "") else None
+        except Exception:
+            ask_v = None
+        if bid_v is not None and bid_v <= 0.001:
+            parts.append("买盘接近归零")
+        if ask_v is not None and ask_v <= 0.01:
+            parts.append("卖盘压到 0.01 或更低")
+        if not parts:
+            return ""
+        return f"📉 观察盘口：{bucket_label} " + "，".join(parts) + "。"
+
+    if signal_type == "report_temp_scan_floor_stop":
+        collapsed = [str(x).strip() for x in (evidence.get("collapsed_prefix_labels") or []) if str(x).strip()]
+        collapsed_prev_bids = dict(evidence.get("collapsed_prefix_prev_bids") or {})
+        tick_cents = infer_market_tick_cents(
+            evidence.get("first_live_bucket_bid"),
+            *collapsed_prev_bids.values(),
+        )
+        first_live_bid = format_price_cents(evidence.get("first_live_bucket_bid"), tick_cents=tick_cents, none_text="N/A")
+        if collapsed:
+            collapsed_label = collapsed[0]
+            collapsed_prev_bid = format_price_cents(collapsed_prev_bids.get(collapsed_label), tick_cents=tick_cents, none_text="N/A")
+            collapse_line = (
+                f"📉 观察盘口：{collapsed_label} Yes 由 {collapsed_prev_bid} 跌至接近归零，"
+                f"{first_live_label} Yes 仍有 {first_live_bid} bid报价。"
+            )
+    elif signal_type == "report_temp_top_bucket_lock_in":
+        collapsed = [str(x).strip() for x in (evidence.get("collapsed_lower_bucket_labels") or []) if str(x).strip()]
+        top_label = str(evidence.get("top_bucket_label") or first_live_label).strip()
+        if collapsed and top_label:
+            collapse_line = f"📉 观察盘口：{'、'.join(collapsed)} 接近归零，仅 {top_label} 仍保留有效报价。"
+    elif signal_type == "report_temp_lower_bound_jump":
+        bucket_label = str(evidence.get("bucket_label") or "").strip()
+        if bucket_label:
+            collapse_line = _collapse_text(
+                bucket_label,
+                bid_now=evidence.get("best_bid"),
+                ask_now=evidence.get("best_ask"),
+            ) or f"📉 观察盘口：{bucket_label} 买盘接近归零或卖盘压到 0.01 或更低。"
+
     lines = [f"⚠️ **盘口异常提示 | {city}**"]
     if observed_at:
         lines.append(f"🕒 异动时间：{observed_at}")
@@ -79,7 +134,9 @@ def format_market_signal_alert(
         lines.append(f"📈 市场隐含最新报下界：>= {int(float(lower_bound))}°C")
     elif message:
         lines.append(f"📈 {message}")
+    if collapse_line:
+        lines.append(collapse_line)
     lines.append("📝 提示基于盘口异动，不代表官方实况。")
     if polymarket_event_url:
-        lines.append(f"🔗 [查看 Polymarket 市场]({polymarket_event_url})")
+        lines.append(f"🔗 [Polymarket 市场]({polymarket_event_url})")
     return "\n".join(lines)

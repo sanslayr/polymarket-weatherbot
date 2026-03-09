@@ -41,6 +41,7 @@ class BoundaryLayerRegimeTest(unittest.TestCase):
         self.assertTrue(thermo["has_profile"])
         self.assertEqual(thermo["profile_source"], "model_proxy")
         self.assertEqual(thermo["quality"], "model_proxy")
+        self.assertEqual(thermo["vertical_regime"], "low_cloud_clearing")
         self.assertGreaterEqual(float(thermo["low_level_cap_score"]), 0.65)
         self.assertIn("coverage", thermo)
         self.assertEqual(thermo["coverage"]["density_class"], "sparse")
@@ -186,6 +187,49 @@ class BoundaryLayerRegimeTest(unittest.TestCase):
 
         self.assertNotEqual(regime["regime_key"], "advection")
         self.assertEqual(regime["advection_role"], "background")
+
+    def test_generic_regime_uses_plain_dry_clear_wording(self) -> None:
+        regime = build_boundary_layer_regime(
+            primary_window={
+                "peak_temp_c": 11.0,
+                "low_cloud_pct": 12.0,
+                "w850_kmh": 24.0,
+            },
+            metar_diag={
+                "latest_report_local": "2026-03-09T14:20:00+03:00",
+                "latest_temp": 8.0,
+                "latest_dewpoint": -11.0,
+                "latest_rh": 25.0,
+                "latest_wspd": 14.0,
+                "temp_trend_smooth_c": 0.18,
+            },
+            snd_thermo={
+                "profile_source": "model_proxy",
+                "low_level_cap_score": 0.18,
+                "mixing_support_score": 0.28,
+                "midlevel_dry_score": 0.18,
+                "midlevel_moist_score": 0.0,
+                "layer_findings": ["925–850混合偏弱，午后升温更要看少云能否维持。"],
+            },
+            advection_review={
+                "has_signal": True,
+                "thermal_advection_state": "weak",
+                "transport_state": "cold",
+                "surface_coupling_state": "weak",
+                "surface_role": "background",
+                "surface_bias": "cold",
+                "surface_effect_weight": 0.08,
+            },
+            h500_regime="高空弱信号背景",
+            cloud_code_now="FEW",
+        )
+
+        self.assertEqual(regime["regime_key"], "synoptic")
+        self.assertIn("今天没有特别单一的主导因素", regime["headline"])
+        self.assertIn("午后升温效率能否继续维持", regime["headline"])
+        self.assertIn("低层风场能否继续带动升温", regime["headline"])
+        self.assertEqual(regime["thermo"]["vertical_regime"], "dry_clear_mixed")
+        self.assertIn("升温势头能否维持", regime["layer_summary"])
 
 
 if __name__ == "__main__":

@@ -73,6 +73,8 @@ def build_synoptic_summary(
     regime_key = str(regime.get("regime_key") or "")
     regime_headline = str(regime.get("headline") or "").strip()
     layer_summary = str(regime.get("layer_summary") or "").strip()
+    thermo = dict(regime.get("thermo") or {})
+    vertical_regime = str(thermo.get("vertical_regime") or "")
     sounding_mode = str(regime.get("sounding_mode") or "")
     adv_state = str(adv_review.get("thermal_advection_state") or "")
     adv_direction = thermal_advection_direction(adv_review, line850=line850)
@@ -161,8 +163,16 @@ def build_synoptic_summary(
         idx = int(((deg % 360) + 22.5) // 45) % 8
         return dirs[idx]
 
+    def _has_named_system(text: str) -> bool:
+        return _contains_any(text, ["副热带高压", "季风槽", "冷锋", "暖锋", "静止锋", "锋性", "高压脊", "低压槽", "深槽", "切变"])
+
     def _front_plain_desc(otype: str) -> str | None:
-        is_front = ("front" in otype) or ("baroclinic" in otype) or _contains_any(str(line850) + str(extra), ["锋", "锋生", "斜压"])
+        is_front = (
+            ("front" in otype)
+            or ("baroclinic" in otype)
+            or _contains_any(str(extra), ["冷锋", "暖锋", "静止锋", "锋生"])
+            or (_contains_any(str(extra), ["斜压"]) and adv_is_foreground)
+        )
         if not is_front:
             return None
         warm = adv_direction == "warm" and adv_is_foreground
@@ -175,6 +185,8 @@ def build_synoptic_summary(
             nature = "冷暖交汇（近静止锋）"
         else:
             nature = "锋性过渡"
+        if nature == "锋性过渡" and not h500_key_signal and not adv_is_foreground:
+            return None
         wdir = metar_diag.get("latest_wdir")
         wspd = metar_diag.get("latest_wspd")
         try:
@@ -202,6 +214,15 @@ def build_synoptic_summary(
             return "低层稳层仍在，午前升温效率更容易受压"
         if regime_key == "mixing_depth":
             return "能否尽快打穿低层稳层，比高空背景本身更关键"
+        if vertical_regime == "dry_clear_mixed":
+            return "当前更像低层风场和升温效率共同作用，先看后段升温能否继续维持"
+        if vertical_regime == "neutral":
+            return None
+        if regime_key == "synoptic" and not _has_named_system(str(extra)):
+            if _contains_any(regime_headline, ["午后升温效率", "低层风场"]):
+                return "当前更像低层风场和午后升温效率共同作用，先看后段升温能否继续维持"
+            if _contains_any(regime_headline, ["云量", "升温"]):
+                return "当前更像云量和低层风场共同影响的场景，先看午后升温效率怎么走"
         if ("advection" in otype) or adv_direction in {"warm", "cold"}:
             if adv_direction == "warm" and adv_is_confirmed:
                 return "低层偏暖输送（850-925hPa）更明确，若云量放开，升温会更顺"
@@ -240,10 +261,14 @@ def build_synoptic_summary(
         scope_txt = "更偏实况触发"
 
     def _impact_direction_and_trigger() -> tuple[str, str]:
-        if adv_direction == "cold":
+        if adv_direction == "cold" and (adv_state in {"confirmed", "probable"} or str(adv_review.get("surface_role") or "") in {"dominant", "influence"}):
             direction = "更可能比原先预报略低"
-        elif adv_direction == "warm":
+        elif adv_direction == "warm" and (adv_state in {"confirmed", "probable"} or str(adv_review.get("surface_role") or "") in {"dominant", "influence"}):
             direction = "更可能比原先预报略高"
+        elif adv_direction == "cold":
+            direction = "上沿有一点受压风险"
+        elif adv_direction == "warm":
+            direction = "上沿仍有一点上修空间"
         else:
             direction = "暂时看不出明显偏高或偏低"
         trigger = "先看升温是否能连续走强"
@@ -284,9 +309,6 @@ def build_synoptic_summary(
         evidence_bits.append(f"925hPa: {h925_summary}")
     key_evidence = evidence_bits[0] if evidence_bits else ""
 
-    def _has_named_system(text: str) -> bool:
-        return _contains_any(text, ["副热带高压", "季风槽", "冷锋", "暖锋", "静止锋", "锋性", "高压脊", "低压槽", "深槽", "切变"])
-
     def _clean_line_text(text: str) -> str:
         return str(text or "").strip().rstrip("。；，")
 
@@ -297,6 +319,8 @@ def build_synoptic_summary(
         if label == "主导机制":
             return 1.0
         if label == "层结/模式剖面":
+            if vertical_regime in {"neutral", ""}:
+                return 0.56
             if _contains_any(txt, ["逆温", "稳", "湿", "干", "低云", "雾", "混合", "升温"]):
                 return 0.82
             return 0.62

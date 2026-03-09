@@ -977,6 +977,8 @@ def metar_observation_block(
         text = str(item).strip()
         if text and text not in deduped_reminders:
             deduped_reminders.append(text)
+    if deduped_reminders == ["温度在窄幅震荡"]:
+        deduped_reminders = []
 
     if deduped_reminders:
         lines.append("")

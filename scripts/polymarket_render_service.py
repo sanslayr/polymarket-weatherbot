@@ -9,6 +9,7 @@ import os
 import re
 from typing import Any
 
+from market_price_format import format_price_cents
 from polymarket_client import (
     fetch_polymarket_event_markets as _fetch_polymarket_event_markets,
     poly_slug_from_url as _poly_slug_from_url,
@@ -831,8 +832,8 @@ def _build_polymarket_section(
         lines.extend(range_notes)
 
     for _c, label, bid, ask, _lo, _hi in display_rows:
-        bid_txt = "None" if bid in (None, "") else str(bid)
-        ask_txt = "None" if ask in (None, "") else str(ask)
+        bid_txt = format_price_cents(bid)
+        ask_txt = format_price_cents(ask)
         tag = _row_tag((_c, label, bid, ask, _lo, _hi))
 
         if tag:
