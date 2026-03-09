@@ -76,6 +76,17 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     return False
 
 
+def _should_continue_to_next_provider(
+    *,
+    candidate_index: int,
+    total_candidates: int,
+    exc: Exception,
+) -> bool:
+    if not _is_rate_limit_error(exc):
+        return True
+    return candidate_index < max(0, total_candidates - 1)
+
+
 def _classify_error_type(msg: str) -> str:
     s = str(msg or "").lower()
     if "package missing" in s or "modulenotfounderror" in s or "importerror" in s:
@@ -97,6 +108,101 @@ def _short_err(exc: Exception | str, n: int = 280) -> str:
     t = str(exc)
     t = " ".join(t.split())
     return t[:n]
+
+
+def _provider_backoff_enabled() -> bool:
+    raw = str(os.getenv("WEATHERBOT_PROVIDER_BACKOFF", "1") or "1").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _provider_failure_scope(error_type: str, *, field_profile: str, runtime_tag: str) -> str:
+    et = str(error_type or "unknown")
+    if et in {"rate_limit_429", "timeout", "network", "dependency_missing"}:
+        return "global"
+    return f"{str(field_profile or 'full').strip().lower()}:{str(runtime_tag or '').strip()}"
+
+
+def _provider_failure_ttl_seconds(error_type: str) -> int:
+    et = str(error_type or "unknown")
+    if et == "rate_limit_429":
+        return 300
+    if et in {"timeout", "network"}:
+        return 120
+    if et == "not_found_404":
+        return 600
+    if et == "dependency_missing":
+        return 900
+    return 180
+
+
+def _provider_failure_path(cache_dir: Path, provider: str, scope: str) -> Path:
+    key = _cache_key("provider-failure", str(provider or "").strip().lower(), str(scope or "").strip().lower())
+    return cache_dir / f"provider_failure_{key}.json"
+
+
+def _read_provider_failure_memo(cache_dir: Path, provider: str, scope: str) -> dict[str, Any] | None:
+    if not _provider_backoff_enabled():
+        return None
+    p = _provider_failure_path(cache_dir, provider, scope)
+    if not p.exists():
+        return None
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+        expires_raw = str(doc.get("expires_at_utc") or "").strip()
+        if not expires_raw:
+            return None
+        expires_at = datetime.fromisoformat(expires_raw.replace("Z", "+00:00"))
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) >= expires_at.astimezone(timezone.utc):
+            try:
+                p.unlink()
+            except Exception:
+                pass
+            return None
+        return doc
+    except Exception:
+        return None
+
+
+def _write_provider_failure_memo(
+    cache_dir: Path,
+    *,
+    provider: str,
+    scope: str,
+    error_type: str,
+    error: str,
+) -> None:
+    if not _provider_backoff_enabled():
+        return
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    ttl_seconds = _provider_failure_ttl_seconds(error_type)
+    payload = {
+        "provider": str(provider or "").strip(),
+        "scope": str(scope or "").strip(),
+        "error_type": str(error_type or "unknown"),
+        "error": _short_err(error, n=260),
+        "updated_at_utc": now.isoformat().replace("+00:00", "Z"),
+        "expires_at_utc": (now + timedelta(seconds=ttl_seconds)).isoformat().replace("+00:00", "Z"),
+        "ttl_seconds": ttl_seconds,
+    }
+    _provider_failure_path(cache_dir, provider, scope).write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _clear_provider_failure_memo(cache_dir: Path, provider: str, *scopes: str) -> None:
+    if not _provider_backoff_enabled():
+        return
+    for scope in scopes:
+        p = _provider_failure_path(cache_dir, provider, scope)
+        try:
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
 
 
 def run_synoptic_section(
@@ -182,7 +288,35 @@ def run_synoptic_section(
             payload = None
             provider_errors: list[str] = []
             used_provider = str(provider or "")
-            for candidate_provider in provider_candidates(provider):
+            field_profile = str(cfg.get("field_profile") or "full")
+            candidates = provider_candidates(provider)
+            provider_error_details: list[dict[str, Any]] = []
+            for idx, candidate_provider in enumerate(candidates):
+                specific_scope = _provider_failure_scope(
+                    "unknown",
+                    field_profile=field_profile,
+                    runtime_tag=runtime_tag,
+                )
+                active_memo = _read_provider_failure_memo(cache_dir, candidate_provider, "global") or _read_provider_failure_memo(
+                    cache_dir,
+                    candidate_provider,
+                    specific_scope,
+                )
+                if active_memo:
+                    provider_errors.append(
+                        f"{candidate_provider}:backoff_active:{str(active_memo.get('error_type') or 'unknown')}"
+                    )
+                    provider_error_details.append(
+                        {
+                            "provider": candidate_provider,
+                            "error_type": str(active_memo.get("error_type") or "unknown"),
+                            "error": _short_err(str(active_memo.get("error") or "backoff_active"), n=220),
+                            "backoff_active": True,
+                            "backoff_scope": str(active_memo.get("scope") or ""),
+                            "backoff_expires_at_utc": str(active_memo.get("expires_at_utc") or ""),
+                        }
+                    )
+                    continue
                 try:
                     payload = build_synoptic_grid_payload(
                         candidate_provider,
@@ -201,11 +335,41 @@ def run_synoptic_section(
                         root=scripts_dir.parents[2],
                     )
                     used_provider = candidate_provider
+                    _clear_provider_failure_memo(
+                        cache_dir,
+                        candidate_provider,
+                        "global",
+                        specific_scope,
+                    )
                     break
                 except Exception as provider_exc:
+                    error_type = _classify_error_type(str(provider_exc))
                     provider_errors.append(f"{candidate_provider}:{_short_err(provider_exc, n=180)}")
+                    provider_error_details.append(
+                        {
+                            "provider": candidate_provider,
+                            "error_type": error_type,
+                            "error": _short_err(provider_exc, n=220),
+                            "rate_limit": _is_rate_limit_error(provider_exc),
+                        }
+                    )
+                    _write_provider_failure_memo(
+                        cache_dir,
+                        provider=candidate_provider,
+                        scope=_provider_failure_scope(
+                            error_type,
+                            field_profile=field_profile,
+                            runtime_tag=runtime_tag,
+                        ),
+                        error_type=error_type,
+                        error=str(provider_exc),
+                    )
                     last_err = provider_exc
-                    if _is_rate_limit_error(provider_exc):
+                    if not _should_continue_to_next_provider(
+                        candidate_index=idx,
+                        total_candidates=len(candidates),
+                        exc=provider_exc,
+                    ):
                         break
             if payload is None:
                 raise RuntimeError("; ".join(provider_errors) if provider_errors else "synoptic payload build failed")
@@ -213,6 +377,8 @@ def run_synoptic_section(
             payload["_provider_requested"] = str(provider or "")
             ev["build_s"] = round(time.perf_counter() - t_build, 3)
             ev["provider_used"] = used_provider
+            if provider_error_details:
+                ev["provider_errors"] = provider_error_details
             if used_provider != str(provider or ""):
                 ev["provider_fallback"] = True
             if perf_log:
@@ -226,6 +392,8 @@ def run_synoptic_section(
                 "error": _short_err(exc),
                 "elapsed_s": round(time.perf_counter() - pass_t0, 3),
             })
+            if 'provider_error_details' in locals() and provider_error_details:
+                ev["provider_errors"] = provider_error_details
             pass_events.append(ev)
             if perf_log:
                 perf_log(f"synoptic.{cfg['name']}.failed", time.perf_counter() - pass_t0)

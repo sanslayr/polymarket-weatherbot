@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -66,7 +67,7 @@ def _build_request(
     step: int,
     stream: str,
     field_profile: str,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     base = {
         "date": runtime_dt.strftime("%Y-%m-%d"),
         "time": int(runtime_dt.strftime("%H")),
@@ -82,6 +83,7 @@ def _build_request(
             "levelist": 500,
             "param": ["gh", "u"],
         }
+        surface_request = None
     else:
         pressure_request = {
             **base,
@@ -89,11 +91,11 @@ def _build_request(
             "levelist": [500, 700, 850, 925],
             "param": ["gh", "t", "u", "v", "r"],
         }
-    surface_request = {
-        **base,
-        "levtype": "sfc",
-        "param": "msl",
-    }
+        surface_request = {
+            **base,
+            "levtype": "sfc",
+            "param": "msl",
+        }
     return pressure_request, surface_request
 
 
@@ -126,14 +128,50 @@ client = Client(
 )
 client.retrieve(request=request, target=target)
 '''
-    proc = subprocess.run(
-        [str(py), "-c", code, str(target), str(source), str(model), json.dumps(request)],
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"ecmwf open data fetch failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    retries = max(1, int(os.getenv("ECMWF_OPEN_DATA_RETRIES", "2") or "2"))
+    timeout_s = int(os.getenv("ECMWF_OPEN_DATA_TIMEOUT_SECONDS", "180") or "180")
+    tmp_target = target.with_suffix(target.suffix + ".tmp")
+    last_err: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            if tmp_target.exists():
+                tmp_target.unlink()
+        except Exception:
+            pass
+        try:
+            proc = subprocess.run(
+                [str(py), "-c", code, str(tmp_target), str(source), str(model), json.dumps(request)],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+            if proc.returncode != 0:
+                err_text = proc.stderr.strip() or proc.stdout.strip()
+                raise RuntimeError(f"ecmwf open data fetch failed: {err_text}")
+            tmp_target.replace(target)
+            return
+        except Exception as exc:
+            last_err = exc
+            err_text = str(exc).lower()
+            try:
+                if tmp_target.exists():
+                    tmp_target.unlink()
+            except Exception:
+                pass
+            is_rate_limit = "429" in err_text or "too many requests" in err_text or "rate_limit" in err_text
+            is_transient = (
+                "timeout" in err_text
+                or "timed out" in err_text
+                or "connection" in err_text
+                or "ssl" in err_text
+                or "dns" in err_text
+            )
+            if is_rate_limit:
+                raise RuntimeError(f"ecmwf open data rate limited: {exc}") from exc
+            if (not is_transient) or attempt >= retries:
+                raise RuntimeError(str(exc)) from exc
+            time.sleep(min(2.0, 0.5 * attempt))
+    raise RuntimeError(str(last_err or "ecmwf open data fetch failed"))
 
 
 def _fetch_pair(
@@ -145,11 +183,16 @@ def _fetch_pair(
     field_profile: str,
     source: str,
     model_name: str,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path | None]:
     profile = str(field_profile or "full").strip().lower()
+    if profile == "outer500":
+        full_pressure_target = workspace / f"ecmwf_{runtime_tag}_{stream}_f{fh:03d}_full_pl.grib2"
+        if full_pressure_target.exists():
+            return full_pressure_target, None
+
     pressure_target = workspace / f"ecmwf_{runtime_tag}_{stream}_f{fh:03d}_{profile}_pl.grib2"
-    surface_target = workspace / f"ecmwf_{runtime_tag}_{stream}_f{fh:03d}_{profile}_sfc.grib2"
-    if pressure_target.exists() and surface_target.exists():
+    surface_target = None if profile == "outer500" else workspace / f"ecmwf_{runtime_tag}_{stream}_f{fh:03d}_{profile}_sfc.grib2"
+    if pressure_target.exists() and (surface_target is None or surface_target.exists()):
         return pressure_target, surface_target
 
     runtime_dt = runtime_dt_from_tag(runtime_tag)
@@ -167,7 +210,7 @@ def _fetch_pair(
             model=model_name,
             root=workspace.parents[2],
         )
-    if not surface_target.exists():
+    if surface_target is not None and surface_request is not None and not surface_target.exists():
         _retrieve_grib(
             target=surface_target,
             request=surface_request,
@@ -188,7 +231,7 @@ def _ensure_pair_with_cycle_fallback(
     model_name: str,
     root: Path,
     max_back_cycles: int = 6,
-) -> tuple[Path, Path, str, int, str]:
+) -> tuple[Path, Path | None, str, int, str]:
     base_runtime = runtime_dt_from_tag(preferred_runtime_tag)
     last_err: Exception | None = None
     for back in range(max_back_cycles + 1):
@@ -211,6 +254,9 @@ def _ensure_pair_with_cycle_fallback(
             return pressure, surface, runtime_tag, fh_try, stream
         except Exception as exc:
             last_err = exc
+            msg = str(exc).lower()
+            if "429" in msg or "too many requests" in msg or "rate limited" in msg:
+                raise RuntimeError(str(exc)) from exc
             continue
     raise RuntimeError(f"ecmwf cycle fallback exhausted: {last_err}")
 
@@ -273,8 +319,8 @@ def build_2d_grid_payload_ecmwf(
             code = r'''
 import json, sys, xarray as xr
 import numpy as np
-pa, sa, pp, sp = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-lat_min, lat_max, lon_min, lon_max = map(float, sys.argv[5:9])
+pa, pp = sys.argv[1], sys.argv[2]
+lat_min, lat_max, lon_min, lon_max = map(float, sys.argv[3:7])
 
 def open_ds(path):
     return xr.open_dataset(path, engine="cfgrib")
@@ -445,20 +491,33 @@ out = {
 print(json.dumps(out, ensure_ascii=False))
 '''
 
+        argv = [str(py), "-c", code]
+        if profile == "outer500":
+            argv.extend(
+                [
+                    str(pressure_a),
+                    str(pressure_p),
+                    str(lat_min),
+                    str(lat_max),
+                    str(lon_min),
+                    str(lon_max),
+                ]
+            )
+        else:
+            argv.extend(
+                [
+                    str(pressure_a),
+                    str(surface_a),
+                    str(pressure_p),
+                    str(surface_p),
+                    str(lat_min),
+                    str(lat_max),
+                    str(lon_min),
+                    str(lon_max),
+                ]
+            )
         proc = subprocess.run(
-            [
-                str(py),
-                "-c",
-                code,
-                str(pressure_a),
-                str(surface_a),
-                str(pressure_p),
-                str(surface_p),
-                str(lat_min),
-                str(lat_max),
-                str(lon_min),
-                str(lon_max),
-            ],
+            argv,
             capture_output=True,
             text=True,
             timeout=180,

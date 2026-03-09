@@ -15,6 +15,7 @@ WEATHER_POSTERIOR_CORE_SCHEMA_VERSION = "weather-posterior-core.v1"
 WEATHER_POSTERIOR_SCHEMA_VERSION = "weather-posterior.v1"
 REPORT_FOCUS_SCHEMA_VERSION = "report-focus.v1"
 ANALYSIS_SNAPSHOT_SCHEMA_VERSION = "analysis-snapshot.v6"
+MARKET_IMPLIED_WEATHER_SIGNAL_SCHEMA_VERSION = "market-implied-weather-signal.v1"
 
 # synoptic runtime cache wrapper version (for key / on-disk compatibility management)
 SYNOPTIC_CACHE_SCHEMA_VERSION = "synoptic-cache.v3"

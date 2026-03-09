@@ -573,6 +573,53 @@ def _select_outer500_anchor_locals(
     return picked[:max_count]
 
 
+def _select_inner_anchor_locals(
+    *,
+    anchor_locals: list[str],
+    primary_window: dict[str, Any],
+    now_local: datetime,
+    tz_name: str,
+) -> list[str]:
+    if not anchor_locals:
+        return []
+    max_count_env = int(os.getenv("FORECAST_INNER_ANCHOR_MAX", "0") or "0")
+    max_count = max_count_env if max_count_env > 0 else 5
+    if len(anchor_locals) <= max_count:
+        return list(anchor_locals)
+
+    tz = ZoneInfo(tz_name)
+    window_targets: list[datetime] = []
+    for k in ("start_local", "peak_local", "end_local"):
+        raw = str(primary_window.get(k) or "").strip()
+        if not raw:
+            continue
+        try:
+            window_targets.append(datetime.strptime(raw, "%Y-%m-%dT%H:%M").replace(tzinfo=tz))
+        except Exception:
+            continue
+
+    picked: list[str] = []
+    seen: set[str] = set()
+
+    def _add(anchor_local: str | None) -> None:
+        if not anchor_local or anchor_local in seen:
+            return
+        seen.add(anchor_local)
+        picked.append(anchor_local)
+
+    for t in window_targets:
+        _add(_nearest_anchor_local(anchor_locals, t, tz_name))
+
+    _add(_nearest_anchor_local(anchor_locals, now_local.astimezone(tz), tz_name))
+    _add(anchor_locals[0])
+    _add(anchor_locals[-1])
+
+    if len(picked) < max_count and len(anchor_locals) >= 3:
+        _add(anchor_locals[len(anchor_locals) // 2])
+
+    return picked[:max_count]
+
+
 def _merge_synoptic_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
     merged = {
         "scale_summary": {"synoptic": {"systems": []}},
@@ -725,6 +772,12 @@ def load_or_build_forecast_decision(
     anchor_limit = int(os.getenv("FORECAST_ANCHOR_LIMIT", "0") or "0")
     if anchor_limit > 0:
         anchor_locals = anchor_locals[:anchor_limit]
+    inner_anchor_locals = _select_inner_anchor_locals(
+        anchor_locals=anchor_locals,
+        primary_window=primary_window,
+        now_local=now_local,
+        tz_name=tz_name,
+    )
 
     def _pull_anchor(a_local: str, pass_mode: str) -> tuple[str, dict[str, Any] | None, str | None, list[dict[str, Any]]]:
         t_anchor = time.perf_counter()
@@ -758,7 +811,7 @@ def load_or_build_forecast_decision(
         ok = 0
         if not anchors:
             return out_payloads, out_telemetry, ok
-        max_workers = max(1, int(os.getenv("FORECAST_MAX_WORKERS", "2") or "2"))
+        max_workers = max(1, int(os.getenv("FORECAST_MAX_WORKERS", "3") or "3"))
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futs = [ex.submit(_pull_anchor, a, pass_mode) for a in anchors]
             for fut in as_completed(futs):
@@ -785,12 +838,12 @@ def load_or_build_forecast_decision(
     outer500_ok = 0
 
     if strategy in {"full", "legacy"}:
-        batch_payloads, batch_tele, batch_ok = _run_anchor_batch(anchor_locals, "full")
+        batch_payloads, batch_tele, batch_ok = _run_anchor_batch(inner_anchor_locals, "full")
         syn_payloads.extend(batch_payloads)
         anchor_telemetry.extend(batch_tele)
         inner_ok = batch_ok
     else:
-        inner_payloads, inner_tele, inner_ok = _run_anchor_batch(anchor_locals, "inner_only")
+        inner_payloads, inner_tele, inner_ok = _run_anchor_batch(inner_anchor_locals, "inner_only")
         syn_payloads.extend(inner_payloads)
         anchor_telemetry.extend(inner_tele)
 
@@ -823,7 +876,7 @@ def load_or_build_forecast_decision(
                     "synoptic_provider_used": actual_synoptic_provider,
                     "synoptic_pass_strategy": strategy,
                     "runtime": runtime,
-                    "anchors_local": anchor_locals,
+                    "anchors_local": inner_anchor_locals,
                     "outer500_anchors_local": outer500_anchors,
                     "slices": syn_payloads,
                 },
@@ -863,7 +916,7 @@ def load_or_build_forecast_decision(
     _log("forecast.decision_build", t)
 
     q = decision.setdefault("quality", {})
-    total_anchors = max(1, len(anchor_locals))
+    total_anchors = max(1, len(inner_anchor_locals))
     ok_anchors = max(0, inner_ok)
     coverage = ok_anchors / total_anchors
     q["synoptic_anchors_total"] = total_anchors
@@ -889,14 +942,39 @@ def load_or_build_forecast_decision(
     if anchor_telemetry:
         q["synoptic_anchor_events"] = anchor_telemetry
         err_counter: Counter[str] = Counter()
+        provider_error_counter: Counter[str] = Counter()
+        provider_failed: set[str] = set()
+        provider_backoff_active: set[str] = set()
+        provider_error_examples: dict[str, str] = {}
         for ev in anchor_telemetry:
             if str(ev.get("status") or "") != "failed":
-                continue
-            stage = str(ev.get("stage") or "unknown")
-            etype = str(ev.get("error_type") or "unknown")
-            err_counter[f"{stage}:{etype}"] += 1
+                pass
+            else:
+                stage = str(ev.get("stage") or "unknown")
+                etype = str(ev.get("error_type") or "unknown")
+                err_counter[f"{stage}:{etype}"] += 1
+            for pe in (ev.get("provider_errors") or []):
+                if not isinstance(pe, dict):
+                    continue
+                provider_name = str(pe.get("provider") or "").strip()
+                error_type = str(pe.get("error_type") or "unknown").strip() or "unknown"
+                if provider_name:
+                    provider_failed.add(provider_name)
+                    provider_error_counter[f"{provider_name}:{error_type}"] += 1
+                    if provider_name not in provider_error_examples and str(pe.get("error") or "").strip():
+                        provider_error_examples[provider_name] = str(pe.get("error") or "").strip()
+                    if pe.get("backoff_active"):
+                        provider_backoff_active.add(provider_name)
         if err_counter:
             q["synoptic_anchor_error_counts"] = dict(sorted(err_counter.items()))
+        if provider_error_counter:
+            q["synoptic_provider_error_counts"] = dict(sorted(provider_error_counter.items()))
+            q["synoptic_provider_failed"] = sorted(provider_failed)
+            q["synoptic_provider_failed_reason"] = provider_error_counter.most_common(1)[0][0]
+            if provider_error_examples:
+                q["synoptic_provider_failed_examples"] = provider_error_examples
+            if provider_backoff_active:
+                q["synoptic_provider_backoff_active"] = sorted(provider_backoff_active)
 
     if synoptic_error and not synoptic_from_fallback:
         q["source_state"] = "degraded"
@@ -905,7 +983,7 @@ def load_or_build_forecast_decision(
         q["source_state"] = "fallback-cache"
 
     if strategy in {"full", "legacy"}:
-        q["synoptic_outer500_anchors_total"] = len(anchor_locals)
+        q["synoptic_outer500_anchors_total"] = len(inner_anchor_locals)
         q["synoptic_outer500_anchors_ok"] = int(ok_anchors)
     else:
         q["synoptic_outer500_anchors_total"] = len(outer500_anchors)
