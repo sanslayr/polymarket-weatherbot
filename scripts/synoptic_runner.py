@@ -9,11 +9,15 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from build_2d_grid_payload import build_2d_grid_payload_openmeteo
 from contracts import SYNOPTIC_CACHE_SCHEMA_VERSION
 from cache_envelope import extract_payload, make_cache_doc
 from runtime_cache_policy import runtime_cache_enabled
 from synoptic_2d_detector import analyze as analyze_synoptic_2d
+from synoptic_provider_router import (
+    DEFAULT_SYNOPTIC_PROVIDER,
+    build_synoptic_grid_payload,
+    provider_candidates,
+)
 
 
 def _cache_key(*parts: str) -> str:
@@ -74,6 +78,8 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 def _classify_error_type(msg: str) -> str:
     s = str(msg or "").lower()
+    if "package missing" in s or "modulenotfounderror" in s or "importerror" in s:
+        return "dependency_missing"
     if "429" in s or "too many requests" in s or "rate_limit" in s:
         return "rate_limit_429"
     if "404" in s or "not found" in s:
@@ -103,7 +109,7 @@ def run_synoptic_section(
     runtime_tag: str,
     scripts_dir: Path,
     cache_dir: Path,
-    provider: str = "openmeteo",
+    provider: str = DEFAULT_SYNOPTIC_PROVIDER,
     pass_mode: str = "full",
     perf_log: Callable[[str, float], None] | None = None,
 ) -> dict[str, Any]:
@@ -173,41 +179,42 @@ def run_synoptic_section(
 
         t_build = time.perf_counter()
         try:
-            if provider == "gfs-grib2":
-                from gfs_grib_provider import build_2d_grid_payload_gfs
-                payload = build_2d_grid_payload_gfs(
-                    station_icao=st.icao,
-                    station_lat=float(st.lat),
-                    station_lon=float(st.lon),
-                    lat_min=float(st.lat - cfg["lat_span"]),
-                    lat_max=float(st.lat + cfg["lat_span"]),
-                    lon_min=float(st.lon - cfg["lon_span"]),
-                    lon_max=float(st.lon + cfg["lon_span"]),
-                    analysis_time_local=peak_local_dt.strftime("%Y-%m-%dT%H:%M"),
-                    previous_time_local=prev_local_dt.strftime("%Y-%m-%dT%H:%M"),
-                    tz_name=tz_name,
-                    cycle_tag=runtime_tag,
-                    field_profile=str(cfg.get("field_profile") or "full"),
-                    root=scripts_dir.parents[2],
-                )
-            else:
-                payload = build_2d_grid_payload_openmeteo(
-                    station_icao=st.icao,
-                    station_lat=float(st.lat),
-                    station_lon=float(st.lon),
-                    lat_min=float(st.lat - cfg["lat_span"]),
-                    lat_max=float(st.lat + cfg["lat_span"]),
-                    lon_min=float(st.lon - cfg["lon_span"]),
-                    lon_max=float(st.lon + cfg["lon_span"]),
-                    step_deg=float(cfg["step"]),
-                    analysis_time=peak_local_dt.strftime("%Y-%m-%dT%H:%M"),
-                    previous_time=prev_local_dt.strftime("%Y-%m-%dT%H:%M"),
-                    start_date=start_date,
-                    end_date=end_date,
-                    batch_size=int(cfg["batch"]),
-                    field_profile=str(cfg.get("field_profile") or "full"),
-                )
+            payload = None
+            provider_errors: list[str] = []
+            used_provider = str(provider or "")
+            for candidate_provider in provider_candidates(provider):
+                try:
+                    payload = build_synoptic_grid_payload(
+                        candidate_provider,
+                        station_icao=st.icao,
+                        station_lat=float(st.lat),
+                        station_lon=float(st.lon),
+                        lat_min=float(st.lat - cfg["lat_span"]),
+                        lat_max=float(st.lat + cfg["lat_span"]),
+                        lon_min=float(st.lon - cfg["lon_span"]),
+                        lon_max=float(st.lon + cfg["lon_span"]),
+                        analysis_time_local=peak_local_dt.strftime("%Y-%m-%dT%H:%M"),
+                        previous_time_local=prev_local_dt.strftime("%Y-%m-%dT%H:%M"),
+                        tz_name=tz_name,
+                        cycle_tag=runtime_tag,
+                        field_profile=str(cfg.get("field_profile") or "full"),
+                        root=scripts_dir.parents[2],
+                    )
+                    used_provider = candidate_provider
+                    break
+                except Exception as provider_exc:
+                    provider_errors.append(f"{candidate_provider}:{_short_err(provider_exc, n=180)}")
+                    last_err = provider_exc
+                    if _is_rate_limit_error(provider_exc):
+                        break
+            if payload is None:
+                raise RuntimeError("; ".join(provider_errors) if provider_errors else "synoptic payload build failed")
+            payload["_provider_used"] = used_provider
+            payload["_provider_requested"] = str(provider or "")
             ev["build_s"] = round(time.perf_counter() - t_build, 3)
+            ev["provider_used"] = used_provider
+            if used_provider != str(provider or ""):
+                ev["provider_fallback"] = True
             if perf_log:
                 perf_log(f"synoptic.{cfg['name']}.build", float(ev["build_s"]))
         except Exception as exc:
@@ -229,6 +236,19 @@ def run_synoptic_section(
         try:
             t_detect = time.perf_counter()
             data = analyze_synoptic_2d(payload, mode=str(cfg.get("detector_mode") or "full"))
+            data["_provider_used"] = str(payload.get("_provider_used") or used_provider)
+            data["_provider_requested"] = str(payload.get("_provider_requested") or provider or "")
+            for key in (
+                "analysis_runtime_used",
+                "analysis_fh_used",
+                "analysis_stream_used",
+                "previous_runtime_used",
+                "previous_fh_used",
+                "previous_stream_used",
+            ):
+                value = payload.get("grid_meta", {}).get(key)
+                if value not in (None, "", [], {}):
+                    data[key] = value
             ev["detect_s"] = round(time.perf_counter() - t_detect, 3)
             if perf_log:
                 perf_log(f"synoptic.{cfg['name']}.detect", float(ev["detect_s"]))
@@ -266,7 +286,43 @@ def run_synoptic_section(
         collected.append(data)
 
     if collected:
-        merged = {"scale_summary": {"synoptic": {"systems": []}}}
+        provider_used_values = [
+            str((data.get("_provider_used") or provider or "")).strip()
+            for data in collected
+            if isinstance(data, dict)
+        ]
+        provider_used = provider_used_values[0] if provider_used_values else str(provider or "")
+        provider_fallback = any(
+            str((data.get("_provider_used") or provider or "")).strip() != str(provider or "").strip()
+            for data in collected
+            if isinstance(data, dict)
+        )
+
+        merged = {
+            "analysis_time_utc": collected[0].get("analysis_time_utc") or peak_local_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:00Z"),
+            "analysis_time_local": peak_local_dt.strftime("%Y-%m-%dT%H:%M"),
+            "station": {
+                "icao": str(getattr(st, "icao", "")),
+                "lat": float(getattr(st, "lat", 0.0)),
+                "lon": float(getattr(st, "lon", 0.0)),
+            },
+            "scale_summary": {"synoptic": {"systems": []}},
+            "_provider_requested": str(provider or ""),
+            "_provider_used": provider_used,
+        }
+        for key in (
+            "analysis_runtime_used",
+            "analysis_fh_used",
+            "analysis_stream_used",
+            "previous_runtime_used",
+            "previous_fh_used",
+            "previous_stream_used",
+        ):
+            for data in collected:
+                value = data.get(key)
+                if value not in (None, "", [], {}):
+                    merged[key] = value
+                    break
         out = merged["scale_summary"]["synoptic"]["systems"]
         seen: set[tuple[str, str, int, int]] = set()
         for data in collected:
@@ -284,7 +340,9 @@ def run_synoptic_section(
                 out.append(s)
 
         merged["_telemetry"] = {
-            "provider": str(provider or ""),
+            "provider_requested": str(provider or ""),
+            "provider_used": provider_used,
+            "provider_fallback": provider_fallback,
             "pass_mode": mode,
             "passes": pass_events,
             "degraded": any(str(e.get("status")) == "failed" for e in pass_events),

@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from advection_review import thermal_advection_direction
 from condition_state import build_live_condition_signals
 from layer_signal_policy import h700_effective_dry_factor, h700_is_moist_constraint
 
@@ -179,7 +180,7 @@ def build_model_sounding_proxy(
         actionable = "若午前后见光并维持正斜率，后段仍有补涨空间。"
         path_bias = "高位再试探"
     else:
-        actionable = "更像边界层节奏题，优先看云底、温露差与风速是否同步改善。"
+        actionable = "当前更偏边界层节奏控制，优先看云底、温露差与风速是否同步改善。"
         path_bias = "高位收敛"
 
     return {
@@ -194,6 +195,9 @@ def build_model_sounding_proxy(
         "rh700_pct": None,
         "t925_t850_c": None,
         "midlevel_rh_pct": None,
+        "wind925_dir_deg": None,
+        "wind850_dir_deg": None,
+        "wind700_dir_deg": None,
         "wind925_kt": latest_wspd,
         "wind850_kt": round(float(w850_kt), 1) if w850_kt is not None else None,
         "wind700_kt": None,
@@ -233,6 +237,7 @@ def build_boundary_layer_regime(
     metar_diag: dict[str, Any],
     *,
     snd_thermo: dict[str, Any] | None = None,
+    advection_review: dict[str, Any] | None = None,
     h700_summary: str = "",
     h925_summary: str = "",
     line850: str = "",
@@ -266,6 +271,12 @@ def build_boundary_layer_regime(
     mix_score = _safe_float(thermo.get("mixing_support_score")) or 0.0
     mid_dry_score = _safe_float(thermo.get("midlevel_dry_score")) or 0.0
     mid_moist_score = _safe_float(thermo.get("midlevel_moist_score")) or 0.0
+    adv_review = advection_review if isinstance(advection_review, dict) else {}
+    adv_role = str(adv_review.get("surface_role") or "")
+    adv_bias = str(adv_review.get("transport_state") or adv_review.get("surface_bias") or "")
+    adv_state = str(adv_review.get("thermal_advection_state") or "")
+    adv_coupling_state = str(adv_review.get("surface_coupling_state") or "")
+    adv_effect_weight = _safe_float(adv_review.get("surface_effect_weight")) or 0.0
     clearing_signature = bool(
         ((latest_rh is not None and latest_rh >= 90.0) or (dewpoint_spread is not None and dewpoint_spread <= 1.5) or _contains_any(latest_wx, ("FG", "BR", "BCFG", "DZ")))
         and ((cloud_code_now in {"BKN", "OVC", "VV"}) or (cloud_base_ft is not None and cloud_base_ft <= 900.0))
@@ -330,9 +341,23 @@ def build_boundary_layer_regime(
         mixing_score += 0.15
 
     advection_score = 0.0
-    if ("暖平流" in line850) or ("冷平流" in line850):
+    if adv_role == "dominant":
+        advection_score += 1.05 + 0.18 * adv_effect_weight
+    elif adv_role == "influence":
+        advection_score += 0.68 + 0.15 * adv_effect_weight
+    elif adv_role == "background":
+        advection_score += 0.18
+    elif adv_state in {"confirmed", "probable"}:
+        advection_score += 0.62
+    elif ("暖平流" in line850) or ("冷平流" in line850):
         advection_score += 0.70
-    if ("暖平流" in line850 and "冷平流" not in line850) or ("冷平流" in line850 and "暖平流" not in line850):
+    if adv_state == "confirmed":
+        advection_score += 0.22
+    elif adv_state == "probable":
+        advection_score += 0.12
+    if adv_role in {"dominant", "influence"} and adv_bias in {"warm", "cold"}:
+        advection_score += 0.15
+    elif ("暖平流" in line850 and "冷平流" not in line850) or ("冷平流" in line850 and "暖平流" not in line850):
         advection_score += 0.20
     if _contains_any(extra, ("平流", "输送")):
         advection_score += 0.15
@@ -354,22 +379,22 @@ def build_boundary_layer_regime(
     }
     ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
     regime_key = "synoptic"
-    dominant_question = "环流题"
+    dominant_mechanism = "大尺度环流控制"
     if static_stable_score >= 1.30 and clearing_score >= 0.80 and static_stable_score >= max(advection_score, synoptic_score):
         regime_key = "boundary_layer_clearing"
-        dominant_question = "散云题"
+        dominant_mechanism = "低云清除"
     elif clearing_signature and static_stable_score >= max(advection_score, synoptic_score) - 0.10:
         regime_key = "boundary_layer_clearing"
-        dominant_question = "散云题"
+        dominant_mechanism = "低云清除"
     elif static_stable_score >= 1.15 and static_stable_score >= max(mixing_score, advection_score, synoptic_score):
         regime_key = "static_stable"
-        dominant_question = "静稳题"
+        dominant_mechanism = "静稳约束"
     elif mixing_score >= max(static_stable_score, advection_score, synoptic_score) and mixing_score >= 0.85:
         regime_key = "mixing_depth"
-        dominant_question = "混合题"
+        dominant_mechanism = "混合加深"
     elif advection_score >= max(static_stable_score, mixing_score, synoptic_score) and advection_score >= 0.80:
         regime_key = "advection"
-        dominant_question = "输送题"
+        dominant_mechanism = "低层输送主导"
 
     confidence = "low"
     if ranked and len(ranked) >= 2 and (ranked[0][1] - ranked[1][1]) >= 0.45:
@@ -378,23 +403,51 @@ def build_boundary_layer_regime(
         confidence = "medium"
 
     if regime_key == "boundary_layer_clearing":
-        headline = "今日更像静稳低层控制下的边界层清除题，最高温更取决于低云雾何时被侵蚀，而不是强大尺度强迫。"
+        headline = "今日更偏静稳低层控制下的边界层清除过程，最高温更取决于低云雾何时被侵蚀，而不是强大尺度强迫。"
         tracking_line = "优先看低云底是否抬升、温露差是否拉大、风速是否略增；若未来1-2报仍未明显开云，上沿需下修。"
     elif regime_key == "static_stable":
         headline = "今日更像静稳低层控制/浅逆温约束型，午前升温效率偏低，上沿更容易受压。"
         tracking_line = "重点看低层稳层是否松动；若温露差继续很小、云底维持偏低、风场仍弱，则全天上沿更难抬高。"
     elif regime_key == "mixing_depth":
-        headline = "今日更像混合深度题，地面能否尽快打穿低层稳层，将决定后段升温效率。"
+        headline = "今日更偏混合深度控制，地面能否尽快打穿低层稳层，将决定后段升温效率。"
         tracking_line = "优先看风速与温度斜率是否同步放大；若见光后混合层迅速加深，后段仍可补涨。"
     elif regime_key == "advection":
-        headline = "今日更像输送题，最高温更受低层暖/冷平流是否真正落地支配。"
-        tracking_line = "优先看风向风速与同小时温度偏差是否同向扩大，确认输送是否开始主导地面温度。"
+        direction = thermal_advection_direction(adv_review, line850=line850)
+        if direction == "cold":
+            if adv_state == "confirmed":
+                headline = "今日更偏低层冷平流主导，最高温更受冷平流在峰值窗前后能否持续落地影响。"
+            elif adv_state == "probable":
+                headline = "今日更偏低层偏冷输送背景主导，冷平流是否真正成为地面主导，仍要看峰值窗前后的落地程度。"
+            else:
+                headline = "今日低层偏冷输送背景存在，但是否上升到冷平流主导，仍要看后续落地链条。"
+            if adv_coupling_state == "weak" or "耦合偏弱" in h925_summary:
+                tracking_line = "优先看风向是否继续偏冷象限、风速是否增强，以及实况是否重新转冷偏离同小时模式；若近地耦合仍弱，偏冷背景未必能完整压到地面。"
+            else:
+                tracking_line = "优先看风向是否继续偏冷象限、风速是否增强，以及实况是否重新转冷偏离同小时模式；这将决定压温路径是否兑现。"
+        elif direction == "warm":
+            if adv_state == "confirmed":
+                headline = "今日更偏低层暖平流主导，最高温更受暖平流在峰值窗前后能否持续落地影响。"
+            elif adv_state == "probable":
+                headline = "今日更偏低层偏暖输送背景主导，暖平流是否真正成为地面主导，仍要看峰值窗前后的落地程度。"
+            else:
+                headline = "今日低层偏暖输送背景存在，但是否上升到暖平流主导，仍要看后续落地链条。"
+            if adv_coupling_state == "weak" or "耦合偏弱" in h925_summary:
+                tracking_line = "优先看风向是否转入更有利增温的象限、风速是否增强，以及实况是否重新转暖偏离同小时模式；若近地耦合仍弱，偏暖背景落地会偏打折。"
+            else:
+                tracking_line = "优先看风向是否转入更有利增温的象限、风速是否增强，以及实况是否重新转暖偏离同小时模式；这将决定后段能否抬高上沿。"
+        else:
+            headline = "今日更偏低层温度输送主导，最高温更受低层热力信号能否在峰值窗前后真正落地影响。"
+            tracking_line = "优先看风向风速是否发生持续重排，以及实况与同小时模式的温度偏差是否同向扩大，确认低层温度输送是否开始主导地面温度。"
     else:
-        headline = "今日仍更偏环流题，大尺度背景与输送配置对上沿的解释力更强。"
+        headline = "今日仍更偏大尺度环流控制，大尺度背景与输送配置对上沿的解释力更强。"
         tracking_line = "优先跟踪环流触发能否落地到近地风云结构，再决定是否需要重估上沿。"
 
     layer_bits: list[str] = []
     for finding in list(thermo.get("layer_findings") or []):
+        txt = _as_text(finding).rstrip("。")
+        if txt and txt not in layer_bits:
+            layer_bits.append(txt)
+    for finding in list(thermo.get("relationship_findings") or []):
         txt = _as_text(finding).rstrip("。")
         if txt and txt not in layer_bits:
             layer_bits.append(txt)
@@ -410,6 +463,12 @@ def build_boundary_layer_regime(
     reason_codes: list[str] = []
     if regime_key in {"boundary_layer_clearing", "static_stable"}:
         reason_codes.append("static_stable_boundary_layer")
+    if adv_role == "dominant":
+        reason_codes.append("advection_surface_dominant")
+    elif adv_role == "influence":
+        reason_codes.append("advection_surface_influence")
+    elif adv_role == "background":
+        reason_codes.append("advection_background_only")
     if _contains_any(latest_wx, ("FG", "BR", "BCFG", "DZ")):
         reason_codes.append("fog_or_mist_present")
     if low_cloud_pct is not None and low_cloud_pct >= 70.0:
@@ -424,7 +483,8 @@ def build_boundary_layer_regime(
     return {
         "schema_version": BOUNDARY_LAYER_REGIME_SCHEMA_VERSION,
         "regime_key": regime_key,
-        "dominant_question": dominant_question,
+        "dominant_mechanism": dominant_mechanism,
+        "dominant_question": dominant_mechanism,
         "confidence": confidence,
         "sounding_mode": str(thermo.get("profile_source") or "model_proxy"),
         "scores": scores,
@@ -432,5 +492,6 @@ def build_boundary_layer_regime(
         "layer_summary": layer_summary,
         "tracking_line": tracking_line,
         "reason_codes": reason_codes,
+        "advection_role": adv_role,
         "thermo": thermo,
     }

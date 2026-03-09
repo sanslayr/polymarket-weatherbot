@@ -9,15 +9,14 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
-from condition_state import build_condition_context, build_live_condition_signals
-from boundary_layer_regime import build_boundary_layer_regime
+from analysis_snapshot_service import build_analysis_snapshot, load_analysis_runtime_params
+from advection_review import thermal_advection_direction
+from condition_state import build_live_condition_signals
 from layer_signal_policy import h700_dry_support_factor, h700_effective_dry_factor, h700_is_moist_constraint, h700_should_surface_in_evidence
 from market_label_policy import build_market_label_policy
 from param_store import load_tmax_learning_params
 from polymarket_render_service import _build_polymarket_section
 from realtime_pipeline import classify_window_phase, select_realtime_triggers
-from report_peak_module import _build_peak_range_module
-from temperature_phase_decision import build_temperature_phase_decision
 
 PHASE_LABELS = {
     "far": "远离窗口",
@@ -124,6 +123,7 @@ def _build_synoptic_lines(
     line500: str,
     h500_feature: dict[str, Any] | None,
     line850: str,
+    advection_review: dict[str, Any] | None,
     extra: str,
     h700_summary: str,
     h925_summary: str,
@@ -137,6 +137,11 @@ def _build_synoptic_lines(
     h500_score = _h500_weight_score(h500_feature)
     h500_role = _h500_thermal_role(h500_feature)
     h500_key_signal = _h500_has_key_signal(h500_feature)
+    adv_review = advection_review if isinstance(advection_review, dict) else {}
+    adv_state = str(adv_review.get("thermal_advection_state") or "")
+    adv_direction = thermal_advection_direction(adv_review, line850=line850)
+    adv_is_confirmed = adv_state == "confirmed"
+    adv_is_foreground = adv_state in {"confirmed", "probable"}
 
     def _contains_any(text: str, keys: list[str]) -> bool:
         s = str(text or "")
@@ -147,9 +152,9 @@ def _build_synoptic_lines(
             return "锋面活动主导", "锋区调整"
         if "dry_intrusion" in otype or _contains_any(extra, ["湿层", "低云", "封盖", "压制"]):
             return "稳定层约束主导", "低层受限"
-        if _contains_any(line850, ["暖平流"]):
+        if adv_is_foreground and adv_direction == "warm":
             return "平流主导", "暖平流抬升"
-        if _contains_any(line850, ["冷平流"]):
+        if adv_is_foreground and adv_direction == "cold":
             return "平流主导", "冷平流切入"
         if h500_regime in {"副热带高压控制", "副热带高压边缘", "冷高压稳定压温", "高压暖脊", "高压脊"}:
             return "高压下沉主导", "暖脊控场"
@@ -199,7 +204,7 @@ def _build_synoptic_lines(
         txt500 = str(line500)
         txtx = str(extra)
 
-        if _contains_any(txt850, ["暖平流", "冷平流", "平流"]):
+        if adv_is_foreground:
             s["advection"] += 0.95
         if h500_key_signal:
             s["dynamic"] += 0.85
@@ -210,7 +215,7 @@ def _build_synoptic_lines(
         if _contains_any(txtx + txt850, ["锋", "锋生", "斜压"]):
             # text-only frontal cues are useful but should not dominate without object support
             s["baroclinic"] += 0.55
-            if _contains_any(txt850, ["暖平流", "冷平流"]):
+            if adv_is_foreground:
                 s["baroclinic"] += 0.15
         if _contains_any(txtx + txt850, ["风切", "切换"]):
             s["shear"] += 0.7
@@ -291,8 +296,8 @@ def _build_synoptic_lines(
         if not is_front:
             return None
 
-        warm = "暖平流" in str(line850)
-        cold = "冷平流" in str(line850)
+        warm = adv_direction == "warm" and adv_is_foreground
+        cold = adv_direction == "cold" and adv_is_foreground
         if warm and not cold:
             nature = "偏暖锋"
         elif cold and not warm:
@@ -328,10 +333,14 @@ def _build_synoptic_lines(
         txt850 = str(line850)
         txtx = str(extra)
 
-        if ("advection" in otype) or ("暖平流" in txt850) or ("冷平流" in txt850):
-            if "暖平流" in txt850 and "冷平流" not in txt850:
+        if ("advection" in otype) or adv_direction in {"warm", "cold"}:
+            if adv_direction == "warm" and adv_is_confirmed:
+                return "暖平流更明确，若云量放开，升温会更顺"
+            if adv_direction == "warm":
                 return "暖空气输送为主，云量若放开，升温会更顺"
-            if "冷平流" in txt850 and "暖平流" not in txt850:
+            if adv_direction == "cold" and adv_is_confirmed:
+                return "冷平流更明确，对升温有抑制"
+            if adv_direction == "cold":
                 return "冷空气输送偏强，对升温有压制"
             return "冷暖输送并存，短时更容易出现重排"
 
@@ -1158,8 +1167,13 @@ def _build_vars_and_market_blocks(
 
     if cadence_line:
         focus.append((0.86, cadence_line))
-    if bl_regime_key in {"boundary_layer_clearing", "static_stable", "mixing_depth"} and bl_tracking_line:
-        focus.append((0.99, f"• {bl_tracking_line}"))
+    if bl_tracking_line:
+        if bl_regime_key in {"boundary_layer_clearing", "static_stable", "mixing_depth"}:
+            focus.append((0.99, f"• {bl_tracking_line}"))
+        elif bl_regime_key == "advection":
+            focus.append((0.94, f"• {bl_tracking_line}"))
+        elif bl_regime_key == "synoptic":
+            focus.append((0.84, f"• {bl_tracking_line}"))
 
     if key_report_slots:
         slot_txt = " / ".join(key_report_slots[:2])
@@ -1281,7 +1295,7 @@ def _build_vars_and_market_blocks(
                 )
             focus.append((sc, txt))
         else:
-            focus.append((0.45, "• 近地风场若由不定转为稳定单一来流：偏冷象限通常压温，偏暖象限才支持后段反超。"))
+            focus.append((0.45, "• 近地风场若由不定转为稳定单一风向：偏冷象限通常压温，偏暖象限才支持后段反超。"))
     except Exception:
         focus.append((0.45, "• 近地风向/风速若突变 → 峰值出现时段与幅度可能改写。"))
 
@@ -1413,7 +1427,8 @@ def _build_vars_and_market_blocks(
                 or ("开窗" in cloud_tr)
                 or precip_trend in {"new", "intensify", "weaken", "end"}
             )
-            vars_lines = _pick_by_phase(merged_all, phase_now, 2 if active_far else 1)
+            far_limit = 3 if active_far else 2
+            vars_lines = _pick_by_phase(merged_all, phase_now, far_limit)
         else:
             vars_lines = _pick_by_phase(merged_all, phase_now, 3)
 
@@ -1550,6 +1565,7 @@ def choose_section_text(
     synoptic_window: dict[str, Any] | None = None,
     polymarket_prefetched_event: tuple[bool, list[dict[str, Any]]] | None = None,
     temp_shape_analysis: dict[str, Any] | None = None,
+    analysis_snapshot: dict[str, Any] | None = None,
 ) -> str:
     """Render-only section builder.
 
@@ -1559,30 +1575,10 @@ def choose_section_text(
 
     unit = "F" if str(temp_unit).upper() == "F" else "C"
 
-    lp = load_tmax_learning_params() or {}
-    lp_rt = (lp.get("rounded_top") or {}) if isinstance(lp, dict) else {}
-
-    rt_accel_neg = float(lp_rt.get("temp_accel_neg_threshold", -0.25))
-    rt_flat = float(lp_rt.get("flat_trend_threshold", 0.12))
-    rt_weak = float(lp_rt.get("weak_trend_threshold", 0.22))
-    rt_near_peak_h = float(lp_rt.get("near_peak_hours", 1.8))
-    rt_near_end_h = float(lp_rt.get("near_end_hours", 1.0))
-    rt_solar_stall = float(lp_rt.get("solar_stalling_slope", 0.012))
-    rt_solar_rise = float(lp_rt.get("solar_strong_rise_slope", 0.030))
-    rt_rad_low = float(lp_rt.get("rad_low_threshold", 0.55))
-    rt_rad_recover = float(lp_rt.get("rad_recover_threshold", 0.72))
-    rt_rad_recover_tr = float(lp_rt.get("rad_recover_trend", 0.025))
-
-    lp_night = (lp.get("nocturnal_rewarm") or {}) if isinstance(lp, dict) else {}
-    rt_night_solar = float(lp_night.get("night_solar_max", 0.08))
-    rt_night_hour_start = float(lp_night.get("night_hour_start", 17.5))
-    rt_night_hour_end = float(lp_night.get("night_hour_end", 7.0))
-    rt_night_warm_bias = float(lp_night.get("warm_advection_bias_min", 0.45))
-    rt_night_wind_jump = float(lp_night.get("wind_speed_jump_kt", 3.0))
-    rt_night_wind_mix_min = float(lp_night.get("wind_speed_mix_min_kt", 7.0))
-    rt_night_dp_rise = float(lp_night.get("dewpoint_rise_min_c", 0.8))
-    rt_night_pres_fall = float(lp_night.get("pressure_fall_min_hpa", -0.6))
-    rt_night_score_min = float(lp_night.get("score_min", 1.5))
+    runtime_params = load_analysis_runtime_params()
+    rt_rad_low = runtime_params["rt_rad_low"]
+    rt_rad_recover = runtime_params["rt_rad_recover"]
+    rt_rad_recover_tr = runtime_params["rt_rad_recover_tr"]
 
     def _to_unit(c: float) -> float:
         return (c * 9.0 / 5.0 + 32.0) if unit == "F" else c
@@ -1596,62 +1592,16 @@ def choose_section_text(
         hi_u = _to_unit(float(hi_c))
         return f"{lo_u:.1f}~{hi_u:.1f}°{unit}"
 
-    def solar_clear_score_fn(lat_deg: float, lon_deg: float, dt_local: datetime) -> float:
-        """Return simplified clear-sky radiation score in [0,1] from solar geometry.
-        Uses NOAA-like equation-of-time/declination and local solar time correction by longitude.
-        """
-        tz_off_h = 0.0
-        try:
-            if dt_local.tzinfo is not None and dt_local.utcoffset() is not None:
-                tz_off_h = float(dt_local.utcoffset().total_seconds() / 3600.0)
-        except Exception:
-            tz_off_h = 0.0
-
-        doy = int(dt_local.timetuple().tm_yday)
-        hour = float(dt_local.hour + dt_local.minute / 60.0 + dt_local.second / 3600.0)
-        gamma = 2.0 * math.pi / 365.0 * (doy - 1 + (hour - 12.0) / 24.0)
-
-        decl = (
-            0.006918
-            - 0.399912 * math.cos(gamma)
-            + 0.070257 * math.sin(gamma)
-            - 0.006758 * math.cos(2 * gamma)
-            + 0.000907 * math.sin(2 * gamma)
-            - 0.002697 * math.cos(3 * gamma)
-            + 0.00148 * math.sin(3 * gamma)
-        )
-        eqtime = 229.18 * (
-            0.000075
-            + 0.001868 * math.cos(gamma)
-            - 0.032077 * math.sin(gamma)
-            - 0.014615 * math.cos(2 * gamma)
-            - 0.040849 * math.sin(2 * gamma)
-        )
-
-        tst_min = hour * 60.0 + eqtime + 4.0 * float(lon_deg) - 60.0 * tz_off_h
-        tst_min = tst_min % 1440.0
-        ha_deg = tst_min / 4.0 - 180.0
-
-        lat_rad = math.radians(float(lat_deg))
-        ha_rad = math.radians(ha_deg)
-        cosz = (
-            math.sin(lat_rad) * math.sin(decl)
-            + math.cos(lat_rad) * math.cos(decl) * math.cos(ha_rad)
-        )
-        cosz = max(-1.0, min(1.0, cosz))
-        if cosz <= 0.0:
-            return 0.0
-
-        # Relative clear-sky radiation shape (slightly convex to represent midday dominance)
-        return max(0.0, min(1.0, cosz ** 1.15))
-
-    state = build_condition_context(
+    snapshot = analysis_snapshot if isinstance(analysis_snapshot, dict) else build_analysis_snapshot(
         primary_window=primary_window,
         metar_diag=metar_diag,
         forecast_decision=forecast_decision,
+        temp_unit=unit,
         synoptic_window=synoptic_window,
+        temp_shape_analysis=temp_shape_analysis,
     )
-    signals = build_live_condition_signals(metar_diag)
+    state = dict(snapshot.get("condition_state") or {})
+    signals = dict(snapshot.get("signals") or {})
 
     fdec = state["fdec"]
     d = state["d"]
@@ -1662,6 +1612,7 @@ def choose_section_text(
     line850 = state["line850"]
     extra = state["extra"]
     h500_feature = state["h500_feature"]
+    advection_review = state["advection_review"]
     h700_summary = state["h700_summary"]
     h925_summary = state["h925_summary"]
     snd_thermo = state["snd_thermo"]
@@ -1686,6 +1637,7 @@ def choose_section_text(
         line500=line500,
         h500_feature=h500_feature,
         line850=line850,
+        advection_review=advection_review,
         extra=extra,
         h700_summary=h700_summary,
         h925_summary=h925_summary,
@@ -1694,18 +1646,11 @@ def choose_section_text(
         precip_state=precip_state,
         precip_trend=precip_trend,
     )
-    boundary_layer_regime = build_boundary_layer_regime(
-        primary_window=primary_window,
-        metar_diag=metar_diag,
-        snd_thermo=snd_thermo,
-        h700_summary=h700_summary,
-        h925_summary=h925_summary,
-        line850=line850,
-        extra=extra,
-        h500_regime=str((h500_feature or {}).get("regime_label") or ""),
-        object_type=str((obj or {}).get("type") or ""),
-        cloud_code_now=cloud_code_now,
-    )
+    synoptic_summary = dict(snapshot.get("synoptic_summary") or {})
+    prebuilt_syn_lines = [str(item) for item in (synoptic_summary.get("lines") or []) if str(item).strip()]
+    if prebuilt_syn_lines:
+        syn_lines = prebuilt_syn_lines
+    boundary_layer_regime = dict(snapshot.get("boundary_layer_regime") or {})
     regime_lines: list[str] = []
     regime_headline = str(boundary_layer_regime.get("headline") or "").strip()
     layer_summary = str(boundary_layer_regime.get("layer_summary") or "").strip()
@@ -1725,69 +1670,30 @@ def choose_section_text(
         fmt_temp=_fmt_temp,
     )
 
-    temp_phase_decision = build_temperature_phase_decision(
-        primary_window,
-        metar_diag,
-        line850=line850,
-        temp_shape_analysis=temp_shape_analysis,
-    )
-
-    peak_data = _build_peak_range_module(
-        primary_window=primary_window,
-        syn_w=syn_w,
-        calc_window=calc_window,
-        metar_diag=metar_diag,
-        quality=quality,
-        obj=obj,
-        line500=line500,
-        h500_feature=h500_feature,
-        line850=line850,
-        extra=extra,
-        h700_summary=h700_summary,
-        h925_summary=h925_summary,
-        snd_thermo=snd_thermo,
-        cloud_code_now=cloud_code_now,
-        precip_state=precip_state,
-        precip_trend=precip_trend,
-        unit=unit,
-        rt_accel_neg=rt_accel_neg,
-        rt_flat=rt_flat,
-        rt_weak=rt_weak,
-        rt_near_peak_h=rt_near_peak_h,
-        rt_near_end_h=rt_near_end_h,
-        rt_solar_stall=rt_solar_stall,
-        rt_solar_rise=rt_solar_rise,
-        rt_rad_low=rt_rad_low,
-        rt_rad_recover=rt_rad_recover,
-        rt_rad_recover_tr=rt_rad_recover_tr,
-        rt_night_solar=rt_night_solar,
-        rt_night_hour_start=rt_night_hour_start,
-        rt_night_hour_end=rt_night_hour_end,
-        rt_night_warm_bias=rt_night_warm_bias,
-        rt_night_wind_jump=rt_night_wind_jump,
-        rt_night_wind_mix_min=rt_night_wind_mix_min,
-        rt_night_dp_rise=rt_night_dp_rise,
-        rt_night_pres_fall=rt_night_pres_fall,
-        rt_night_score_min=rt_night_score_min,
-        solar_clear_score_fn=solar_clear_score_fn,
-        fmt_range_fn=fmt_range_fn,
-        temp_phase_decision=temp_phase_decision,
-    )
-    peak_range_block = peak_data["peak_range_block"]
-    obs_max = peak_data["obs_max"]
-    obs_floor = peak_data["obs_floor"]
-    obs_ceil = peak_data["obs_ceil"]
-    gate = peak_data["gate"]
-    phase_now = peak_data["phase_now"]
-    low_conf_far = peak_data["low_conf_far"]
-    compact_settled_mode = peak_data["compact_settled_mode"]
-    cloud_code = peak_data["cloud_code"]
-    t_cons = peak_data["t_cons"]
-    b_cons = peak_data["b_cons"]
-    disp_lo = peak_data["disp_lo"]
-    disp_hi = peak_data["disp_hi"]
-    core_lo = peak_data["core_lo"]
-    core_hi = peak_data["core_hi"]
+    temp_phase_decision = dict(snapshot.get("temp_phase_decision") or {})
+    peak_data = dict(snapshot.get("peak_data") or {})
+    peak_summary = dict(peak_data.get("summary") or {})
+    peak_range_block = [str(item) for item in (peak_data.get("block") or []) if str(item).strip()]
+    peak_observed = dict(peak_summary.get("observed") or {})
+    peak_confidence = dict(peak_summary.get("confidence") or {})
+    peak_consistency = dict(peak_summary.get("consistency") or {})
+    peak_ranges = dict(peak_summary.get("ranges") or {})
+    peak_display_range = dict(peak_ranges.get("display") or {})
+    peak_core_range = dict(peak_ranges.get("core") or {})
+    obs_max = peak_observed.get("max_temp_c")
+    obs_floor = peak_observed.get("interval_lo_c")
+    obs_ceil = peak_observed.get("interval_hi_c")
+    gate = peak_summary.get("gate") or {}
+    phase_now = str(peak_summary.get("phase_now") or "unknown")
+    low_conf_far = bool(peak_confidence.get("low_conf_far"))
+    compact_settled_mode = bool(peak_confidence.get("compact_settled_mode"))
+    cloud_code = str(peak_consistency.get("cloud_code") or "")
+    t_cons = float(peak_consistency.get("temp_trend_consistency_c") or 0.0)
+    b_cons = float(peak_consistency.get("temp_bias_consistency_c") or 0.0)
+    disp_lo = float(peak_display_range.get("lo"))
+    disp_hi = float(peak_display_range.get("hi"))
+    core_lo = float(peak_core_range.get("lo"))
+    core_hi = float(peak_core_range.get("hi"))
 
     t_bias = signals.get("temp_bias_c")
     t_tr = signals.get("temp_trend_c")

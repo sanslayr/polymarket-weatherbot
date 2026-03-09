@@ -42,9 +42,12 @@ class BoundaryLayerRegimeTest(unittest.TestCase):
         self.assertEqual(thermo["profile_source"], "model_proxy")
         self.assertEqual(thermo["quality"], "model_proxy")
         self.assertGreaterEqual(float(thermo["low_level_cap_score"]), 0.65)
+        self.assertIn("coverage", thermo)
+        self.assertEqual(thermo["coverage"]["density_class"], "sparse")
+        self.assertIn("增加1000/950/900/800层以识别浅逆温与相变层", thermo["coverage"]["recommendations"])
         self.assertTrue(any("模式层结" in item for item in sounding["items"]))
 
-    def test_boundary_layer_regime_marks_paris_like_case_as_clearing_problem(self) -> None:
+    def test_boundary_layer_regime_prioritizes_clearing_under_static_stable_signal_mix(self) -> None:
         primary_window = {
             "peak_temp_c": 9.0,
             "low_cloud_pct": 88.0,
@@ -73,9 +76,18 @@ class BoundaryLayerRegimeTest(unittest.TestCase):
             primary_window=primary_window,
             metar_diag=metar_diag,
             snd_thermo=sounding["thermo"],
+            advection_review={
+                "has_signal": True,
+                "thermal_advection_state": "weak",
+                "transport_state": "cold",
+                "surface_coupling_state": "weak",
+                "surface_role": "background",
+                "surface_bias": "cold",
+                "surface_effect_weight": 0.08,
+            },
             h700_summary="700hPa 干层信号在外围（约260km）",
             h925_summary="低层耦合偏弱（高空信号落地效率有限）",
-            line850="低层输送信号一般",
+            line850="850偏冷输送距站偏远或落地不完整，先按背景约束项处理。",
             extra="低云雾仍有维持风险",
             h500_regime="近区槽脊过渡",
             object_type="",
@@ -83,10 +95,93 @@ class BoundaryLayerRegimeTest(unittest.TestCase):
         )
 
         self.assertEqual(regime["regime_key"], "boundary_layer_clearing")
-        self.assertEqual(regime["dominant_question"], "散云题")
-        self.assertIn("边界层清除题", regime["headline"])
+        self.assertEqual(regime["dominant_mechanism"], "低云清除")
+        self.assertEqual(regime["dominant_question"], "低云清除")
+        self.assertIn("边界层清除过程", regime["headline"])
         self.assertIn("低云底", regime["tracking_line"])
         self.assertTrue(("低层" in regime["layer_summary"]) or ("高湿" in regime["layer_summary"]))
+
+    def test_diagnose_sounding_builds_layer_relationships_from_obs_profile(self) -> None:
+        sounding = diagnose_sounding(
+            {
+                "peak_temp_c": 23.0,
+            },
+            {},
+            obs_context={
+                "use_sounding_obs": True,
+                "confidence": "H",
+                "obs_age_hours": 4.0,
+                "thermo": {
+                    "has_profile": True,
+                    "quality": "complete",
+                    "profile_source": "obs",
+                    "rh925_pct": 88.0,
+                    "rh850_pct": 58.0,
+                    "rh700_pct": 34.0,
+                    "t925_t850_c": 2.8,
+                    "midlevel_rh_pct": 46.0,
+                    "wind925_dir_deg": 140.0,
+                    "wind850_dir_deg": 182.0,
+                    "wind700_dir_deg": 228.0,
+                    "wind925_kt": 10.0,
+                    "wind850_kt": 19.0,
+                    "wind700_kt": 31.0,
+                    "low_level_cap_score": 0.88,
+                    "mixing_support_score": 0.34,
+                },
+                "layer_findings": ["925–850hPa存在稳定层（封盖信号），冲高持续性受限。"],
+            },
+        )
+
+        thermo = sounding["thermo"]
+        relationships = thermo["layer_relationships"]
+        self.assertEqual(relationships["thermal_structure"], "capped")
+        self.assertEqual(relationships["moisture_layering"], "low_moist_mid_dry")
+        self.assertEqual(relationships["wind_turning_state"], "veering_with_height")
+        self.assertEqual(relationships["coupling_chain_state"], "decoupled")
+        self.assertTrue(any("低层湿层上接中层干层" in item for item in thermo["relationship_findings"]))
+        self.assertTrue(any("探空层间关系" in item for item in sounding["items"]))
+
+    def test_background_advection_does_not_force_advection_regime(self) -> None:
+        regime = build_boundary_layer_regime(
+            primary_window={
+                "peak_temp_c": 28.0,
+                "low_cloud_pct": 30.0,
+                "w850_kmh": 18.0,
+            },
+            metar_diag={
+                "latest_report_local": "2026-03-09T10:00:00+05:30",
+                "latest_temp": 20.4,
+                "latest_dewpoint": 8.0,
+                "latest_rh": 48.0,
+                "latest_wspd": 4.0,
+                "temp_trend_smooth_c": 0.06,
+            },
+            snd_thermo={
+                "profile_source": "model_proxy",
+                "low_level_cap_score": 0.25,
+                "mixing_support_score": 0.38,
+                "midlevel_dry_score": 0.1,
+                "midlevel_moist_score": 0.0,
+                "layer_findings": ["925–850混合一般，低层仍未形成强落地链条。"],
+            },
+            advection_review={
+                "has_signal": True,
+                "thermal_advection_state": "weak",
+                "transport_state": "cold",
+                "surface_coupling_state": "weak",
+                "surface_role": "background",
+                "surface_bias": "cold",
+                "surface_effect_weight": 0.09,
+            },
+            h925_summary="低层耦合偏弱（高空信号落地效率有限）",
+            line850="850偏冷输送距站偏远或落地不完整，先按背景约束项处理。",
+            h500_regime="高空弱信号背景",
+            cloud_code_now="FEW",
+        )
+
+        self.assertNotEqual(regime["regime_key"], "advection")
+        self.assertEqual(regime["advection_role"], "background")
 
 
 if __name__ == "__main__":

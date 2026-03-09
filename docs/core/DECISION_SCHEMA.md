@@ -1,51 +1,116 @@
-# Forecast Decision Schema (v4)
+# Forecast Decision Schema
 
-`forecast_pipeline.py` 产出的统一决策对象结构（报告层只消费该结构，不直接耦合底层抓取细节）。
+Last updated: 2026-03-09
 
-## 顶层
-- `schema_version`: `forecast-decision.v4`
-- `meta`: 识别与缓存失效关键元数据
-- `quality`: 数据质量/覆盖率
-- `features`: 事实层（不直接面向用户文案）
-- `decision`: 裁决层（报告转译主输入）
+`forecast_pipeline.py` 产出的统一决策对象结构。报告层和 snapshot 层应优先消费该结构，而不是反向读取 provider 原始返回。
 
----
+当前 schema version：`forecast-decision.v8`
 
-## meta
-- `station` / `date` / `model`
-- `synoptic_provider`：当前 3D 场来源（现默认 `gfs-grib2`）
-- `runtime`：运行时次标签
-- `window.start_local` / `window.end_local`
+## 1) 顶层
 
-## quality
-- `source_state`: `fresh | cache-hit | fallback-cache | degraded`
-- `missing_layers`: 缺失层列表（如 `['synoptic']`）
-- `synoptic_anchors_total`: 计划锚点数
-- `synoptic_anchors_ok`: 成功锚点数
-- `synoptic_coverage`: 锚点覆盖率（0~1）
+- `schema_version`
+- `meta`
+- `quality`
+- `features`
+- `decision`
 
-## features（事实层）
-- `objects_3d`：`objects-3d.v1`
-  - `main_object`
-  - `candidates`
-- `h500.phase / phase_hint / pva_proxy`
-- `h850.advection`
-- `h700.summary`
-- `h925.summary`
-- `sounding.path_bias`
-- `sounding.thermo`（可选）：
-  - `has_profile` / `quality`
-  - `sbcape_jkg / mlcape_jkg / mucape_jkg`
-  - `sbcin_jkg / mlcin_jkg`
-  - `lcl_m / lfc_m / el_m`
+## 2) `meta`
 
-## decision（裁决层）
-- `main_path`: 预报主导 / 过渡 / 实况主导
-- `bottleneck`: 当前主要约束
-- `trigger`: 触发提醒
-- `object_3d_main`: 主 3D 对象（若有）
-- `override_risk`: `low | high`
-- `background`：报告层环流背景标准字段
+- `station`
+- `date`
+- `model`
+- `synoptic_provider`
+  - 实际写入的是本次 decision 使用的 3D provider
+- `runtime`
+- `window.start_local`
+- `window.end_local`
+
+## 3) `quality`
+
+- `source_state`
+  - `fresh | cache-hit | fallback-cache | degraded`
+- `missing_layers`
+- `synoptic_anchors_total`
+- `synoptic_anchors_ok`
+- `synoptic_coverage`
+- `synoptic_pass_strategy`
+- `synoptic_provider_requested`
+- `synoptic_provider_used`
+- `synoptic_provider_fallback`（可选）
+- `synoptic_outer500_anchors_total`
+- `synoptic_outer500_anchors_ok`
+- `synoptic_anchor_events`（可选）
+- `synoptic_anchor_error_counts`（可选）
+- `synoptic_analysis_runtime_used` / `synoptic_previous_runtime_used` 等实际 provider runtime 元数据（可选）
+
+## 4) `features`
+
+### `objects_3d`
+
+当前对象 schema：`objects-3d.v2`
+
+关键字段：
+
+- `main_object`
+- `candidates`
+- `tracks`
+- `anchors_count`
+
+### `h500`
+
+- `phase`
+- `phase_hint`
+- `pva_proxy`
+- `regime_label`
+- `proximity`
+- `confidence`
+- `forcing_text`
+- `impact_weight`
+- `tmax_weight_score`
+- `surface_coupling`
+- 以及 subtropical / westerly 相关辅助诊断
+
+### `h850`
+
+- `advection`
+- `review`
+  - `thermal_advection_state`
+  - `transport_state`
+  - `surface_coupling_state`
+  - `surface_role`
+  - `surface_bias`
+  - `surface_effect_weight`
+  - `summary_line`
+
+### `h700`
+
+- `summary`
+
+### `h925`
+
+- `summary`
+
+### `sounding`
+
+- `path_bias`
+- `layer_findings`
+- `actionable`
+- `profile_source`
+- `confidence`
+- `thermo`
+  - `coverage`
+  - `layer_relationships`
+  - `relationship_findings`
+  - 其余 thermo/cape/cin/lcl/lfc 等字段
+
+## 5) `decision`
+
+- `main_path`
+- `bottleneck`
+- `trigger`
+- `object_3d_main`
+- `override_risk`
+- `background`
   - `phase_mode`
   - `phase500`
   - `pva500`
@@ -54,8 +119,8 @@
   - `line_850`
   - `extra`
 
----
+## 6) 读取约束
 
-## 兼容策略
-- 报告层优先读取 `decision.background`
-- 缓存读取严格校验 `schema_version`；版本不匹配直接视为失效并重建
+1. 报告层优先读 `features` 和 `decision.background` 的结构化字段。
+2. 用户可见结论不应仅靠解析 `line_850` 之类文本字段得出。
+3. 若 `schema_version` 不匹配，应直接视为缓存失效并重建。

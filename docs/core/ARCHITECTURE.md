@@ -1,218 +1,143 @@
-# polymarket-weatherbot Architecture (2026-03-01)
+# polymarket-weatherbot Architecture
 
-> 目标：输出简练、可解释、可复用的 `/look` 城市最高温分析。
+Last updated: 2026-03-09
 
-> 文档导航：先看 `DOCS_INDEX.md`。特殊情形规则集中在 `SPECIAL_CASE_PLAYBOOK.md`。
-> Agent 代码更新边界：`AGENT_UPDATE_GUARDRAILS.md`。
+目标：让 `/look` 的天气分析链路足够清晰、可扩展、可复用，并为后续 Tmax 概率层和自动交易层保留稳定接口。
 
----
-
-## 1) 模块分层（当前主链路）
+## 1) 当前主链路
 
 ### A. Ingress / Orchestrator
+
 - `scripts/telegram_report_cli.py`
-- 职责：
-  - 调用命令解析层（`scripts/look_command.py`）
-  - 调用站点目录层（`scripts/station_catalog.py`）
-  - 调用小时预报服务层（`scripts/hourly_data_service.py`）
-  - 数据抓取编排（小时预报 + METAR + synoptic pipeline）
-  - 调用渲染服务层（`scripts/report_render_service.py`）
-  - 仅做最终消息封装与输出
+  - 负责 `/look` 入口、运行编排、降级兜底、最终文本拼装
+- `scripts/look_command.py`
+  - 命令解析与帮助文本
+- `scripts/station_catalog.py`
+  - 站点解析、别名、时区、站点元信息
 
-### B. Data Access
-- 小时预报：
-  - 统一在 `scripts/hourly_data_service.py` 实现：
-    - 首选 `open-meteo`
-    - 回退 `gfs-grib2 hourly-like`（`gfs_grib_provider.fetch_hourly_like`）
-    - 包含缓存/断路器/prev-cycle fallback
-- 3D 场：
-  - 默认 `gfs-grib2`（`gfs_grib_provider.build_2d_grid_payload_gfs`）
-  - 备用 `build_2d_grid_payload.py`（open-meteo 网格）
-- 实况：
-  - `scripts/metar_utils.py`（AviationWeather METAR 24h + 观测量化区间工具）
-  - `scripts/metar_analysis_service.py`（METAR 诊断特征与实况分析文案）
-- 盘口事件：
-  - `scripts/polymarket_client.py`（事件抓取 + 缓存 + 预取）
-  - `scripts/polymarket_render_service.py`（盘口档位解析与区间渲染）
+### B. Provider / Raw Data
 
-### C. Synoptic Engine
+- 小时预报：`scripts/hourly_data_service.py`
+  - `open-meteo` primary
+  - 负责小时曲线、候选峰值窗、fallback 与缓存
+- 3D 场 provider router：`scripts/synoptic_provider_router.py`
+  - 默认 `ecmwf-open-data`
+  - fallback `gfs-grib2`
+- ECMWF provider：`scripts/ecmwf_open_data_provider.py`
+- GFS provider：`scripts/gfs_grib_provider.py`
+- 实况：`scripts/metar_utils.py`
+- 实测探空：`scripts/sounding_obs_service.py`
+
+### C. Synoptic / Forecast Decision
+
 - `scripts/synoptic_runner.py`
-  - pass 运行模式：
-    - `full`：每个 anchor 执行 `inner + outer500`
-    - `split_outer500`（默认）：每个 anchor 执行 `inner`，仅关键 anchor 执行 `outer500`
-  - 关键 outer500 anchor 数量由 `FORECAST_OUTER500_ANCHOR_MAX` 控制（默认 4）
-  - runner 层已改为内存直连：build + detect 均走函数调用，减少 JSON 临时文件与进程启动开销
-  - `outer500` pass 走轻量字段/检测（`field_profile=outer500` + `detector_mode=outer500_only`）
-  - 调用 `synoptic_2d_detector.py`
-- `scripts/synoptic_2d_detector.py`
-  - MSLP 高低压
-  - 850 平流
-  - 500 槽脊
-  - 扩展：frontogenesis / llj_shear / dry_intrusion_700 / baroclinic_coupling
-
-### D. Decision Engine
+  - 多 anchor synoptic 构建与 provider fallback
 - `scripts/forecast_pipeline.py`
-  - 多锚点构建（全日 anchor）
-  - 覆盖率统计（anchors_total/ok/coverage）
-  - 3D object 构建（`vertical_3d.py`）
-  - 诊断层融合（500/700/925/sounding）
-  - 产出 `forecast-decision.v4`
+  - 汇总 anchor slices
+  - 构建 forecast decision
+  - 写入 decision cache / 3D bundle cache
+- `scripts/vertical_3d.py`
+  - 3D object build + 轻量 3-5 anchor tracking
+- `scripts/advection_review.py`
+  - 平流代表性 / 落地性 review
+  - 当前核心状态：
+    - `thermal_advection_state`
+    - `transport_state`
+    - `surface_coupling_state`
+    - `surface_role`
+- 诊断层：
+  - `scripts/diagnostics_500.py`
+  - `scripts/diagnostics_700.py`
+  - `scripts/diagnostics_925.py`
+  - `scripts/diagnostics_sounding.py`
 
-### E. Realtime Gate + Renderer
-- `scripts/realtime_pipeline.py`
-  - far/near/in/post window 相位判定
-  - 触发器筛选
-- `scripts/temperature_window_resolver.py`
-  - 预报峰值窗与实时观测之间的仲裁层
-  - 把“模型主窗”与“实况已出现的平台/已观测峰值”统一成单一 `resolved_window`
-  - 当前覆盖两类重锚：
-    - `obs_peak_reanchor`：实况峰值显著高于模型峰值
-    - `obs_plateau_reanchor`：模型晚段尾部偏晚，但站点已到常见峰值时段且实况横盘守高
-  - 额外消费 `temperature_shape_analysis`：
-    - `forecast_multi_peak_state` 用于区分“真多峰”与“晚段尾部”
-    - `observed_plateau_state` 用于识别“前高附近已持续横盘”的长平台
-  - 目标：避免把“晚间模型尾部”继续透传到温度区间与相位文案
+### D. Realtime / Analysis Layer
+
 - `scripts/temperature_shape_analysis.py`
-  - 温度形态层（forecast curve shape + observed near-peak hold）
-  - 明确拆分：
-    - `shape_type`：`single_peak / multi_peak / plateau_peak / broad_plateau`
-    - `multi_peak_state`：只在存在分离峰谷时才升到 `possible/likely`
-    - `plateau_state`：识别“峰值附近宽平台”，避免把平台误写成二峰
-    - `observed.plateau_state`：识别“前高附近持续横盘/守高”
-  - 输出统一供 `hourly_data_service`、`temperature_window_resolver`、`temperature_phase_decision` 复用
-- `scripts/boundary_layer_regime.py`
-  - 边界层/静稳主导判定层
-  - 统一输出：
-    - `boundary_layer_clearing / static_stable / mixing_depth / advection / synoptic`
-    - `dominant_question`（散云题 / 静稳题 / 混合题 / 输送题 / 环流题）
-    - `layer_summary`（把实测或模式 proxy 层结翻成正文）
-  - 同时承载 `model_proxy` 剖面：
-    - 无实测探空时，不再让 sounding 维度整体空白
-    - 用 METAR + 925/700 代理 + 低云/弱风/温露差信号补出低层稳层/混合/中层湿干判断
+  - 区分单峰、多峰、平台峰、宽平台
+- `scripts/temperature_window_resolver.py`
+  - 模型峰值窗与实况窗口重锚
 - `scripts/temperature_phase_decision.py`
-  - 实时温度相位决策层
-  - 明确拆分：
-    - `short_term_state`：未来 1-2 报的再冲/转弱判断
-    - `daily_peak_state`：全天最高温是否允许提高到“已锁定”语气
-    - `second_peak_potential`：是否保留白天二峰/回摸前高空间
-    - `rebound_mode`：`second_peak / retest / none`，区分“真二峰”与“高位平台/回摸前高”
-    - `dominant_shape`：`single_peak / single_peak_tail / peak_plateau / retest / tail_oscillation / multi_peak_watch`
-    - `should_discuss_second_peak`：只有“二峰议题真实存在”时才允许正文显式提二峰
-  - 结合站点历史先验（如 `late_peak_share` / `cloud_break_day_share`）与实时云雨/风场，避免把“早峰后回落”直接写成“全天封顶”
-- `scripts/report_render_service.py::choose_section_text`
-  - 报告输出协议：
-    - 环流背景（主导/次级/关键证据/探空提示）
-    - 主导机制 / 层结-模式剖面结论
-    - METAR
-    - 最高温主带 + 条件尾部
-    - 关注变量
-    - Polymarket
-- `scripts/report_peak_module.py`
-  - 最高温区间计算与尾部约束逻辑（从渲染编排层拆出，便于独立迭代）。
+  - `short_term_state / daily_peak_state / second_peak_potential`
+- `scripts/boundary_layer_regime.py`
+  - 主导机制、层结摘要、关注变量跟踪线
+  - 当前正式机制字段：`dominant_mechanism`
+  - `dominant_question` 仅作为兼容别名保留
+- `scripts/synoptic_summary_service.py`
+  - 结构化环流摘要
+- `scripts/peak_range_service.py`
+  - 结构化峰值区间分析 + 峰值区间文本块
 
-### F. Parameter Store（学习友好层）
-- `scripts/param_store.py`
-  - 统一加载可学习参数（带默认值 + 热更新缓存）
-- `config/tmax_learning_params.json`
-  - 多层云量映射/层权重
-  - wx 透过率
-  - rounded-top 阈值（斜率/加速度/太阳几何/辐射恢复）
-- 目的：将“经验常量”外置，便于历史回放学习后直接更新配置。
+### E. Snapshot / Render Layer
 
----
+- `scripts/analysis_snapshot_service.py`
+  - 汇总当前主要结构化分析结果
+  - 当前 schema：`analysis-snapshot.v2`
+- `scripts/report_render_service.py`
+  - 只负责把 snapshot 和 report evidence 转成正文
+- `scripts/metar_analysis_service.py`
+  - 实况诊断与 METAR block
+- `scripts/polymarket_render_service.py`
+  - 盘口解释与展示
+- `scripts/market_label_policy.py`
+  - 市场标签策略
 
-## 2) 当前数据策略（已对齐）
+## 2) 当前数据策略
 
-- 小时预报：`open-meteo` 优先
-- 3D 场：`gfs-grib2` 优先
-- 分析基准模型默认显示：`GFS`
-- 手动 `model/provider` 参数：当前不对外支持
+- 小时预报：
+  - `open-meteo` 继续保留为轻量 primary，用于日内窗口识别与参考
+- 3D 背景：
+  - `ecmwf-open-data` default
+  - `gfs-grib2` fallback
+- 最终降级：
+  - 若 forecast/synoptic 都不可用，则允许退到 `METAR-only`
 
----
+这意味着：
 
-## 3) 缓存与存储结构
+- 小时曲线与 3D 背景当前并非同源
+- 但 3D 背景的默认源已不再是 GFS
+- 文档和用户可见头部必须以“实际使用 provider / runtime”为准，而不是旧的“分析基准模型: GFS”
 
-### Runtime JSON 缓存
-- `cache/runtime/hourly_*.json`
-- `cache/runtime/hourly_gfs_*.json`
-- `cache/runtime/forecast_decision_*.json`（v4）
-- `cache/runtime/forecast_3d_bundle_*.json`（v1）
-- `cache/runtime/synoptic_*.json`
+## 3) 运行时契约
 
-> 统一 envelope：`runtime-cache.v1`
-> - `cache_schema_version`
-> - `updated_at`
-> - `source_state`
-> - `payload_schema_version`
-> - `payload`
+集中版本常量在 `scripts/contracts.py`：
 
-### Binary 缓存
-- `cache/runtime/gfs_grib/*.grib2`
+- `forecast-decision.v8`
+- `forecast-3d-bundle.v2`
+- `objects-3d.v2`
+- `analysis-snapshot.v2`
+- `synoptic-cache.v3`
 
-### 核心契约
-- `DECISION_SCHEMA.md`：`forecast-decision.v4`
-- `FORECAST_3D_STORAGE.md`：key 规则、bundle/synoptic cache 说明
+运行时缓存 envelope 统一由 `runtime-cache.v1` 包裹。
 
----
+## 4) 当前结构优点
 
-## 4) 已修复的版本/契约冲突
+1. 3D provider 已从单一 GFS 改成 router 模式，默认 ECMWF，更利于后续多模型扩展。
+2. `analysis_snapshot_service.py` 已建立结构化 handoff，报告层不再是唯一逻辑中心。
+3. `peak_range_service.py` 和 `synoptic_summary_service.py` 已把一部分“边渲染边推理”逻辑收回分析层。
+4. `vertical_3d.py` 已具备基础 tracking 能力，不再只是静态单帧 object 摘要。
 
-1. 决策 schema 文档从 v2 升级到 v4（与代码一致）
-2. 3D 存储文档 key 规则更新为 provider-aware（与代码一致）
-3. 新增集中版本常量：`scripts/contracts.py`
-   - `forecast-decision.v4`
-   - `forecast-3d-bundle.v1`
-   - `objects-3d.v1`
-   - `synoptic-cache.v2`
-4. `synoptic_runner` cache key 纳入 provider + cache schema version，避免跨 provider 缓存串用
+## 5) 当前仍需继续收口的问题
 
----
+1. 缺少正式的 `canonical_raw_state`
+   - provider 原始状态仍然分散在 hourly / synoptic / metar / sounding 多条链
+2. 缺少独立的 `posterior_feature_vector`
+   - 当前 `analysis_snapshot` 仍混有部分面向报告的字段
+3. `report_render_service.py` 仍有 fallback 推理
+   - 目标仍应是“render consumes analysis”, 而不是“render retries analysis”
+4. `peak_range_service.py` 已成为新的复杂度热点
+   - 后续建议拆成：
+     - peak posterior / range computation
+     - peak text render
+5. 3D tracking 仍是轻量 heuristic
+   - 目前能区分 `approaching / receding / passing / steady`
+   - 还不等于完整的 split/merge/trajectory solver
 
-## 5) 数据获取 / 存储优化空间（review 结论）
+## 6) 关联文档
 
-### 高优先级
-1. **统一 cache metadata envelope**
-   - 现状：hourly/forecast/synoptic wrapper 格式不完全一致
-   - 建议：统一 `updated_at/schema_version/payload/source_state`
-
-2. **gfs_grib 二进制缓存生命周期管理**
-   - 现状：JSON 会 prune，grib 文件未统一 prune
-   - 建议：加独立保留窗口（24~48h）与大小上限
-
-3. **anchor 级错误遥测结构化**
-   - 现状：字符串错误为主
-   - 建议：记录 `{anchor, stage(build|detect), error_type(429/404/timeout), provider}`
-
-### 中优先级
-4. **gfs parser 去 subprocess 化（后续）**
-   - 现状：runner 主链路已去 subprocess；但 gfs grib 解析仍通过独立 python 进程调用 `.venv_gfs`
-   - 目标：减少跨进程开销并统一异常栈
-
-5. **缓存键标准化 helper**
-   - 目标：hourly/synoptic/decision 使用统一 key builder，减少重复/漂移
-
-6. **数据质量分级输出标准化**
-   - 输出层统一使用 `fresh | cache-hit | fallback-cache | degraded`
-
----
-
-## 6) 输出层原则（固定）
-
-- 结论优先，不堆砌原始变量
-- 保留可解释证据（2~3 条）
-- 主带与尾部分离（避免混淆概率层级）
-- 探空因子融入环流背景，不单独“技术块堆参数”
-
----
-
-## 7) 当前已知边界
-
-- Open-Meteo 429 具外部不确定性，只能缓解不能消除
-- NOMADS 新 cycle 发布时可能暂时 404，已通过 cycle fallback 缓解
-- sounding thermo 目前以可用字段为主，完整本地 profile solver 仍可继续增强
-
-## 8) 历史学习与在线更新
-
-- 设计目标：参数可由历史回放学习驱动，而非长期手工硬编码。
-- 当前基础：参数层已配置化（`config/tmax_learning_params.json` + `scripts/param_store.py`）。
-- 详细路线图：见 `HISTORICAL_LEARNING_ARCHITECTURE.md`。
+- 当前运行时契约与输出约束：
+  - [DECISION_SCHEMA.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/DECISION_SCHEMA.md)
+  - [FORECAST_3D_STORAGE.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/FORECAST_3D_STORAGE.md)
+  - [LOOK_OUTPUT_CONTRACT.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/LOOK_OUTPUT_CONTRACT.md)
+- 目标版 weather/market/research 分层：
+  - [TARGET_ARCHITECTURE.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/TARGET_ARCHITECTURE.md)

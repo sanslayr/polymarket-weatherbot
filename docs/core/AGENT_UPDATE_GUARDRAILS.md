@@ -1,6 +1,6 @@
 # Agent 更新约束（架构护栏）
 
-Last updated: 2026-03-03
+Last updated: 2026-03-09
 
 目标：避免后续迭代再次把补丁集中灌入 `telegram_report_cli.py`，导致新旧堆砌/职责混杂。
 
@@ -26,10 +26,14 @@ Last updated: 2026-03-03
   - METAR 抓取与通用量化区间工具（`fetch_metar_24h`、observed-max interval 口径）。
 - `scripts/metar_analysis_service.py`
   - METAR 实况诊断特征提取与“实况分析”文本渲染（温度/云量/SPECI/量化区间等）。
+- `scripts/analysis_snapshot_service.py`
+  - 结构化分析快照组装，作为 render 的主输入。
+- `scripts/synoptic_summary_service.py`
+  - 结构化环流摘要，不应再由渲染层重算。
 - `scripts/report_render_service.py`
-  - `/look` 主体分段渲染（环流背景、主带/尾部、关注变量、盘口段落整合）。
-- `scripts/report_peak_module.py`
-  - 最高温主带/尾部区间计算与 post-window 锁高约束（纯计算模块）。
+  - `/look` 主体分段渲染（不承载核心推理）。
+- `scripts/peak_range_service.py`
+  - 最高温主带/尾部区间分析与文本块渲染。
 
 ## 2) 变更路由规则（必须遵守）
 - 改命令解析/参数兼容 → 改 `look_command.py`
@@ -40,8 +44,10 @@ Last updated: 2026-03-03
 - 改小时预报抓取/回退/缓存/窗口识别 → 改 `hourly_data_service.py`
 - 改 METAR 抓取与观测量化区间口径工具 → 改 `metar_utils.py`
 - 改 METAR 实况诊断特征/诊断文本 → 改 `metar_analysis_service.py`
+- 改 analysis snapshot contract / 字段归并 → 改 `analysis_snapshot_service.py`
+- 改环流摘要结构化生成 → 改 `synoptic_summary_service.py`
 - 改报告分段渲染策略（非数据抓取）→ 改 `report_render_service.py`
-- 改最高温区间计算/尾部约束规则 → 改 `report_peak_module.py`
+- 改最高温区间分析/历史参考融合/尾注约束 → 改 `peak_range_service.py`
 - 改环流锚点/覆盖率/降级策略 → 改 `forecast_pipeline.py` / `synoptic_runner.py`
 - 只有“跨模块编排与最终文案”才允许改 `telegram_report_cli.py`
 
@@ -57,10 +63,10 @@ Last updated: 2026-03-03
 ## 5) 文件体积与函数体积上限（新增）
 - 目标：避免“单文件继续膨胀”导致后续迭代困难。
 - 建议上限（软红线）：
-  - `scripts/telegram_report_cli.py`：≤ 700 行
+  - `scripts/telegram_report_cli.py`：≤ 900 行
   - `scripts/report_render_service.py`：≤ 1800 行
-  - `scripts/report_peak_module.py`：≤ 1400 行
-  - `scripts/metar_analysis_service.py`：≤ 1000 行
+  - `scripts/peak_range_service.py`：≤ 2000 行
+  - `scripts/metar_analysis_service.py`：≤ 1400 行
   - `scripts/polymarket_render_service.py`：≤ 900 行
 - 函数体积（软红线）：
   - 单函数 > 400 行时，必须拆为私有 helper（同文件或同层模块）。

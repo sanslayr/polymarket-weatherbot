@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from advection_review import has_surface_advection_signal
 from condition_state import build_live_condition_signals
 from historical_context_provider import get_station_prior
 from realtime_pipeline import classify_window_phase
@@ -41,6 +42,7 @@ def build_temperature_phase_decision(
     metar_diag: dict[str, Any],
     *,
     line850: str = "",
+    advection_review: dict[str, Any] | None = None,
     station_icao: str | None = None,
     temp_shape_analysis: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -117,8 +119,8 @@ def build_temperature_phase_decision(
     )
     precip_easing = precip_trend in {"weaken", "end"}
 
-    warm_advection = ("暖平流" in str(line850)) and ("冷平流" not in str(line850))
-    cold_advection = ("冷平流" in str(line850)) and ("暖平流" not in str(line850))
+    warm_advection = has_surface_advection_signal(advection_review, bias="warm", line850=line850, min_weight=0.28)
+    cold_advection = has_surface_advection_signal(advection_review, bias="cold", line850=line850, min_weight=0.28)
 
     if temp_trend_c >= 0.3 and (cloud_opening or precip_easing or warm_advection):
         short_term_state = "reaccelerating"

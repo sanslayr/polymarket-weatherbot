@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from station_catalog import common_alias_examples, supported_station_labels
+
 
 def render_look_help() -> str:
+    alias_text = " / ".join(common_alias_examples())
+    station_text = " / ".join(supported_station_labels())
     return (
         "📘 /look 用法\n"
         "- /look <城市或机场代码> [YYYY-MM-DD 或 YYYYMMDD]\n"
         "- 示例：/look ank | /look London | /look par 20260307\n"
-        "\n支持城市（示例）：ank / lon / par / nyc / chi / dal / mia / atl / sea / tor / sel / ba / wel\n"
-        "提示：统一单条最终报告输出，不发送预告消息。"
+        f"- 常用别名：{alias_text}\n"
+        f"- 支持站点：{station_text}"
     )
 
 

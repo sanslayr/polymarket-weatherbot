@@ -93,6 +93,7 @@ def build_condition_context(
     line850 = str(bg.get("line_850") or "低层输送信号一般。")
     extra = str(bg.get("extra") or "")
     h500_feature = dict((((fdec.get("features") or {}).get("h500") or {}) if isinstance(fdec, dict) else {}) or {})
+    advection_review = dict((((fdec.get("features") or {}).get("h850") or {}).get("review") if isinstance(fdec, dict) else {}) or {})
     h700_summary = str((((fdec.get("features") or {}).get("h700") or {}).get("summary") if isinstance(fdec, dict) else "") or "")
     h925_summary = str((((fdec.get("features") or {}).get("h925") or {}).get("summary") if isinstance(fdec, dict) else "") or "")
     snd_thermo = ((((fdec.get("features") or {}).get("sounding") or {}).get("thermo") if isinstance(fdec, dict) else None) or {})
@@ -137,6 +138,7 @@ def build_condition_context(
         "line850": line850,
         "extra": extra,
         "h500_feature": h500_feature,
+        "advection_review": advection_review,
         "h700_summary": h700_summary,
         "h925_summary": h925_summary,
         "snd_thermo": snd_thermo,

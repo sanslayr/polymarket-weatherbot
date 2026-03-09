@@ -357,6 +357,9 @@ def _derive_layer_metrics(levels: dict[str, dict[str, float] | None]) -> dict[st
     rh700 = _gf(lv700, "rh_pct")
     t925 = _gf(lv925, "temp_c")
     t850 = _gf(lv850, "temp_c")
+    d925 = _gf(lv925, "wind_dir_deg")
+    d850 = _gf(lv850, "wind_dir_deg")
+    d700 = _gf(lv700, "wind_dir_deg")
     w925 = _gf(lv925, "wind_kt")
     w850 = _gf(lv850, "wind_kt")
     w700 = _gf(lv700, "wind_kt")
@@ -413,6 +416,9 @@ def _derive_layer_metrics(levels: dict[str, dict[str, float] | None]) -> dict[st
         "rh700_pct": rh700,
         "t925_t850_c": t925_850,
         "midlevel_rh_pct": mid_rh,
+        "wind925_dir_deg": d925,
+        "wind850_dir_deg": d850,
+        "wind700_dir_deg": d700,
         "wind925_kt": w925,
         "wind850_kt": w850,
         "wind700_kt": w700,

@@ -8,7 +8,7 @@ import requests
 from hourly_data_service import model_cycle_tag
 from metar_utils import metar_obs_time_utc
 
-REPORT_RESULT_VERSION = "look-report-v2026-03-07-1"
+REPORT_RESULT_VERSION = "look-report-v2026-03-09-6"
 
 
 def build_cached_result_meta(*, icao: str, model: str, metar24: list[dict[str, Any]] | None) -> dict[str, Any]:
@@ -52,7 +52,7 @@ def build_unchanged_notice(
 
     return (
         f"♻️ 已查询过 {query_label}；METAR 无更新，预报无需重拉。"
-        f"请查看上一条 /look 结果（{_format_age_since_generated(payload)}前生成）。"
+        f"请查看上一次该站点日期的 /look 结果（{_format_age_since_generated(payload)}前生成）。"
     )
 
 

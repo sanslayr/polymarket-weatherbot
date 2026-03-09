@@ -13,13 +13,14 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Callable
 
+from advection_review import build_850_advection_review
 from diagnostics_500 import diagnose_500hpa
 from diagnostics_700 import diagnose_700
-from diagnostics_850 import advection_eta_local, distance_km_from_system
 from diagnostics_925 import diagnose_925
 from diagnostics_sounding import diagnose_sounding
 from sounding_obs_service import build_sounding_obs_context
-from synoptic_regime import advection_reach_score, classify_large_scale_regime
+from station_catalog import terrain_tag_for
+from synoptic_regime import classify_large_scale_regime
 from vertical_3d import build_3d_objects
 from contracts import (
     FORECAST_DECISION_SCHEMA_VERSION,
@@ -98,6 +99,8 @@ def _read_recent_synoptic_bundle(*, station_icao: str, target_date: str, model: 
             doc = json.loads(Path(p).read_text(encoding="utf-8"))
         except Exception:
             continue
+        if str(doc.get("schema_version") or "") != FORECAST_3D_BUNDLE_SCHEMA_VERSION:
+            continue
         if str(doc.get("station") or "") != station_icao:
             continue
         if str(doc.get("date") or "") != target_date:
@@ -123,7 +126,10 @@ def _read_recent_synoptic_bundle(*, station_icao: str, target_date: str, model: 
     if (datetime.now(timezone.utc) - ts) > timedelta(hours=max_age_hours):
         return None
     try:
-        return _merge_synoptic_payloads(best.get("slices") or [])
+        merged = _merge_synoptic_payloads(best.get("slices") or [])
+        merged["_provider_requested"] = str(best.get("synoptic_provider") or synoptic_provider or "")
+        merged["_provider_used"] = str(best.get("synoptic_provider_used") or best.get("synoptic_provider") or synoptic_provider or "")
+        return merged
     except Exception:
         return None
 
@@ -180,88 +186,6 @@ def _build_500_background_line(diag500: dict[str, Any] | None) -> str:
     return "；".join(parts) + "。"
 
 
-def _estimate_advection_eta_hours(distance_km: float | None, score: float, w850_kmh: float | None) -> tuple[float, float]:
-    if distance_km is None or distance_km <= 0:
-        return (0.0, 0.0)
-    base_speed = max(18.0, (w850_kmh or 30.0) * 0.55)
-    center = distance_km / base_speed
-    spread = max(1.0, 4.0 - 2.5 * score)
-    lo = max(0.0, center - spread)
-    hi = max(lo + 0.5, center + spread)
-    return (lo, hi)
-
-
-def _window_dt_bounds(primary_window: dict[str, Any], fallback_now: datetime) -> tuple[datetime, datetime]:
-    start_txt = str(primary_window.get("start_local") or "")
-    end_txt = str(primary_window.get("end_local") or "")
-    try:
-        start_dt = datetime.strptime(start_txt, "%Y-%m-%dT%H:%M")
-    except Exception:
-        start_dt = fallback_now
-    try:
-        end_dt = datetime.strptime(end_txt, "%Y-%m-%dT%H:%M")
-    except Exception:
-        end_dt = start_dt
-    if fallback_now.tzinfo is not None:
-        if start_dt.tzinfo is None:
-            start_dt = start_dt.replace(tzinfo=fallback_now.tzinfo)
-        if end_dt.tzinfo is None:
-            end_dt = end_dt.replace(tzinfo=fallback_now.tzinfo)
-    if end_dt < start_dt:
-        end_dt = start_dt
-    return start_dt, end_dt
-
-
-def _select_850_advection_system(
-    systems: list[dict[str, Any]],
-    *,
-    now_local: datetime,
-    primary_window: dict[str, Any],
-    w850_kmh: float | None,
-) -> tuple[dict[str, Any] | None, float | None, str]:
-    if not systems:
-        return None, None, ""
-
-    window_start, window_end = _window_dt_bounds(primary_window, now_local)
-    window_mid = window_start + (window_end - window_start) / 2
-    best_system: dict[str, Any] | None = None
-    best_score: float | None = None
-    best_tag = ""
-
-    for system in systems:
-        reach_score, _ = advection_reach_score(system, w850_kmh)
-        distance_km = distance_km_from_system(system)
-        eta_lo_h, eta_hi_h = _estimate_advection_eta_hours(distance_km, reach_score, w850_kmh)
-        impact_start = now_local + timedelta(hours=eta_lo_h)
-        impact_end = now_local + timedelta(hours=eta_hi_h)
-
-        overlap = not (impact_end < (window_start - timedelta(hours=1.0)) or impact_start > (window_end + timedelta(hours=1.0)))
-        window_distance_h = abs(((impact_start + (impact_end - impact_start) / 2) - window_mid).total_seconds()) / 3600.0
-
-        ranking = reach_score * 1.2
-        tag = "窗口外"
-        if overlap:
-            ranking += 0.8
-            tag = "窗口期内"
-        elif window_distance_h <= 2.5:
-            ranking += 0.45
-            tag = "窗口期附近"
-        elif impact_start > window_end:
-            tag = "偏后段"
-        else:
-            tag = "偏前段"
-
-        if distance_km is not None:
-            ranking -= min(distance_km / 4000.0, 0.25)
-
-        if best_score is None or ranking > best_score:
-            best_system = system
-            best_score = ranking
-            best_tag = tag
-
-    return best_system, best_score, best_tag
-
-
 def build_forecast_decision(
     *,
     station: Any,
@@ -302,23 +226,15 @@ def build_forecast_decision(
     pva500 = str(diag500.get("pva_proxy") or "中性")
 
     syn_systems = ((synoptic.get("scale_summary", {}) if isinstance(synoptic, dict) else {}).get("synoptic", {}) or {}).get("systems", [])
-    w850 = primary_window.get("w850_kmh")
     advec = [s for s in syn_systems if "advection" in str(s.get("system_type", ""))]
-    advec_txt = "低层输送信号一般"
-    if advec:
-        a, ranking, window_tag = _select_850_advection_system(
-            advec,
-            now_local=now_local,
-            primary_window=primary_window,
-            w850_kmh=w850,
-        )
-        if a is None:
-            a = advec[0]
-        score, lvl = advection_reach_score(a, w850)
-        eta_txt = advection_eta_local(now_local, distance_km_from_system(a), score, w850)
-        advec_type = "暖平流" if "warm" in str(a.get("system_type", "")) else "冷平流"
-        qual = window_tag or ("窗口期附近" if (ranking or 0.0) >= 1.4 else "远离窗口")
-        advec_txt = f"{advec_type}{qual}（{score:.2f}，{eta_txt}）"
+    advection_review = build_850_advection_review(
+        advec,
+        now_local=now_local,
+        primary_window=primary_window,
+        h925_summary=str(diag925.get("summary") or ""),
+        terrain_tag=str(terrain_tag_for(str(getattr(station, "icao", ""))) or ""),
+    )
+    advec_txt = str(advection_review.get("summary_line") or "低层输送信号一般。")
 
     try:
         start_dt = datetime.strptime(str(primary_window.get("start_local")), "%Y-%m-%dT%H:%M")
@@ -429,6 +345,7 @@ def build_forecast_decision(
             },
             "h850": {
                 "advection": advec_txt,
+                "review": advection_review,
             },
             "h700": {
                 "summary": s700,
@@ -604,22 +521,99 @@ def _select_outer500_anchor_locals(
 
 
 def _merge_synoptic_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
-    merged = {"scale_summary": {"synoptic": {"systems": []}}}
+    merged = {
+        "scale_summary": {"synoptic": {"systems": []}},
+        "anchor_slices": [],
+        "anchor_count": 0,
+        "_provider_requested": "",
+        "_provider_used": "",
+    }
     out = merged["scale_summary"]["synoptic"]["systems"]
-    seen: set[tuple[str, str, int, int]] = set()
-    for p in payloads:
-        systems = ((p.get("scale_summary") or {}).get("synoptic") or {}).get("systems") or []
-        for s in systems:
-            key = (
-                str(s.get("level") or ""),
-                str(s.get("system_type") or ""),
-                int(round(float(s.get("center_lat") or 0.0) * 10)),
-                int(round(float(s.get("center_lon") or 0.0) * 10)),
+    seen_global: set[tuple[str, str, int, int]] = set()
+    slices_by_time: dict[str, dict[str, Any]] = {}
+    legacy_slices: list[dict[str, Any]] = []
+    provider_requested = ""
+    provider_used = ""
+
+    def _system_key(system: dict[str, Any]) -> tuple[str, str, int, int]:
+        return (
+            str(system.get("level") or ""),
+            str(system.get("system_type") or ""),
+            int(round(float(system.get("center_lat") or 0.0) * 10)),
+            int(round(float(system.get("center_lon") or 0.0) * 10)),
+        )
+
+    def _append_global(system: dict[str, Any]) -> None:
+        key = _system_key(system)
+        if key in seen_global:
+            return
+        seen_global.add(key)
+        out.append(system)
+
+    for idx, payload in enumerate(payloads):
+        if not provider_requested:
+            provider_requested = str(payload.get("_provider_requested") or "")
+        if not provider_used:
+            provider_used = str(payload.get("_provider_used") or "")
+        systems = ((payload.get("scale_summary") or {}).get("synoptic") or {}).get("systems") or []
+        analysis_time_utc = str(payload.get("analysis_time_utc") or "").strip()
+        analysis_time_local = str(payload.get("analysis_time_local") or "").strip()
+        slice_doc: dict[str, Any] | None = None
+        if analysis_time_utc:
+            slice_doc = slices_by_time.setdefault(
+                analysis_time_utc,
+                {
+                    "analysis_time_utc": analysis_time_utc,
+                    "analysis_time_local": analysis_time_local,
+                    "systems": [],
+                },
             )
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(s)
+            if analysis_time_local and not slice_doc.get("analysis_time_local"):
+                slice_doc["analysis_time_local"] = analysis_time_local
+        elif systems:
+            slice_doc = {
+                "analysis_time_utc": "",
+                "analysis_time_local": analysis_time_local,
+                "systems": [],
+                "_legacy_index": idx,
+            }
+            legacy_slices.append(slice_doc)
+
+        if slice_doc is not None:
+            seen_local = {
+                _system_key(system)
+                for system in (slice_doc.get("systems") or [])
+                if isinstance(system, dict)
+            }
+            for system in systems:
+                if not isinstance(system, dict):
+                    continue
+                key = _system_key(system)
+                if key not in seen_local:
+                    slice_doc["systems"].append(system)
+                    seen_local.add(key)
+                _append_global(system)
+        else:
+            for system in systems:
+                if isinstance(system, dict):
+                    _append_global(system)
+
+    ordered_slices = list(slices_by_time.values())
+    try:
+        ordered_slices.sort(key=lambda item: datetime.fromisoformat(str(item.get("analysis_time_utc") or "").replace("Z", "+00:00")))
+    except Exception:
+        ordered_slices.sort(key=lambda item: str(item.get("analysis_time_utc") or ""))
+    ordered_slices.extend(sorted(legacy_slices, key=lambda item: int(item.get("_legacy_index") or 0)))
+
+    for slice_doc in ordered_slices:
+        if "_legacy_index" in slice_doc:
+            slice_doc = dict(slice_doc)
+            slice_doc.pop("_legacy_index", None)
+        merged["anchor_slices"].append(slice_doc)
+
+    merged["anchor_count"] = len(merged["anchor_slices"])
+    merged["_provider_requested"] = provider_requested
+    merged["_provider_used"] = provider_used or provider_requested
     return merged
 
 
@@ -660,6 +654,7 @@ def load_or_build_forecast_decision(
     force_rebuild = str(os.getenv("FORECAST_FORCE_REBUILD", "0") or "0") in {"1", "true", "yes", "on"}
 
     synoptic = {"scale_summary": {"synoptic": {"systems": []}}}
+    actual_synoptic_provider = str(synoptic_provider or "")
     if cached and (not force_rebuild):
         try:
             cached.setdefault("quality", {})["source_state"] = "cache-hit"
@@ -763,6 +758,7 @@ def load_or_build_forecast_decision(
 
     if syn_payloads:
         synoptic = _merge_synoptic_payloads(syn_payloads)
+        actual_synoptic_provider = str(synoptic.get("_provider_used") or synoptic_provider or "")
         try:
             _write_3d_bundle(
                 {
@@ -771,6 +767,7 @@ def load_or_build_forecast_decision(
                     "date": target_date,
                     "model": model,
                     "synoptic_provider": synoptic_provider,
+                    "synoptic_provider_used": actual_synoptic_provider,
                     "synoptic_pass_strategy": strategy,
                     "runtime": runtime,
                     "anchors_local": anchor_locals,
@@ -791,6 +788,7 @@ def load_or_build_forecast_decision(
         )
         if fallback_syn:
             synoptic = fallback_syn
+            actual_synoptic_provider = str(fallback_syn.get("_provider_used") or synoptic_provider or "")
             synoptic_from_fallback = True
             if perf_log:
                 perf_log("forecast.synoptic_fallback_cache", 0.0)
@@ -801,7 +799,7 @@ def load_or_build_forecast_decision(
         station=station,
         target_date=target_date,
         model=model,
-        synoptic_provider=synoptic_provider,
+        synoptic_provider=actual_synoptic_provider,
         now_utc=now_utc,
         now_local=now_local,
         station_lat=station_lat,
@@ -819,6 +817,21 @@ def load_or_build_forecast_decision(
     q["synoptic_anchors_ok"] = ok_anchors
     q["synoptic_coverage"] = round(coverage, 3)
     q["synoptic_pass_strategy"] = strategy
+    q["synoptic_provider_requested"] = str(synoptic_provider or "")
+    q["synoptic_provider_used"] = str(actual_synoptic_provider or synoptic_provider or "")
+    for key in (
+        "analysis_runtime_used",
+        "analysis_fh_used",
+        "analysis_stream_used",
+        "previous_runtime_used",
+        "previous_fh_used",
+        "previous_stream_used",
+    ):
+        value = synoptic.get(key)
+        if value not in (None, "", [], {}):
+            q[f"synoptic_{key}"] = value
+    if q["synoptic_provider_requested"] != q["synoptic_provider_used"]:
+        q["synoptic_provider_fallback"] = True
 
     if anchor_telemetry:
         q["synoptic_anchor_events"] = anchor_telemetry

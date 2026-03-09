@@ -49,8 +49,8 @@ def _download_grib(path: Path, url: str) -> None:
 
 def _repo_root(root: Path) -> Path:
     candidates = [
-        root,
         root / "skills" / "polymarket-weatherbot",
+        root,
         Path(__file__).resolve().parent.parent,
     ]
     for candidate in candidates:
@@ -168,7 +168,7 @@ def _nomads_grid_url(
         vars_part = "&var_HGT=on&var_UGRD=on"
     else:
         levels = "&lev_500_mb=on&lev_700_mb=on&lev_850_mb=on&lev_925_mb=on&lev_mean_sea_level=on"
-        vars_part = "&var_HGT=on&var_TMP=on&var_UGRD=on&var_VGRD=on&var_PRMSL=on"
+        vars_part = "&var_HGT=on&var_TMP=on&var_UGRD=on&var_VGRD=on&var_RH=on&var_PRMSL=on"
     q = (
         f"file={file}"
         f"{levels}"
@@ -342,16 +342,19 @@ t8 = level_slice(da['t'], 850.0)
 if np.nanmean(t8) > 170: t8 = t8 - 273.15
 u8 = level_slice(da['u'], 850.0)
 v8 = level_slice(da['v'], 850.0)
+r8 = level_slice(da['r'], 850.0)
 
 t7 = level_slice(da['t'], 700.0)
 if np.nanmean(t7) > 170: t7 = t7 - 273.15
 u7 = level_slice(da['u'], 700.0)
 v7 = level_slice(da['v'], 700.0)
+r7 = level_slice(da['r'], 700.0)
 
 t925 = level_slice(da['t'], 925.0)
 if np.nanmean(t925) > 170: t925 = t925 - 273.15
 u925 = level_slice(da['u'], 925.0)
 v925 = level_slice(da['v'], 925.0)
+r925 = level_slice(da['r'], 925.0)
 
 lat = np.asarray(da['latitude'].values).tolist()
 lon = np.asarray(da['longitude'].values).tolist()
@@ -364,12 +367,15 @@ out = {
     't850_c': t8.tolist(),
     'u850_ms': u8.tolist(),
     'v850_ms': v8.tolist(),
+    'rh850_pct': r8.tolist(),
     't700_c': t7.tolist(),
     'u700_ms': u7.tolist(),
     'v700_ms': v7.tolist(),
+    'rh700_pct': r7.tolist(),
     't925_c': t925.tolist(),
     'u925_ms': u925.tolist(),
     'v925_ms': v925.tolist(),
+    'rh925_pct': r925.tolist(),
   },
   'previous_fields': {
     'mslp_hpa': prp.tolist(),

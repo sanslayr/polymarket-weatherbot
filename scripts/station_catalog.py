@@ -10,17 +10,29 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_STATION_CSV = ROOT / "station_links.csv"
 
 CITY_ALIASES = {
-    "nyc": "new york",
-    "newyork": "new york",
-    "la": "los angeles",
-    "sao": "sao paulo",
-    "saopaulo": "sao paulo",
-    "bue": "buenos aires",
+    "ank": "ankara",
+    "atl": "atlanta",
     "ba": "buenos aires",
+    "bue": "buenos aires",
     "buenos": "buenos aires",
     "buenosaires": "buenos aires",
+    "chi": "chicago",
+    "dal": "dallas",
+    "lon": "london",
+    "lko": "lucknow",
+    "mia": "miami",
+    "mun": "munich",
+    "nyc": "new york",
+    "newyork": "new york",
+    "par": "paris",
+    "sao": "sao paulo",
+    "saopaulo": "sao paulo",
+    "sea": "seattle",
+    "seo": "seoul",
+    "sel": "seoul",
     "seoul": "seoul",
-    "ank": "ankara",
+    "tor": "toronto",
+    "wel": "wellington",
 }
 
 STATION_TZ = {
@@ -56,6 +68,11 @@ class Station:
     lon: float
 
 
+def _load_station_rows(station_csv: Path = DEFAULT_STATION_CSV) -> list[dict[str, str]]:
+    with station_csv.open(newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
 def norm_text(s: str) -> str:
     return "".join(ch for ch in s.strip().lower() if ch.isalnum())
 
@@ -64,8 +81,7 @@ def resolve_station(station_hint: str, station_csv: Path = DEFAULT_STATION_CSV) 
     raw = station_hint.strip().lower()
     key = CITY_ALIASES.get(raw, raw)
     key_norm = norm_text(key)
-    with station_csv.open(newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+    rows = _load_station_rows(station_csv)
 
     def as_station(row: dict[str, str]) -> Station:
         return Station(
@@ -110,6 +126,42 @@ def resolve_station(station_hint: str, station_csv: Path = DEFAULT_STATION_CSV) 
     raise ValueError(f"Unknown station/city: {station_hint}")
 
 
+def supported_station_labels(station_csv: Path = DEFAULT_STATION_CSV) -> list[str]:
+    rows = _load_station_rows(station_csv)
+    labels = [f"{str(row.get('city') or '').strip()}({str(row.get('icao') or '').strip().upper()})" for row in rows]
+    return sorted(labels)
+
+
+def common_alias_examples(station_csv: Path = DEFAULT_STATION_CSV) -> list[str]:
+    rows = _load_station_rows(station_csv)
+    supported_cities = {norm_text(str(row.get("city") or "")) for row in rows}
+    ordered_aliases = [
+        "ank",
+        "lon",
+        "par",
+        "nyc",
+        "sea",
+        "tor",
+        "seo",
+        "sel",
+        "ba",
+        "sao",
+        "lko",
+        "mun",
+        "mia",
+        "atl",
+        "dal",
+        "chi",
+        "wel",
+    ]
+    aliases: list[str] = []
+    for alias in ordered_aliases:
+        city = CITY_ALIASES.get(alias)
+        if city and norm_text(city) in supported_cities:
+            aliases.append(alias)
+    return aliases
+
+
 def default_model_for_station(st: Station) -> str:
     m = (os.getenv("LOOK_DEFAULT_MODEL", "gfs") or "gfs").strip().lower()
     return m if m in {"gfs", "ecmwf"} else "gfs"
@@ -122,8 +174,10 @@ def station_timezone_name(st: Station) -> str:
 def format_utc_offset(dt: datetime) -> str:
     z = dt.strftime("%z")
     if not z:
-        return "UTC+00"
-    return f"UTC{z[:3]}"
+        return "UTC+00:00"
+    if len(z) == 5:
+        return f"UTC{z[:3]}:{z[3:]}"
+    return f"UTC{z}"
 
 
 def station_meta_for(icao: str, station_csv: Path = DEFAULT_STATION_CSV) -> dict[str, str]:

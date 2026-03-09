@@ -1,6 +1,6 @@
 # 历史数据获取与分析调研对接文档（Weatherbot）
 
-Last updated: 2026-03-03
+Last updated: 2026-03-09
 
 ## 1. 文档目的
 
@@ -34,8 +34,11 @@ Last updated: 2026-03-03
 - `scripts/metar_analysis_service.py`  
   METAR/SPECI 实况特征提取与诊断
 
-- `scripts/report_peak_module.py`  
-  最高温区间计算主模块（天气核心）
+- `scripts/analysis_snapshot_service.py`  
+  结构化分析快照主入口（当前 report 的主要分析 handoff）
+
+- `scripts/peak_range_service.py`  
+  最高温区间分析与结构化 summary/block 产出
 
 - `scripts/market_label_policy.py`  
   市场标签门控与阈值策略（已独立）
@@ -59,6 +62,7 @@ Last updated: 2026-03-03
 4. 观察到“站点规律稳定”，但稳定性是**天气型条件稳定**，不是每天同一模式。
 5. 当前样本积累还不够，必须有小样本可运行方案。
 6. `/look` 执行链路需保持轻量与响应速度，不接受显著变慢的大方案。
+7. 历史训练主过程不应直接并入 runtime repo；推荐 `research repo -> artifact -> runtime repo` 的连接方式。
 
 ---
 
@@ -167,6 +171,28 @@ Last updated: 2026-03-03
 3. 天气判断链路不读取盘口状态。  
 4. 市场标签策略不反向改写天气区间。  
 5. 新增能力优先作为“可开关模块”接入，便于 A/B 与回滚。  
+6. 历史训练、ERA5 拉取、回测与 notebook 优先放在独立 research repo，而不是直接压进当前 skill repo。  
+
+---
+
+## 8.1 推荐连接方式
+
+建议采用双仓边界：
+
+- `weatherbot-runtime`
+  - 当前 skill repo
+  - 只负责在线推理、报告、市场监控与后续执行
+- `weatherbot-research`
+  - 负责历史数据、ERA5、样本构建、训练、回测、评估
+
+runtime 仅通过 artifact 接入 research 结果，例如：
+
+- station priors
+- analog index
+- regime priors / embeddings
+- posterior weights
+- calibration tables
+- manifest / schema version
 
 ---
 
@@ -175,7 +201,7 @@ Last updated: 2026-03-03
 ### 阶段 v0（小样本）
 
 - 新增一个轻量校正层（例如 `bias_adjust_v0`）：
-  - 输入：当前 `report_peak_module` 产物 + 近期实况特征
+  - 输入：当前 `analysis_snapshot` / `peak_range_service` 产物 + 近期实况特征
   - 输出：校正后区间（含不确定性）
 - 只启用 `global + station` 两层偏差；
 - `regime` 先用于“区间放宽/收窄门控”，暂不做细颗粒拟合。
@@ -192,4 +218,3 @@ Last updated: 2026-03-03
 
 在不牺牲 `/look` 速度与模块清晰度的前提下，构建“可持续学习”的 Tmax 区间校正体系：  
 **先稳，再准；先可用，再精细。**
-

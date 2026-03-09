@@ -1,6 +1,6 @@
 # /look 技术实现与维护备注（非天气形势）
 
-Last updated: 2026-03-03
+Last updated: 2026-03-09
 
 > 本文件用于记录工程/数据技术层面的实现点，避免污染天气形势规则手册。
 
@@ -10,7 +10,7 @@ Last updated: 2026-03-03
 
 ## 0.1) 入口拆分约束（持续执行）
 - `telegram_report_cli.py` 仅保留 orchestration + 最终文案渲染。
-- `look_command.py` 负责命令解析；`station_catalog.py` 负责站点解析与站点元信息；`polymarket_client.py` 负责盘口事件请求/缓存；`polymarket_render_service.py` 负责盘口温度档位解析与区间渲染；`market_label_policy.py` 负责盘口标签策略门控与阈值；`hourly_data_service.py` 负责小时预报抓取/缓存/窗口识别；`metar_utils.py` 负责 METAR 抓取与观测量化区间工具口径；`metar_analysis_service.py` 负责 METAR 诊断特征提取与实况分析文案；`report_render_service.py` 负责 `/look` 主体段落编排；`report_peak_module.py` 负责最高温区间计算与尾部约束。
+- `look_command.py` 负责命令解析；`station_catalog.py` 负责站点解析与站点元信息；`polymarket_client.py` 负责盘口事件请求/缓存；`polymarket_render_service.py` 负责盘口温度档位解析与区间渲染；`market_label_policy.py` 负责盘口标签策略门控与阈值；`hourly_data_service.py` 负责小时预报抓取/缓存/窗口识别；`metar_utils.py` 负责 METAR 抓取与观测量化区间工具口径；`metar_analysis_service.py` 负责 METAR 诊断特征提取与实况分析文案；`analysis_snapshot_service.py` 负责结构化分析快照组装；`synoptic_summary_service.py` 负责结构化环流摘要；`peak_range_service.py` 负责最高温区间结构化分析与文本块；`report_render_service.py` 负责 `/look` 主体段落编排。
 - 后续 agent 更新必须遵循 `docs/core/AGENT_UPDATE_GUARDRAILS.md` 的变更路由规则。
 
 ## 1) 日期与时区
@@ -22,7 +22,7 @@ Last updated: 2026-03-03
 - 避免年份段误匹配（如 `...-2026-31c` 不应解析为温度范围）。
 - 过滤时统一单位后再比较，防止 F/C 错位。
 - 天气判断与市场渲染单向解耦：
-  - 天气区间（`report_peak_module`）不读取任何盘口信息。
+  - 天气区间（`peak_range_service`）不读取任何盘口信息。
   - 市场渲染仅接收天气锚点快照（`latest_temp_c / observed_max_temp_c` + `range_hint`），不得反向修改天气判断状态。
   - 盘口标签策略（`👍最有可能` / `😇潜在Alpha`）由 `market_label_policy.py` 独立决策，阈值统一从 `market_labels` 参数组读取。
 
@@ -85,7 +85,8 @@ Last updated: 2026-03-03
   - builder `field_profile=outer500`（仅取 `z500 + u850` 所需字段）
   - detector `mode=outer500_only`（只做 500轴线/planetary 诊断）
 - `synoptic_runner` 已改为 in-process 直连：
-  - Open-Meteo build 直接调用 `build_2d_grid_payload_openmeteo(...)`
+  - build 通过 `synoptic_provider_router.py` 统一调度 provider
+  - 3D 主链默认 `ECMWF Open Data`，`GFS` 作为 fallback
   - detector 直接调用 `analyze(...)`
   - 降低 `/look` 的子进程与临时文件开销
 - 关键锚点按优先级选取：`now_local`、`peak_local`、`start_local`、`end_local`，并补首尾锚点兜底。
@@ -101,8 +102,10 @@ Last updated: 2026-03-03
 - 天气现象附中文释义（如 `-RA（小雨）`），并扩展覆盖雾霾烟尘/雷暴/飑/漏斗云/沙尘暴/附近现象等常见 METAR 代码。
 
 ## 5) 探空图链接策略
-- TropicalTidbits 探空图链接默认优先 `ECMWF`（`model=ecmwf`）。
-- 分析主模型可与探空链接模型不同；探空链接用于统一可读性与对比口径。
+- TropicalTidbits 探空图链接默认跟随实际 3D provider：
+  - `ecmwf-open-data` -> `model=ecmwf`
+  - `gfs-grib2` -> `model=gfs`
+- 若 provider fallback 发生，探空图链接也应同步切换到实际使用的 provider。
 - 链接有效时段自动匹配当前分析窗口：
   - 常规：峰值窗口
   - `post` 且有潜在二峰：潜在反超窗口

@@ -15,6 +15,8 @@ from typing import Any
 from look_group_policy import LookGroupPolicy, resolve_look_group_policy
 
 STATE_DIR = Path(os.getenv("LOOK_RUNTIME_STATE_DIR") or "/tmp/polymarket-weatherbot-look-control")
+PENDING_DELIVERY_DIR = STATE_DIR / "pending-deliveries"
+REPORT_REF_DIR = STATE_DIR / "report-refs"
 POLL_INTERVAL_SECONDS = 0.5
 RESULT_SCHEMA_VERSION = "look-runtime-v2"
 
@@ -113,6 +115,8 @@ class LookRuntimeController:
         self._claimed = False
         self.policy = resolve_look_group_policy(context.peer_id if context.is_group else None)
         STATE_DIR.mkdir(parents=True, exist_ok=True)
+        PENDING_DELIVERY_DIR.mkdir(parents=True, exist_ok=True)
+        REPORT_REF_DIR.mkdir(parents=True, exist_ok=True)
 
     def preflight(self) -> PreflightDecision:
         if not self._rate_limit_active():
@@ -135,7 +139,7 @@ class LookRuntimeController:
             inflight_result = self._wait_for_inflight()
             if inflight_result is not None:
                 return PreflightDecision(False, inflight_result)
-            return PreflightDecision(False, "⏳ 同一查询正在生成中，请稍后查看上一条结果。")
+            return PreflightDecision(False, "⏳ 同一查询生成中，请稍后查看本群最近对应报告。")
 
         self._touch_user_state()
         return PreflightDecision(True, None)
@@ -146,6 +150,7 @@ class LookRuntimeController:
         self._mark_delivery_for_current_conversation(updated_at=updated_at)
         if self._rate_limit_active():
             self._write_scoped_result(text, result_meta=result_meta, updated_at=updated_at)
+        self._write_pending_delivery(updated_at=updated_at)
         self._release_inflight()
 
     def failure(self) -> None:
@@ -195,7 +200,7 @@ class LookRuntimeController:
                 result_payload = self._read_scoped_result_payload()
                 return self._deliver_or_notice_from_payload(
                     result_payload,
-                    fallback_notice="♻️ 相同查询刚完成，请查看上一条 /look 结果。",
+                    fallback_notice="♻️ 相同查询刚完成，请查看本群最近对应报告。",
                 ) if result_payload else None
             saw_inflight = True
             started_at = _safe_float(payload.get("started_at"))
@@ -206,10 +211,10 @@ class LookRuntimeController:
             if result_payload:
                 return self._deliver_or_notice_from_payload(
                     result_payload,
-                    fallback_notice="♻️ 相同查询已在本轮完成，请查看上一条 /look 结果。",
+                    fallback_notice="♻️ 相同查询已在本轮完成，请查看本群最近对应报告。",
                 )
             if (time.time() - start) >= self.policy.rate_limit.inflight_wait_sec:
-                return "⏳ 同一查询正在生成中，请稍后查看上一条结果。"
+                return "⏳ 同一查询生成中，请稍后查看本群最近对应报告。"
             time.sleep(POLL_INTERVAL_SECONDS)
 
     def _claim_inflight(self) -> None:
@@ -249,6 +254,9 @@ class LookRuntimeController:
         self._mark_delivery_for_current_chat(normalized)
         return str(normalized.get("text") or "")
 
+    def deliver_unchanged_notice(self, payload: dict[str, Any] | None, *, notice: str, fallback_text: str | None = None) -> str:
+        return self.deliver_cached_or_notice(payload, notice=notice, fallback_text=fallback_text)
+
     def _write_scoped_result(self, text: str, *, result_meta: dict[str, Any] | None = None, updated_at: float | None = None) -> None:
         stamp = float(updated_at if updated_at is not None else time.time())
         _write_json_atomic(
@@ -279,6 +287,32 @@ class LookRuntimeController:
                 "source_peer_id": self.context.peer_id,
             },
         )
+
+    def _write_pending_delivery(self, *, updated_at: float) -> None:
+        peer_id = str(self.context.peer_id or "").strip()
+        if str(self.context.channel or "").lower() != "telegram" or not peer_id:
+            return
+        payload = {
+            "schema": "look-pending-delivery-v1",
+            "channel": str(self.context.channel or "").strip().lower() or "telegram",
+            "peer_id": peer_id,
+            "compute_key": self.compute_key,
+            "query_label": self.query_label,
+            "updated_at": float(updated_at),
+        }
+        _write_json_atomic(_pending_delivery_path(peer_id, self.compute_key), payload)
+
+    def _latest_report_message_id(self) -> str | None:
+        payload = _read_json(_report_ref_path(str(self.context.peer_id or "").strip(), self.compute_key))
+        if not payload:
+            return None
+        if str(payload.get("channel") or "").strip().lower() != "telegram":
+            return None
+        message_id = payload.get("report_message_id")
+        if isinstance(message_id, int):
+            return str(message_id)
+        text = str(message_id or "").strip()
+        return text or None
 
     def _read_scoped_result_payload(self) -> dict[str, Any] | None:
         payload = _read_json(_scoped_result_path(self._result_scope_key()))
@@ -385,7 +419,7 @@ class LookRuntimeController:
         label = str((payload or {}).get("query_label") or self.query_label or "").strip()
         if not label:
             return fallback
-        return f"♻️ 已查询过 {label}，请查看上一条 /look 结果。"
+        return f"♻️ 已查询过 {label}，请查看本群同站同日最近报告。"
 
     def _deliver_or_notice_from_payload(self, payload: dict[str, Any] | None, *, fallback_notice: str) -> str:
         if not payload:
@@ -472,8 +506,18 @@ def _delivery_marker_path(scope_key: str, compute_key: str) -> Path:
     return STATE_DIR / f"delivery-{_short_hash(scope_key + '|' + compute_key)}.json"
 
 
+def _pending_delivery_path(peer_id: str, compute_key: str) -> Path:
+    return PENDING_DELIVERY_DIR / f"pending-{_short_hash(str(peer_id) + '|' + str(compute_key))}.json"
+
+
+def _report_ref_path(peer_id: str, compute_key: str) -> Path:
+    return REPORT_REF_DIR / f"report-ref-{_short_hash(str(peer_id) + '|' + str(compute_key))}.json"
+
+
 def _short_hash(value: str) -> str:
     return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:24]
+
+
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:

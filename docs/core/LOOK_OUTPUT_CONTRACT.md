@@ -1,13 +1,13 @@
 # /look Output Contract (current)
 
-Last updated: 2026-03-02
+Last updated: 2026-03-09
 
 ## 1) Scope
 - Commands: `/look`
 - Channel: Telegram（群聊/私聊一致）
 
 ## 2) Hard output rules
-1. **单条最终消息**（禁止预告/占位）
+1. **单条最终消息**
 2. 结构顺序固定：
    1) 环流形势对最高温影响
    2) METAR 实况
@@ -27,7 +27,14 @@ Last updated: 2026-03-02
 - 主导系统 + 落地影响必须给“方向性结论”。
 - 若识别到静稳/边界层主导天气，`环流形势对最高温影响` 段必须显式给出：
   - `主导机制`
-  - 结论应明确区分：`散云题 / 静稳题 / 混合题 / 输送题 / 环流题`
+  - 结论应明确区分：`低云清除 / 静稳约束 / 混合加深 / 低层输送 / 大尺度环流控制`
+- 850hPa 平流 object 不能直接翻译成“站点主导输送”：
+  - 必须先通过 representativeness / landing review
+  - 至少审查：距离、窗口相位、925 耦合、站点地形代表性
+  - 输出层级必须区分：`dominant / influence / background / low_representativeness`
+  - 若 review 结果是 `background` 或 `low_representativeness`：
+    - 正文不应继续写成“暖平流/冷平流主导”
+    - 只允许作为背景约束或后段风险出现
 - 对 Paris/London/Seattle 等低云雾/弱风/高湿场景，不允许只给 500/850 模板而缺少“边界层清除主导”结论。
 - 主导系统行应尽量在一句话内带出“系统性质”（如偏暖锋/偏冷锋/冷暖交汇，或冷暖输送属性），不强制拆独立小节。
 - 关键证据按“有信号才显示”：
@@ -41,7 +48,10 @@ Last updated: 2026-03-02
     - 低层是否有浅稳层/弱逆温
     - 925–850 混合是偏强还是偏弱
     - 700hPa 附近偏干还是偏湿
-    - Tmax 更偏“散云时点题”还是“输送/环流题”
+    - Tmax 更偏低云清除节奏，还是低层输送/大尺度环流控制
+- 若 `主导机制` 判到 `static_stable / boundary_layer_clearing / mixing_depth`：
+  - 850 review 默认只能做次级证据，除非其 `surface_role == dominant`
+  - 不允许远端或低代表性的 850 输送信号盖过低层湿稳/清除节奏
 
 ## 5) METAR block rules
 - 顶部保留“今日已观测最高温（时间）”。
