@@ -8,12 +8,17 @@ from datetime import datetime
 from typing import Any
 
 from boundary_layer_regime import build_boundary_layer_regime
+from canonical_raw_state_service import build_canonical_raw_state
 from condition_state import build_condition_context, build_live_condition_signals
 from contracts import ANALYSIS_SNAPSHOT_SCHEMA_VERSION
 from param_store import load_tmax_learning_params
-from peak_range_service import build_peak_range_summary, render_peak_range_block
+from peak_range_render_service import render_peak_range_block
+from peak_range_service import build_peak_range_summary
+from posterior_feature_service import build_posterior_feature_vector
+from quality_snapshot_service import build_quality_snapshot
 from synoptic_summary_service import build_synoptic_summary
 from temperature_phase_decision import build_temperature_phase_decision
+from weather_posterior_service import build_weather_posterior
 
 
 def load_analysis_runtime_params() -> dict[str, float]:
@@ -118,6 +123,16 @@ def build_analysis_snapshot(
         synoptic_window=synoptic_window,
     )
     signals = build_live_condition_signals(metar_diag)
+    canonical_raw_state = build_canonical_raw_state(
+        primary_window=primary_window,
+        metar_diag=metar_diag,
+        forecast_decision=forecast_decision,
+        synoptic_window=synoptic_window,
+        temp_shape_analysis=temp_shape_analysis,
+        temp_unit=unit,
+        condition_state=state,
+        live_signals=signals,
+    )
 
     boundary_layer_regime = build_boundary_layer_regime(
         primary_window=primary_window,
@@ -208,12 +223,31 @@ def build_analysis_snapshot(
         h925_summary=state["h925_summary"],
         snd_thermo=state["snd_thermo"],
         cloud_code_now=state["cloud_code_now"],
+        boundary_layer_regime=boundary_layer_regime,
+    )
+    posterior_feature_vector = build_posterior_feature_vector(
+        canonical_raw_state=canonical_raw_state,
+        boundary_layer_regime=boundary_layer_regime,
+        temp_phase_decision=temp_phase_decision,
+    )
+    quality_snapshot = build_quality_snapshot(
+        canonical_raw_state=canonical_raw_state,
+        posterior_feature_vector=posterior_feature_vector,
+    )
+    weather_posterior = build_weather_posterior(
+        canonical_raw_state=canonical_raw_state,
+        posterior_feature_vector=posterior_feature_vector,
+        quality_snapshot=quality_snapshot,
     )
 
     return {
         "schema_version": ANALYSIS_SNAPSHOT_SCHEMA_VERSION,
         "unit": unit,
         "runtime_params": runtime_params,
+        "canonical_raw_state": canonical_raw_state,
+        "posterior_feature_vector": posterior_feature_vector,
+        "quality_snapshot": quality_snapshot,
+        "weather_posterior": weather_posterior,
         "condition_state": state,
         "signals": signals,
         "boundary_layer_regime": boundary_layer_regime,

@@ -186,6 +186,55 @@ def _build_500_background_line(diag500: dict[str, Any] | None) -> str:
     return "；".join(parts) + "。"
 
 
+def _build_bottleneck_context(
+    *,
+    extra_text: str,
+    diag700: dict[str, Any] | None,
+    diag925: dict[str, Any] | None,
+    sounding: dict[str, Any] | None,
+) -> dict[str, Any]:
+    text = str(extra_text or "").strip()
+    d700 = dict(diag700 or {})
+    d925 = dict(diag925 or {})
+    snd = dict(sounding or {})
+    path_bias = str(snd.get("path_bias") or "")
+    code = "neutral"
+    polarity = "neutral"
+    source = "none"
+
+    if str(d700.get("dry_intrusion_scope") or "") in {"near", "peripheral"} and str(d700.get("source") or "") == "synoptic-700":
+        code = "midlevel_dry_support"
+        polarity = "supportive"
+        source = "h700"
+    elif "湿层约束" in str(d700.get("summary") or ""):
+        code = "midlevel_moist_constraint"
+        polarity = "constraining"
+        source = "h700"
+    elif str(d925.get("coupling_state") or "") == "weak":
+        code = "low_level_coupling_weak"
+        polarity = "constraining"
+        source = "h925"
+    elif str(d925.get("coupling_state") or "") == "strong":
+        code = "low_level_coupling_strong"
+        polarity = "supportive"
+        source = "h925"
+    elif "再试探" in path_bias:
+        code = "sounding_retest_support"
+        polarity = "supportive"
+        source = "sounding"
+    elif path_bias:
+        code = "sounding_constraint"
+        polarity = "constraining"
+        source = "sounding"
+
+    return {
+        "text": text,
+        "code": code,
+        "polarity": polarity,
+        "source": source,
+    }
+
+
 def build_forecast_decision(
     *,
     station: Any,
@@ -288,6 +337,13 @@ def build_forecast_decision(
         pb = str(snd.get("path_bias"))
         extra = "探空显示高层约束相对弱" if "再试探" in pb else "探空显示高层约束偏强"
 
+    bottleneck_context = _build_bottleneck_context(
+        extra_text=str(extra or ""),
+        diag700=diag700,
+        diag925=diag925,
+        sounding=snd,
+    )
+
     objects3d = build_3d_objects(
         synoptic=synoptic,
         station_lat=station_lat,
@@ -347,12 +403,8 @@ def build_forecast_decision(
                 "advection": advec_txt,
                 "review": advection_review,
             },
-            "h700": {
-                "summary": s700,
-            },
-            "h925": {
-                "summary": str(diag925.get("summary") or ""),
-            },
+            "h700": dict(diag700),
+            "h925": dict(diag925),
             "sounding": {
                 "path_bias": str(snd.get("path_bias") or ""),
                 "layer_findings": list(((snd.get("thermo") or {}).get("layer_findings") if isinstance(snd, dict) else []) or []),
@@ -368,6 +420,7 @@ def build_forecast_decision(
             "trigger": "临窗优先看云量开合与30-60分钟温度斜率",
             "object_3d_main": objects3d.get("main_object"),
             "override_risk": "high" if ((objects3d.get("main_object") or {}).get("impact_scope") == "possible_override" and (objects3d.get("main_object") or {}).get("vertical_coherence_score", 0) >= 0.6) else "low",
+            "context": bottleneck_context,
             "background": {
                 "phase_mode": phase_txt,
                 "phase500": phase500,

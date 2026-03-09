@@ -5,6 +5,8 @@ Last updated: 2026-03-09
 本文描述 weatherbot 的目标架构，不等同于“当前代码已全部实现”。  
 当前运行时现状请看 [ARCHITECTURE.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/ARCHITECTURE.md)。
 
+市场主链与 CLI / websocket 分工请看 [MARKET_ARCHITECTURE.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/MARKET_ARCHITECTURE.md)。
+
 ## 1) 设计目标
 
 新版架构需要同时满足 4 个目标：
@@ -13,11 +15,19 @@ Last updated: 2026-03-09
 - 报告层只是输出模块，不反向定义分析逻辑
 - 市场/策略/执行能独立扩展，不污染天气判断
 - 历史训练和大体量数据处理与 runtime 分离
+- 人类查询入口（如 `/look`）只是其中一个消费者，而不是系统运行的唯一方式
 
 ## 2) 目标架构总览
 
 ```mermaid
 flowchart LR
+    subgraph Entrypoints["Entry Points / Consumers"]
+        U0["/look human query"]
+        U1["scheduled scanner"]
+        U2["opportunity trigger service"]
+        U3["strategy runner"]
+    end
+
     subgraph Weather["Weather Branch"]
         W0[canonical_raw_state]
         W1[physical_feature_layer]
@@ -43,6 +53,10 @@ flowchart LR
         R2[artifacts: priors + analog index + model weights + calibration]
     end
 
+    U0 --> F4
+    U1 --> W2
+    U2 --> F0
+    U3 --> F1
     W0 --> W1 --> W2
     M0 --> M1
     W2 --> F0
@@ -221,12 +235,13 @@ runtime 只通过 loader 读取这些轻量产物。
 
 ## 6) 迁移顺序建议
 
-1. 定义 `canonical_raw_state.v1`
-2. 定义 `posterior_feature_vector.v1`
-3. 将 `peak_range_service` 拆为 posterior 与 render 两层
-4. 建立 `quality_snapshot`
-5. 把 3D tracking summary 升为一级输入
-6. 再接 market websocket / opportunity / strategy / execution
+1. 扩展 `canonical_raw_state` 的字段覆盖，并继续移除零散文本兜底依赖
+2. 扩展 `posterior_feature_vector.v1` 的正交特征覆盖
+3. 将 `weather_posterior.v1` 从当前 `core + calibration hook` 继续推进为可校准 posterior
+4. 继续扩 `quality_snapshot`
+5. 继续将 `peak_range_service` 从当前 core/history/signal/render 四块推进为更清晰的 posterior core
+6. 把 3D tracking summary 升为一级输入
+7. 再接 market websocket / opportunity / strategy / execution
 
 ## 7) 当前实现与目标架构的关系
 
@@ -235,11 +250,16 @@ runtime 只通过 loader 读取这些轻量产物。
 - provider router
 - forecast decision
 - analysis snapshot
+- `canonical_raw_state.v1`
+- `posterior_feature_vector.v1`
+- `quality_snapshot.v1`
+- `weather_posterior.v1`
 - market render
 
 但仍未完全具备：
 
-- formal canonical raw contract
-- posterior feature vector
-- 独立 posterior 层
+- 完整展开的 canonical raw coverage
+- 更成熟的 posterior feature coverage
+- 更成熟、可校准的 posterior 层
+- 更完整的 quality / uncertainty contract
 - 独立 strategy / execution / risk 层

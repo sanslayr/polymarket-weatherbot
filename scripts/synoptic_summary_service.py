@@ -61,6 +61,7 @@ def build_synoptic_summary(
     h925_summary: str,
     snd_thermo: dict[str, Any],
     cloud_code_now: str,
+    boundary_layer_regime: dict[str, Any] | None = None,
     compact_synoptic: bool = False,
 ) -> dict[str, Any]:
     syn_lines = ["🧭 **环流形势对最高温影响**"]
@@ -68,10 +69,23 @@ def build_synoptic_summary(
     h500_score = _h500_weight_score(h500_feature)
     h500_key_signal = _h500_has_key_signal(h500_feature)
     adv_review = advection_review if isinstance(advection_review, dict) else {}
+    regime = boundary_layer_regime if isinstance(boundary_layer_regime, dict) else {}
+    regime_key = str(regime.get("regime_key") or "")
+    regime_headline = str(regime.get("headline") or "").strip()
+    layer_summary = str(regime.get("layer_summary") or "").strip()
+    sounding_mode = str(regime.get("sounding_mode") or "")
     adv_state = str(adv_review.get("thermal_advection_state") or "")
     adv_direction = thermal_advection_direction(adv_review, line850=line850)
     adv_is_confirmed = adv_state == "confirmed"
     adv_is_foreground = adv_state in {"confirmed", "probable"}
+
+    def _fallback_regime_headline(key: str) -> str:
+        return {
+            "boundary_layer_clearing": "今天先看低云和雾何时散开；在它们真正减弱前，升温会比较慢，最高温也更容易被压住",
+            "static_stable": "今天低层空气偏稳，近地面不容易很快升温；如果这种状态不松动，白天最高温就更难抬高",
+            "mixing_depth": "今天能不能升得更快，主要看近地面这层闷住的空气何时被打散；一旦混合起来，后段升温会顺很多",
+            "advection": "今天更要看低层空气本身是在变暖还是变冷，以及这种变化能不能真正传到地面",
+        }.get(key, "")
 
     def _contains_any(text: str, keys: list[str]) -> bool:
         s = str(text or "")
@@ -182,15 +196,21 @@ def build_synoptic_summary(
         if fd:
             return fd
         txtx = str(extra)
+        if regime_key == "boundary_layer_clearing":
+            return "低云雾何时抬升和破碎更关键，白天升温先看边界层清除节奏"
+        if regime_key == "static_stable":
+            return "低层稳层仍在，午前升温效率更容易受压"
+        if regime_key == "mixing_depth":
+            return "能否尽快打穿低层稳层，比高空背景本身更关键"
         if ("advection" in otype) or adv_direction in {"warm", "cold"}:
             if adv_direction == "warm" and adv_is_confirmed:
-                return "暖平流更明确，若云量放开，升温会更顺"
+                return "低层偏暖输送（850-925hPa）更明确，若云量放开，升温会更顺"
             if adv_direction == "warm":
-                return "暖空气输送为主，云量若放开，升温会更顺"
+                return "低层偏暖输送（850-925hPa）为主，云量若放开，升温会更顺"
             if adv_direction == "cold" and adv_is_confirmed:
-                return "冷平流更明确，对升温有抑制"
+                return "低层偏冷输送（850-925hPa）更明确，对升温有抑制"
             if adv_direction == "cold":
-                return "冷空气输送偏强，对升温有压制"
+                return "低层偏冷输送（850-925hPa）偏强，对升温有压制"
             return "冷暖输送并存，短时更容易出现重排"
         if ("dry_intrusion" in otype) or _contains_any(txtx, ["封盖", "湿层", "低云", "压制", "干层"]):
             return "低层受封盖约束，短时升温不容易放大"
@@ -206,17 +226,18 @@ def build_synoptic_summary(
     impact = str((obj or {}).get("impact_scope") or "background_only")
 
     if obj:
-        nature_txt = _system_plain_desc(otype) or _regime_label(r1)
-        syn_lines.append(f"- **主导系统**：{_regime_label(r1) if has_primary_regime else '混合主导'}（{nature_txt}）。")
+        background_driver = _regime_label(r1) if has_primary_regime else "混合背景"
+        system_plain_desc = _system_plain_desc(otype) or background_driver
         if impact == "station_relevant":
-            scope_txt = "系统近站，影响将直接落在峰值窗"
+            scope_txt = "影响会直接落在峰值窗"
         elif impact == "possible_override":
-            scope_txt = "系统在外围，主要改写峰值时段"
+            scope_txt = "主要改写峰值时段"
         else:
-            scope_txt = "当前以背景场为主，短时改写概率有限"
+            scope_txt = "短时改写幅度有限"
     else:
-        syn_lines.append("- **主导系统**：当前未识别到可稳定追踪的同一套分层系统。")
-        scope_txt = "以实况触发为主"
+        background_driver = _regime_label(r1) if has_primary_regime else "背景场"
+        system_plain_desc = _system_plain_desc("") or "暂未识别到单独可追踪的近站系统"
+        scope_txt = "更偏实况触发"
 
     def _impact_direction_and_trigger() -> tuple[str, str]:
         if adv_direction == "cold":
@@ -229,12 +250,16 @@ def build_synoptic_summary(
         return direction, trigger
 
     direction_txt, trigger_txt = _impact_direction_and_trigger()
-    syn_lines.append(f"- **落地影响**：{direction_txt}；{scope_txt}。建议：{trigger_txt}。")
+    impact_line = f"{direction_txt}；{scope_txt}"
 
     def _humanize_850(s: str) -> str:
         txt = str(s or "")
         m = re.search(r"(暖平流|冷平流)([^（]*)（([0-9.]+)，([^）]+)）", txt)
         if not m:
+            if "暖平流" in txt:
+                return "低层偏暖输送（850-925hPa）较明显"
+            if "冷平流" in txt:
+                return "低层偏冷输送（850-925hPa）较明显"
             return txt
         kind = m.group(1)
         qual = str(m.group(2) or "").strip()
@@ -242,7 +267,8 @@ def build_synoptic_summary(
         conf = "高" if conf_raw >= 0.67 else "中" if conf_raw >= 0.34 else "低"
         eta = m.group(4)
         qual_txt = f"{qual}，" if qual else ""
-        return f"{kind}（{qual_txt}置信度{conf}，可能影响时间{eta}）"
+        direction_txt = "低层偏暖输送（850-925hPa）" if kind == "暖平流" else "低层偏冷输送（850-925hPa）"
+        return f"{direction_txt}（{qual_txt}置信度{conf}，可能影响时间{eta}）"
 
     evidence_bits: list[str] = []
     line850_h = _humanize_850(line850)
@@ -256,20 +282,88 @@ def build_synoptic_summary(
             evidence_bits.append(f"700hPa: {h700_summary}")
     if h925_summary and "信号一般" not in h925_summary:
         evidence_bits.append(f"925hPa: {h925_summary}")
-    if evidence_bits:
-        if len(evidence_bits) == 1:
-            syn_lines.append(f"- **关键证据**：{evidence_bits[0]}。")
-        else:
-            syn_lines.append("- **关键证据**：")
-            for item in evidence_bits[:3]:
-                syn_lines.append(f"  • {item}")
+    key_evidence = evidence_bits[0] if evidence_bits else ""
 
-    if syn_w:
-        syn_lines.append(f"- **峰值窗口**：{str(syn_w.get('start_local') or '')[-5:]}~{str(syn_w.get('end_local') or '')[-5:]} Local。")
+    def _has_named_system(text: str) -> bool:
+        return _contains_any(text, ["副热带高压", "季风槽", "冷锋", "暖锋", "静止锋", "锋性", "高压脊", "低压槽", "深槽", "切变"])
+
+    def _clean_line_text(text: str) -> str:
+        return str(text or "").strip().rstrip("。；，")
+
+    def _line_priority(label: str, text: str) -> float:
+        txt = str(text or "")
+        if not txt:
+            return 0.0
+        if label == "主导机制":
+            return 1.0
+        if label == "层结/模式剖面":
+            if _contains_any(txt, ["逆温", "稳", "湿", "干", "低云", "雾", "混合", "升温"]):
+                return 0.82
+            return 0.62
+        if label == "相关链路":
+            if _has_named_system(txt):
+                return 0.92
+            if _contains_any(txt, ["850-925hPa", "输送", "抬升", "锋", "边界层清除"]):
+                return 0.8
+            return 0.58
+        if label == "影响":
+            if "暂时看不出明显偏高或偏低" not in txt:
+                return 0.78
+            if _contains_any(txt, ["峰值时段", "直接落在峰值窗"]):
+                return 0.64
+            return 0.5
+        return 0.0
+
+    detail_candidates: list[tuple[float, str, str]] = []
+    if layer_summary and layer_summary != regime_headline:
+        layer_label = "探空层结" if sounding_mode == "obs" else "层结/模式剖面"
+        clean_layer_summary = _clean_line_text(layer_summary)
+        detail_candidates.append((_line_priority("层结/模式剖面", clean_layer_summary), layer_label, clean_layer_summary))
+    if system_plain_desc:
+        clean_system_plain_desc = _clean_line_text(system_plain_desc)
+        detail_candidates.append((_line_priority("相关链路", clean_system_plain_desc), "相关链路", clean_system_plain_desc))
+    if impact_line:
+        clean_impact_line = _clean_line_text(impact_line)
+        detail_candidates.append((_line_priority("影响", clean_impact_line), "影响", clean_impact_line))
+
+    if not regime_headline:
+        regime_headline = _fallback_regime_headline(regime_key)
+
+    if regime_headline:
+        syn_lines.append(f"- **主导机制**：{_clean_line_text(regime_headline)}。")
+
+    detail_candidates.sort(key=lambda item: item[0], reverse=True)
+    selected_details: list[tuple[str, str]] = []
+    for priority, label, text in detail_candidates:
+        if priority < 0.64:
+            continue
+        selected_details.append((label, text))
+        if len(selected_details) >= 2:
+            break
+
+    if not selected_details and detail_candidates:
+        _priority, label, text = detail_candidates[0]
+        selected_details.append((label, text))
+
+    strongest_priority = detail_candidates[0][0] if detail_candidates else 0.0
+    if len(detail_candidates) >= 3 and strongest_priority >= 0.9 and detail_candidates[2][0] >= 0.78:
+        label, text = detail_candidates[2][1], detail_candidates[2][2]
+        if (label, text) not in selected_details:
+            selected_details.append((label, text))
+
+    for label, text in selected_details:
+        syn_lines.append(f"- **{label}**：{text}。")
 
     return {
         "schema_version": "synoptic-summary.v1",
         "lines": syn_lines,
+        "summary": {
+            "background_driver": background_driver,
+            "pathway": system_plain_desc,
+            "impact": impact_line,
+            "key_evidence": key_evidence,
+            "trigger_hint": trigger_txt,
+        },
         "primary_regime_key": r1,
         "primary_regime_label": _regime_label(r1),
         "has_primary_regime": has_primary_regime,

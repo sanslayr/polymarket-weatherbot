@@ -1,44 +1,73 @@
 # polymarket-weatherbot
 
-Station-centric Tmax analysis runtime for `/look`, designed to evolve from a human-readable weather report skill into a structured posterior, market monitoring, and multi-strategy trading support system.
+[English](./README.md) | [简体中文](./README.zh-CN.md)
 
-## Overview
+> Station-centric weather intelligence runtime for Tmax analysis, market monitoring, opportunity detection, and eventually multi-strategy automated trading.
 
-`polymarket-weatherbot` is the runtime-side repository for intraday Tmax analysis.
+---
 
-Today it focuses on:
+## Vision
+
+`polymarket-weatherbot` is being built as a weather-first intelligence system for temperature markets.
+
+The core idea is simple:
+
+- use structured meteorological analysis, not just raw model output
+- continuously update view with realtime observations
+- estimate how the day's Tmax distribution is evolving
+- compare that weather posterior with market pricing
+- surface actionable opportunities for humans first, then for strategies and execution
+
+`/look` is the Telegram-facing command used to view generated weather reports.
+The same analysis core is intended to support:
+
+- human-readable on-demand reports
+- scheduled scanning
+- automated opportunity triggers
+- multi-strategy execution
+- continuous learning from historical performance
+
+---
+
+## What The Project Does
+
+### Weather-side capabilities
 
 - station-level Tmax analysis
-- realtime METAR-aware forecast correction
-- 3D synoptic context and tracking
-- structured report generation
-- Polymarket-facing market interpretation
+- hourly forecast window detection
+- METAR-driven realtime correction
+- synoptic and vertical-structure diagnostics
+- multi-anchor 3D object tracking
+- structured analysis snapshot generation
 
-The architecture is intentionally moving away from a report-driven design toward a layered analysis system:
+### Market-side direction
 
-- weather inference should be reusable outside the report
-- market monitoring should not pollute weather logic
-- strategy and execution should be independent of the presentation layer
-- historical training should live outside the runtime repo
+- Polymarket market interpretation and ladder rendering
+- future CLOB price monitoring and orderbook-aware market features
+- opportunity scoring from weather posterior vs market-implied pricing
+- pluggable strategy and execution layers
 
-## Design Principles
+### Research-side direction
 
-- Forecast-first, but observation-corrected
-- Structured contracts before narrative text
-- Weather analysis and market logic remain one-way coupled
-- Runtime stays lightweight; historical training and large datasets stay outside
-- Current implementation and target architecture are documented separately
+- offline historical training
+- ERA5 / forecast snapshot analysis
+- artifact export back into the runtime
+- continual model and calibration improvement
+
+---
 
 ## Current Runtime Architecture
 
+The current Telegram-facing runtime is exposed through `/look`, while the internal logic is already being moved into reusable layers.
+
 ```mermaid
 flowchart LR
-    User["/look command"] --> CLI["telegram_report_cli.py"]
+    User["Telegram /look"] --> CLI["telegram_report_cli.py"]
 
     CLI --> CMD["look_command.py"]
     CLI --> STN["station_catalog.py"]
 
-    CLI --> Hourly["hourly_data_service.py<br/>open-meteo primary"]
+    CLI --> Hourly["hourly_data_service.py<br/>hourly guidance"]
     CLI --> METAR["metar_utils.py + metar_analysis_service.py"]
     CLI --> Provider["synoptic_provider_router.py"]
 
@@ -50,35 +79,47 @@ flowchart LR
 
     Hourly --> Shape["temperature_shape_analysis.py"]
     Shape --> Window["temperature_window_resolver.py"]
-    Synoptic --> Decision["forecast_pipeline.py<br/>vertical_3d.py<br/>advection_review.py"]
     METAR --> Phase["temperature_phase_decision.py"]
+    Synoptic --> Decision["forecast_pipeline.py<br/>vertical_3d.py<br/>advection_review.py"]
     Decision --> Regime["boundary_layer_regime.py<br/>diagnostics_sounding.py<br/>synoptic_summary_service.py"]
+
     Window --> Snapshot["analysis_snapshot_service.py"]
     Phase --> Snapshot
-    Regime --> Snapshot
     Decision --> Snapshot
+    Regime --> Snapshot
 
     Snapshot --> Peak["peak_range_service.py"]
+    Snapshot --> PeakHelpers["peak_range_history/signal/render"]
     Snapshot --> Render["report_render_service.py"]
     Render --> Market["polymarket_render_service.py<br/>market_label_policy.py"]
     Peak --> Render
+
     Market --> Output["Human report output"]
 ```
 
-Current runtime notes:
+### Runtime notes
 
-- hourly guidance remains lightweight and fast
-- 3D synoptic background is now `ECMWF Open Data` primary with `GFS` fallback
-- `analysis_snapshot` is the main render handoff
-- report generation is no longer the only place where Tmax logic lives
+- `open-meteo` remains the lightweight hourly primary
+- `ECMWF Open Data` is now the default 3D synoptic source, with `GFS` fallback
+- `analysis_snapshot` has become the main analysis handoff
+- `canonical_raw_state.v1`, `posterior_feature_vector.v1`, `quality_snapshot.v1`, and a first calibrated `weather_posterior.v1` now live inside that snapshot
+- `report_render_service.py` has been reduced to a render-only main path; old variable/market fallback inference has been removed
 
-## Target Architecture
+---
 
-The runtime above is not the final form.  
-The target design separates weather inference, market state, strategy, and research artifacts more explicitly.
+## Target Platform Architecture
+
+The long-term platform should support both human-facing analysis and fully automated pipelines without rebuilding the weather logic each time.
 
 ```mermaid
 flowchart LR
+    subgraph Entrypoints["Entry Points / Consumers"]
+        U0["/look human query"]
+        U1["scheduled scanner"]
+        U2["opportunity trigger service"]
+        U3["strategy runner"]
+    end
+
     subgraph Weather["Weather Branch"]
         W0["canonical_raw_state"]
         W1["physical_feature_layer"]
@@ -104,99 +145,109 @@ flowchart LR
         A["artifacts"]
     end
 
+    U0 --> P
+    U1 --> W2
+    U2 --> O
+    U3 --> S
+
     W0 --> W1 --> W2
     M0 --> M1
+
     W2 --> O
     M1 --> O
+
     O --> S --> E
     S --> R
+
     W2 --> P
     W1 --> P
     M1 --> P
+
     D --> T --> A --> W1
     A --> W2
 ```
 
-This target architecture allows:
+This target design allows the same weather core to power:
 
-- a report layer that only maps structured analysis to text
-- a probability/posterior layer that is independent of presentation
-- real-time market monitoring, including websocket-based price streams
-- multiple strategy modules sharing a common opportunity layer
-- separate research and runtime repos linked by lightweight artifacts
+- reports
+- live scans
+- trigger alerts
+- multiple strategies
+- automated execution
 
-## Repository Role
+---
 
-This repository should be treated as the **runtime repo**, not the full research platform.
+## Repository Boundary
 
-What belongs here:
+This repository should be treated as the **runtime repository**.
 
-- realtime data fetch and normalization
-- forecast and observation diagnostics
-- structured analysis and posterior-ready contracts
-- report rendering
-- market monitoring and future strategy/execution runtime
+### What belongs here
 
-What should live in a separate research/archive repo:
+- realtime data access
+- weather diagnostics
+- structured contracts
+- posterior-ready feature extraction
+- market monitoring runtime
+- report generation
+- future strategy/execution runtime
 
-- historical data lake
-- ERA5 extraction
-- large offline feature tables
-- training pipelines
+### What should live elsewhere
+
+In a separate research/archive repository:
+
+- historical datasets
+- ERA5 pipelines
+- training workflows
 - notebooks
 - backtests
-- model selection and evaluation workflows
+- calibration experiments
+- offline evaluation
 
-The preferred connection is:
+Preferred connection:
 
 `research repo -> artifacts -> runtime repo`
 
-Examples of artifacts:
+Typical artifacts:
 
 - station priors
-- analog index
-- regime priors / embeddings
-- posterior model weights
+- analog indices
+- regime priors or embeddings
+- posterior weights
 - calibration tables
-- manifest / schema version
+- manifests and schema versions
 
-## Current Strengths
+---
 
-- provider routing is explicit instead of hardcoded to one synoptic source
-- 3D diagnostics support light multi-anchor tracking
-- market display is already mostly decoupled from weather-side logic
-- `analysis_snapshot` provides a reusable analysis handoff
-- docs now distinguish current runtime architecture from target architecture
+## Development Direction
 
-## Current Gaps
+The architecture is already cleaner than the old report-centric version, but several major layers are still being completed:
 
-The most important missing pieces are:
+1. broader `canonical_raw_state` coverage
+2. richer `posterior_feature_vector`
+3. independent weather posterior layer
+4. market websocket ingestion and market feature layer
+5. opportunity, strategy, execution, and risk layers
+6. artifact-driven integration with the research stack
 
-1. a formal `canonical_raw_state`
-2. a formal `posterior_feature_vector`
-3. a dedicated posterior layer
-4. a fully separate strategy / execution / risk stack
-5. a stable artifact loader for research outputs
+---
 
 ## Key Modules
 
-### Ingress / Routing
+### Ingress
 
 - `scripts/telegram_report_cli.py`
 - `scripts/look_command.py`
 - `scripts/station_catalog.py`
 
-### Providers
+### Weather Providers and Diagnostics
 
 - `scripts/hourly_data_service.py`
 - `scripts/synoptic_provider_router.py`
 - `scripts/ecmwf_open_data_provider.py`
 - `scripts/gfs_grib_provider.py`
 - `scripts/metar_utils.py`
+- `scripts/metar_analysis_service.py`
 - `scripts/sounding_obs_service.py`
-
-### Analysis
-
 - `scripts/synoptic_runner.py`
 - `scripts/forecast_pipeline.py`
 - `scripts/vertical_3d.py`
@@ -208,37 +259,35 @@ The most important missing pieces are:
 - `scripts/diagnostics_sounding.py`
 - `scripts/synoptic_summary_service.py`
 - `scripts/peak_range_service.py`
+- `scripts/peak_range_history_service.py`
+- `scripts/peak_range_signal_service.py`
+- `scripts/peak_range_render_service.py`
 - `scripts/analysis_snapshot_service.py`
+- `scripts/canonical_raw_state_service.py`
+- `scripts/posterior_feature_service.py`
 
-### Presentation / Market
+### Market and Presentation
 
 - `scripts/report_render_service.py`
 - `scripts/polymarket_render_service.py`
 - `scripts/market_label_policy.py`
 - `scripts/polymarket_client.py`
 
-## Documentation Guide
+---
 
-- Current runtime structure:
-  - [ARCHITECTURE.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/ARCHITECTURE.md)
-- Target design:
-  - [TARGET_ARCHITECTURE.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/TARGET_ARCHITECTURE.md)
-- Runtime contracts:
-  - [DECISION_SCHEMA.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/DECISION_SCHEMA.md)
-  - [FORECAST_3D_STORAGE.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/FORECAST_3D_STORAGE.md)
-  - [LOOK_OUTPUT_CONTRACT.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/LOOK_OUTPUT_CONTRACT.md)
-- Engineering notes and guardrails:
-  - [TECHNICAL_IMPLEMENTATION_NOTES.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/TECHNICAL_IMPLEMENTATION_NOTES.md)
-  - [AGENT_UPDATE_GUARDRAILS.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/AGENT_UPDATE_GUARDRAILS.md)
-- Research handoff:
-  - [HISTORICAL_RESEARCH_HANDOFF.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/HISTORICAL_RESEARCH_HANDOFF.md)
-  - [DOCS_INDEX.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/DOCS_INDEX.md)
+## Documentation
+
+- Current runtime architecture: [`docs/core/ARCHITECTURE.md`](./docs/core/ARCHITECTURE.md)
+- Target architecture: [`docs/core/TARGET_ARCHITECTURE.md`](./docs/core/TARGET_ARCHITECTURE.md)
+- Runtime contracts: [`docs/core/DECISION_SCHEMA.md`](./docs/core/DECISION_SCHEMA.md), [`docs/core/FORECAST_3D_STORAGE.md`](./docs/core/FORECAST_3D_STORAGE.md)
+- Output rules: [`docs/core/LOOK_OUTPUT_CONTRACT.md`](./docs/core/LOOK_OUTPUT_CONTRACT.md)
+- Guardrails and technical notes: [`docs/core/AGENT_UPDATE_GUARDRAILS.md`](./docs/core/AGENT_UPDATE_GUARDRAILS.md), [`docs/core/TECHNICAL_IMPLEMENTATION_NOTES.md`](./docs/core/TECHNICAL_IMPLEMENTATION_NOTES.md)
+- Research handoff: [`docs/core/HISTORICAL_RESEARCH_HANDOFF.md`](./docs/core/HISTORICAL_RESEARCH_HANDOFF.md)
+- Full docs index: [`DOCS_INDEX.md`](./DOCS_INDEX.md)
+
+---
 
 ## Status
 
-The runtime architecture is already materially cleaner than the earlier report-centric version, but it should still be treated as an intermediate stage on the path to:
-
-- posterior-driven weather inference
-- websocket-backed market monitoring
-- multi-strategy trading support
-- offline-trained artifacts feeding a lightweight runtime
+The project has already crossed the “single report script” stage.  
+It is now being turned into a reusable weather intelligence runtime that can eventually operate both with and without a human command loop.

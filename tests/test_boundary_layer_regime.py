@@ -96,10 +96,14 @@ class BoundaryLayerRegimeTest(unittest.TestCase):
 
         self.assertEqual(regime["regime_key"], "boundary_layer_clearing")
         self.assertEqual(regime["dominant_mechanism"], "低云清除")
-        self.assertEqual(regime["dominant_question"], "低云清除")
-        self.assertIn("边界层清除过程", regime["headline"])
+        self.assertNotIn("dominant_question", regime)
+        self.assertIn("低云和雾何时散开", regime["headline"])
         self.assertIn("低云底", regime["tracking_line"])
-        self.assertTrue(("低层" in regime["layer_summary"]) or ("高湿" in regime["layer_summary"]))
+        self.assertTrue(
+            ("近地面" in regime["layer_summary"])
+            or ("低云" in regime["layer_summary"])
+            or ("空气" in regime["layer_summary"])
+        )
 
     def test_diagnose_sounding_builds_layer_relationships_from_obs_profile(self) -> None:
         sounding = diagnose_sounding(

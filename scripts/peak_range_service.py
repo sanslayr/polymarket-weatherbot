@@ -3,16 +3,14 @@
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timedelta
 from typing import Any
 
 from metar_utils import observed_max_interval_c as _observed_max_interval_c
 from realtime_pipeline import classify_window_phase
-from historical_payload import get_historical_payload, get_weighted_reference
-from historical_strategy import blend_historical_range
-from historical_context_provider import _analog_branch_label
 from layer_signal_policy import h700_effective_dry_factor, h700_is_moist_constraint
+from peak_range_history_service import apply_historical_reference, build_peak_historical_reference
+from peak_range_signal_service import render_signal_scores, render_sounding_factor_pack
 from temperature_phase_decision import build_temperature_phase_decision
 from advection_review import thermal_advection_direction
 
@@ -91,62 +89,6 @@ def _extract_quoted_token(text: str) -> str:
     if len(parts) >= 3 and parts[1].strip():
         return parts[1].strip()
     return s
-
-
-def _date_span_text(dates: list[str]) -> str:
-    cleaned = [str(item).strip() for item in dates if str(item).strip()]
-    if not cleaned:
-        return ""
-    def _display_date(value: str) -> str:
-        raw = str(value or "").strip()
-        if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
-            return raw.replace("-", "/")
-        return raw
-    try:
-        ordered = sorted(cleaned)
-    except Exception:
-        ordered = cleaned
-    if len(ordered) == 1:
-        return _display_date(ordered[0])
-    return f"{_display_date(ordered[0])} & {_display_date(ordered[-1])}"
-
-
-def _reference_degree_text(text: str) -> str:
-    s = str(text or "")
-    if "强" in s:
-        return "高"
-    if "中" in s:
-        return "中"
-    if "弱" in s:
-        return "弱"
-    return s or "中"
-
-
-def _branch_reference_text(
-    label: str,
-    rows: list[dict[str, Any]],
-    degree_text: str,
-    prefix: str | None = None,
-) -> str:
-    dates = [str(row.get("local_date") or "").strip() for row in rows if str(row.get("local_date") or "").strip()]
-    date_text = _date_span_text(dates)
-    parts: list[str] = []
-    if prefix:
-        parts.append(prefix)
-    if date_text:
-        parts.append(date_text)
-    parts.append("日期邻近样本")
-    parts.append(f"{label}背景")
-    parts.append(f"参考度{degree_text}")
-    return "，".join(parts)
-
-
-def _shift_direction_text(shift_c: Any, unit: str) -> str:
-    v = _safe_float(shift_c)
-    if v is None or abs(v) < 0.05:
-        return "温度修正中性"
-    direction = "上修" if v > 0 else "下修"
-    return f"温度{direction}{_fmt_delta_unit(v, unit)}"
 
 
 def _range_tail_note(
@@ -249,339 +191,6 @@ def _is_generic_500_text(s: str) -> bool:
     return any(k in t for k in generic_tokens)
 
 
-def _render_sounding_factor_pack(
-    calc_window: dict[str, Any],
-    metar_diag: dict[str, Any],
-    snd_thermo: dict[str, Any],
-    h700_summary: str,
-    h925_summary: str,
-    cloud_code_now: str,
-) -> dict[str, Any]:
-    def _f(v: Any) -> float | None:
-        try:
-            return float(v)
-        except Exception:
-            return None
-
-    low_cloud = _f(calc_window.get("low_cloud_pct"))
-    w850 = _f(calc_window.get("w850_kmh"))
-    wind_chg = _f(metar_diag.get("wind_dir_change_deg"))
-    t_now = _f(metar_diag.get("latest_temp"))
-    wx = str(metar_diag.get("latest_wx") or "").upper()
-    sounding_source = str(snd_thermo.get("profile_source") or "")
-    sounding_conf = str(snd_thermo.get("sounding_confidence") or "")
-    sounding_cap = _f(snd_thermo.get("low_level_cap_score"))
-    sounding_mix = _f(snd_thermo.get("mixing_support_score"))
-    sounding_dry = _f(snd_thermo.get("midlevel_dry_score"))
-    sounding_moist = _f(snd_thermo.get("midlevel_moist_score"))
-    sounding_wind_mix = _f(snd_thermo.get("wind_profile_mix_score"))
-
-    up_adj = 0.0
-    down_adj = 0.0
-    profile_score = 0.0
-    tags: list[str] = []
-
-    inv = 0.0
-    if low_cloud is not None and low_cloud >= 70:
-        inv += 0.35 if sounding_source == "obs" else 0.6
-    if w850 is not None and w850 <= 15:
-        inv += 0.18 if sounding_source == "obs" else 0.35
-    if "耦合偏弱" in h925_summary:
-        inv += 0.20 if sounding_source == "obs" else 0.35
-    if sounding_cap is not None:
-        inv = max(inv, 0.95 * sounding_cap)
-    if inv >= 0.9:
-        down_adj += 0.55
-        profile_score += 0.35
-        tags.append("探空稳定层/封盖约束偏强" if sounding_source == "obs" else "逆温/稳定约束偏强")
-    elif inv >= 0.45:
-        down_adj += 0.25
-        profile_score += 0.25
-        tags.append("探空显示低层稳定约束" if sounding_source == "obs" else "低层稳定约束")
-
-    capev = snd_thermo.get("sbcape_jkg") or snd_thermo.get("mlcape_jkg") or snd_thermo.get("mucape_jkg")
-    cinv = snd_thermo.get("sbcin_jkg") if snd_thermo.get("sbcin_jkg") is not None else snd_thermo.get("mlcin_jkg")
-    if isinstance(capev, (int, float)):
-        profile_score += 0.2
-        if float(capev) >= 500 and (not isinstance(cinv, (int, float)) or float(cinv) > -75):
-            down_adj += 0.2
-            tags.append("对流可触发（云发展风险）")
-        elif isinstance(cinv, (int, float)) and float(cinv) <= -125:
-            up_adj += 0.15
-            tags.append("抑制偏强（对流受限）")
-
-    if any(k in wx for k in ["RA", "SN", "PL", "FZ", "DZ"]):
-        if t_now is not None and -1.5 <= t_now <= 2.0:
-            down_adj += 0.25
-            profile_score += 0.2
-            tags.append("近冰点相变/潜热冷却风险")
-
-    dry_factor = h700_effective_dry_factor(
-        h700_summary,
-        low_cloud_pct=low_cloud,
-        cloud_code_now=cloud_code_now,
-    )
-    if sounding_dry is not None:
-        dry_factor = max(dry_factor * (0.65 if sounding_source == "obs" else 1.0), 0.95 * sounding_dry)
-    if dry_factor > 0:
-        profile_score += 0.18 * dry_factor
-        if cloud_code_now in {"CLR", "CAVOK", "SKC", "FEW", "SCT"}:
-            up_adj += 0.28 * dry_factor
-        else:
-            up_adj += 0.10 * dry_factor
-        if dry_factor >= 0.75:
-            tags.append("探空中层偏干+低层开窗（增温效率提升）" if sounding_source == "obs" else "中层偏干+低层开窗（增温效率提升）")
-        elif dry_factor >= 0.30:
-            tags.append("探空中层偏干背景（需配合低层开窗）" if sounding_source == "obs" else "中层偏干背景（需配合低层开窗）")
-    moist_constraint = (sounding_moist is not None and sounding_moist >= 0.45) or h700_is_moist_constraint(h700_summary)
-    if moist_constraint and dry_factor <= 0:
-        profile_score += 0.35
-        down_adj += 0.25 + (0.08 if sounding_moist is not None and sounding_moist >= 0.75 else 0.0)
-        tags.append("探空中层湿层约束" if sounding_source == "obs" else "中层湿层约束")
-
-    mix_signal = max(sounding_mix or 0.0, sounding_wind_mix or 0.0)
-    if mix_signal >= 0.7:
-        up_adj += 0.26
-        profile_score += 0.24
-        tags.append("探空显示混合下传条件较好")
-    elif w850 is not None:
-        if w850 >= 25 and (low_cloud is None or low_cloud <= 55):
-            up_adj += 0.2
-            profile_score += 0.2
-            tags.append("混合条件较好")
-        elif w850 <= 12 and low_cloud is not None and low_cloud >= 65:
-            down_adj += 0.18
-            profile_score += 0.15
-            tags.append("混合偏弱")
-    if wind_chg is not None and wind_chg >= 45:
-        up_adj += 0.08
-        down_adj += 0.08
-        profile_score += 0.1
-        tags.append("风切节奏扰动")
-    if sounding_source == "obs":
-        if sounding_conf == "H":
-            profile_score += 0.20
-        elif sounding_conf == "M":
-            profile_score += 0.12
-
-    return {
-        "up_adj": up_adj,
-        "down_adj": down_adj,
-        "profile_score": profile_score,
-        "tags": tags,
-    }
-
-
-def _render_signal_scores(
-    primary_window: dict[str, Any],
-    metar_diag: dict[str, Any],
-    line850: str,
-    extra: str,
-    precip_state: str,
-    precip_trend: str,
-    calc_window: dict[str, Any],
-    snd_thermo: dict[str, Any],
-    h700_summary: str,
-    h925_summary: str,
-    cloud_code_now: str,
-) -> tuple[float, float, str]:
-    up = 0.0
-    down = 0.0
-
-    if "暖平流" in line850:
-        up += 1.0
-    if "冷平流" in line850:
-        down += 1.0
-
-    if _contains_any_text(extra, ["封盖", "压制", "湿层", "低云"]):
-        down += 1.0
-    if h700_effective_dry_factor(
-        h700_summary,
-        low_cloud_pct=calc_window.get("low_cloud_pct"),
-        cloud_code_now=cloud_code_now,
-    ) <= 0 and _contains_any_text(extra, ["干层", "日照", "升温加速"]):
-        up += 0.8
-
-    try:
-        bsrc = metar_diag.get("temp_bias_smooth_c") if metar_diag.get("temp_bias_smooth_c") is not None else metar_diag.get("temp_bias_c")
-        b = float(bsrc) if bsrc is not None else 0.0
-    except Exception:
-        b = 0.0
-    if b >= 0.8:
-        up += 0.6
-    elif b <= -0.8:
-        down += 0.6
-
-    ctrend = str(metar_diag.get("cloud_trend") or "")
-    if ("增加" in ctrend) or ("回补" in ctrend):
-        down += 0.5
-    if ("开窗" in ctrend) or ("减弱" in ctrend):
-        up += 0.5
-
-    if precip_trend in {"new", "intensify"}:
-        down += 0.75
-    elif precip_trend in {"weaken", "end"}:
-        up += 0.35
-    elif precip_trend == "steady" and precip_state in {"moderate", "heavy", "convective"}:
-        down += 0.45
-    if precip_state == "convective":
-        down += 0.25
-
-    sf = _render_sounding_factor_pack(
-        calc_window=calc_window,
-        metar_diag=metar_diag,
-        snd_thermo=snd_thermo,
-        h700_summary=h700_summary,
-        h925_summary=h925_summary,
-        cloud_code_now=cloud_code_now,
-    )
-    up += float(sf.get("up_adj") or 0.0)
-    down += float(sf.get("down_adj") or 0.0)
-
-    phase = str(classify_window_phase(primary_window, metar_diag).get("phase") or "unknown")
-    return up, down, phase
-
-
-def _apply_historical_reference(
-    *,
-    metar_diag: dict[str, Any],
-    phase_now: str,
-    compact_settled_mode: bool,
-    core_lo: float,
-    core_hi: float,
-    disp_lo: float,
-    disp_hi: float,
-) -> tuple[float, float, float, float, dict[str, Any] | None]:
-    return blend_historical_range(
-        metar_diag=metar_diag,
-        phase_now=phase_now,
-        compact_settled_mode=compact_settled_mode,
-        core_lo=core_lo,
-        core_hi=core_hi,
-        disp_lo=disp_lo,
-        disp_hi=disp_hi,
-    )
-
-def _build_peak_historical_reference(
-    *,
-    metar_diag: dict[str, Any],
-    historical_blend: dict[str, Any] | None,
-    unit: str,
-) -> dict[str, Any] | None:
-    if not historical_blend or (not historical_blend.get("applied") and not historical_blend.get("display")):
-        return None
-
-    strength_cn = {"weak": "弱参考", "medium": "中参考", "strong": "强参考"}.get(
-        str(historical_blend.get("strength") or ""),
-        str(historical_blend.get("strength") or ""),
-    )
-    weighted = get_weighted_reference(metar_diag)
-    if isinstance(weighted, dict):
-        selected_dates = [str(item) for item in (weighted.get("selected_dates") or []) if str(item).strip()]
-    else:
-        selected_dates = []
-
-    historical_payload = get_historical_payload(metar_diag)
-    historical_context = (historical_payload or {}).get("context") if isinstance(historical_payload, dict) else None
-    if not isinstance(historical_context, dict):
-        return None
-
-    summary_lines = [str(item) for item in (historical_context.get("summary_lines") or []) if str(item).strip()]
-    current_match = _pick_prefixed_line(summary_lines, "当前实况匹配：")
-    analogs = historical_context.get("analogs") if isinstance(historical_context.get("analogs"), list) else []
-    branch_assessment = (historical_payload or {}).get("branch_assessment") if isinstance(historical_payload, dict) else None
-    branch_details = list((branch_assessment or {}).get("branch_details") or []) if isinstance(branch_assessment, dict) else []
-    degree_text = _reference_degree_text(strength_cn)
-    title = "- 历史参考："
-    if bool(historical_blend.get("advisory_only")):
-        title = "- 历史参考（旁证，不参与本次区间定标）："
-
-    lines: list[str] = []
-    if isinstance(branch_assessment, dict) and str(branch_assessment.get("branch_mode") or "") in {"split", "competitive"} and len(branch_details) >= 2:
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for row in analogs:
-            if not isinstance(row, dict):
-                continue
-            label = _analog_branch_label(row)
-            grouped.setdefault(label, []).append(row)
-        for idx, item in enumerate(branch_details[:2], start=1):
-            label = str(item.get("label") or "").strip()
-            if not label:
-                continue
-            rows = sorted(
-                grouped.get(label, []),
-                key=lambda row: float(str(row.get("_similarity_score") or 0.0)),
-                reverse=True,
-            )
-            fit_degree = _reference_degree_text(str(item.get("fit_label") or degree_text))
-            lines.append(f"  - {_branch_reference_text(label, rows, fit_degree, prefix='主' if idx == 1 else '次')}")
-    else:
-        match_txt = current_match or "过渡型"
-        date_text = _date_span_text(selected_dates)
-        single_text = _branch_reference_text(match_txt, [{"local_date": date_text}] if date_text else [], degree_text)
-        lines.append(f"  - {single_text}")
-
-    shift_text = None
-    if historical_blend.get("applied"):
-        shift_text = f"  - {_shift_direction_text(historical_blend.get('shift_c'), unit)}"
-
-    return {
-        "title": title,
-        "lines": lines,
-        "shift_text": shift_text,
-        "blend": historical_blend,
-    }
-
-
-def render_peak_range_block(
-    peak_summary: dict[str, Any],
-    *,
-    unit: str,
-    fmt_range_fn,
-) -> list[str]:
-    summary = dict(peak_summary or {})
-    observed = dict(summary.get("observed") or {})
-    ranges = dict(summary.get("ranges") or {})
-    settled = dict(ranges.get("settled") or {})
-    display_range = dict(ranges.get("display") or {})
-    core_range = dict(ranges.get("core") or {})
-    window = dict(ranges.get("window") or {})
-    skew_bucket = str(ranges.get("skew_bucket") or "neutral")
-    tail_note = str(ranges.get("tail_note") or "").strip()
-    annotations = [str(item) for item in (summary.get("annotations") or []) if str(item).strip()]
-    historical_reference = dict(summary.get("historical_reference") or {})
-
-    block = ["🌡️ **可能最高温区间（仅供参考）**"]
-    if settled.get("active"):
-        block.append(
-            f"- **{fmt_range_fn(float(settled.get('lo')), float(settled.get('hi')))}**（{str(settled.get('reason') or '')}）"
-        )
-    else:
-        disp_lo = float(display_range.get("lo"))
-        disp_hi = float(display_range.get("hi"))
-        core_lo = float(core_range.get("lo"))
-        core_hi = float(core_range.get("hi"))
-        window_label = str(window.get("label") or "峰值窗")
-        window_text = str(window.get("text") or "")
-        if skew_bucket in {"upper_tail", "lower_tail"} and tail_note:
-            block.append(
-                f"- **{fmt_range_fn(disp_lo, disp_hi)}**（主看 {fmt_range_fn(core_lo, core_hi)}；{window_label} {window_text}；{tail_note}）"
-            )
-        else:
-            block.append(f"- **{fmt_range_fn(disp_lo, disp_hi)}**（{window_label} {window_text}）")
-
-    block.extend(annotations)
-    if historical_reference:
-        title = str(historical_reference.get("title") or "").strip()
-        if title:
-            block.append(title)
-        block.extend([str(item) for item in (historical_reference.get("lines") or []) if str(item).strip()])
-        shift_text = str(historical_reference.get("shift_text") or "").strip()
-        if shift_text:
-            block.append(shift_text)
-    return block
-
-
 def build_peak_range_summary(
     primary_window: dict[str, Any],
     syn_w: dict[str, Any],
@@ -659,6 +268,7 @@ def build_peak_range_summary(
     dominant_shape = str(temp_state.get("dominant_shape") or "")
     plateau_hold_state = str(temp_state.get("plateau_hold_state") or "none")
     should_discuss_second_peak = bool(temp_state.get("should_discuss_second_peak"))
+    multi_peak_evidence_level = str(temp_state.get("multi_peak_evidence_level") or "none")
     h500_score = _h500_weight_score(h500_feature)
 
     # horizon to fused peak (used by uncertainty and market-label confidence gating)
@@ -761,7 +371,7 @@ def build_peak_range_summary(
     center += min(0.45, 0.18 * excess_up)
     center -= min(0.45, 0.18 * excess_dn)
 
-    up_s, down_s, _ = _render_signal_scores(
+    up_s, down_s, _ = render_signal_scores(
         primary_window=primary_window,
         metar_diag=metar_diag,
         line850=line850,
@@ -1182,7 +792,7 @@ def build_peak_range_summary(
         lo = max(lo, float(obs_floor))
 
     # anti-collapse guard near peak: avoid over-compressing main band when warm-support evidence is aligned.
-    sf_local = _render_sounding_factor_pack(
+    sf_local = render_sounding_factor_pack(
         calc_window=calc_window,
         metar_diag=metar_diag,
         snd_thermo=snd_thermo,
@@ -1675,7 +1285,7 @@ def build_peak_range_summary(
     elif clear_sky_settled and obs_max is not None and daily_peak_state == "locked":
         compact_settled_mode = True
 
-    core_lo, core_hi, disp_lo, disp_hi, historical_blend = _apply_historical_reference(
+    core_lo, core_hi, disp_lo, disp_hi, historical_blend = apply_historical_reference(
         metar_diag=metar_diag,
         phase_now=phase_now,
         compact_settled_mode=compact_settled_mode,
@@ -1766,12 +1376,13 @@ def build_peak_range_summary(
         annotations.append("- 注：已按实况横盘重锚峰值窗，未直接沿用模型晚段尾部。")
     if bool(metar_diag.get("obs_correction_applied")):
         annotations.append("- 注：已应用实况纠偏（模型峰值偏低，窗口锚定到当日实况峰值时段）。")
-    if should_discuss_second_peak:
+    if should_discuss_second_peak and multi_peak_evidence_level in {"moderate", "strong"}:
         annotations.append("- 注：当前路径更偏分离式多峰，后段仍需防次峰改写前高。")
-    historical_reference = _build_peak_historical_reference(
+    historical_reference = build_peak_historical_reference(
         metar_diag=metar_diag,
         historical_blend=historical_blend,
         unit=unit,
+        fmt_delta_unit=_fmt_delta_unit,
     )
 
     skew_bucket = "neutral"

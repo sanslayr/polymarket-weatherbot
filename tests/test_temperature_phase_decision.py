@@ -123,6 +123,69 @@ class TemperaturePhaseDecisionTest(unittest.TestCase):
         joined = "\n".join(lines)
         self.assertIn("高点大概率已定", joined)
 
+    def test_overnight_carryover_high_does_not_force_multi_peak_watch(self) -> None:
+        primary_window = {
+            "start_local": "2026-03-09T12:00",
+            "peak_local": "2026-03-09T14:00",
+            "end_local": "2026-03-09T16:00",
+            "peak_temp_c": 12.6,
+        }
+        hourly_day = {
+            "time": [
+                "2026-03-09T06:00",
+                "2026-03-09T07:00",
+                "2026-03-09T08:00",
+                "2026-03-09T09:00",
+                "2026-03-09T10:00",
+                "2026-03-09T11:00",
+                "2026-03-09T12:00",
+                "2026-03-09T13:00",
+                "2026-03-09T14:00",
+                "2026-03-09T15:00",
+            ],
+            "temperature_2m": [8.2, 7.8, 7.4, 7.6, 8.4, 9.8, 11.1, 12.0, 12.6, 12.2],
+            "temperature_850hPa": [2.0] * 10,
+            "wind_speed_850hPa": [14.0] * 10,
+            "wind_direction_850hPa": [220.0] * 10,
+            "cloud_cover_low": [70.0, 75.0, 80.0, 70.0, 60.0, 45.0, 35.0, 25.0, 20.0, 30.0],
+            "pressure_msl": [1014.0] * 10,
+        }
+        metar_diag = {
+            "station_icao": "EGLC",
+            "latest_report_local": "2026-03-09T08:30:00+00:00",
+            "observed_max_time_local": "2026-03-09T06:30:00+00:00",
+            "observed_max_temp_c": 8.2,
+            "latest_temp": 7.4,
+            "latest_cloud_code": "BKN",
+            "latest_precip_state": "none",
+            "precip_trend": "none",
+            "cloud_trend": "稳定",
+            "temp_trend_1step_c": -0.2,
+            "temp_trend_smooth_c": -0.2,
+            "temp_bias_c": 0.0,
+            "peak_lock_confirmed": False,
+        }
+        temp_shape_analysis = analyze_temperature_shape(
+            hourly_day,
+            metar_diag=metar_diag,
+            station_icao="EGLC",
+        )
+
+        decision = build_temperature_phase_decision(
+            primary_window,
+            metar_diag,
+            temp_shape_analysis=temp_shape_analysis,
+        )
+
+        self.assertTrue(decision["timing"]["overnight_carryover_high"])
+        self.assertFalse(decision["timing"]["true_daytime_early_peak"])
+        self.assertEqual(decision["shape"]["future_candidate_role"], "primary_remaining_peak")
+        self.assertEqual(decision["shape"]["forecast_multi_peak_state"], "none")
+        self.assertEqual(decision["second_peak_potential"], "none")
+        self.assertEqual(decision["multi_peak_evidence_level"], "none")
+        self.assertFalse(decision["should_discuss_second_peak"])
+        self.assertNotEqual(decision["dominant_shape"], "multi_peak_watch")
+
     def test_sustained_near_peak_hold_prefers_plateau_wording(self) -> None:
         primary_window = {
             "start_local": "2026-03-08T14:00",

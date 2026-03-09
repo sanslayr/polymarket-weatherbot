@@ -44,6 +44,31 @@ def _as_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _humanize_layer_finding(text: Any) -> str:
+    raw = _as_text(text).rstrip("。")
+    if not raw:
+        return ""
+    replacements = (
+        ("模式剖面指向低层浅稳层/弱逆温仍在，午前混合偏慢", "近地面这层空气还比较稳，上午不容易很快升温"),
+        ("模式剖面显示低层存在一定稳定约束", "近地面这层空气还不够容易翻动，升温会偏慢"),
+        ("近地层高湿接近饱和，低云/雾层消散更慢", "近地面又湿又闷，低云和雾不容易很快散开"),
+        ("700hPa附近偏干，若开云可帮助侵蚀低云", "中层偏干，一旦见到日照，会更有利于云层减弱"),
+        ("700hPa附近偏湿，云层维持条件偏强", "中层也偏湿，云层更容易维持"),
+        ("925–850混合潜力尚可，一旦见光后段升温效率可改善", "一旦见到日照，低层空气有机会更快翻动，后段升温会顺一些"),
+        ("925–850混合偏弱，升温更依赖低云何时真正破碎", "低层空气不太容易翻动，升温更要看低云何时真正散开"),
+        ("模式剖面信号中性，优先跟踪下一报温度斜率与云量开合", "层结信号不突出，先看下一报温度和云量怎么走"),
+        ("925–850hPa存在稳定层（封盖信号），冲高持续性受限", "低层上方还有一层稳定空气，升温往上冲会比较吃力"),
+        ("低层湿层上接中层干层", "近地面偏湿，但再往上会转干"),
+        ("925–700hPa层间耦合偏弱", "从近地面到更高一些的大气配合不够顺"),
+        ("925–700hPa层间耦合较顺", "从近地面到更高一些的大气配合还算顺"),
+    )
+    out = raw
+    for src, dst in replacements:
+        if src in out:
+            out = out.replace(src, dst)
+    return out
+
+
 def build_model_sounding_proxy(
     primary_window: dict[str, Any],
     metar_diag: dict[str, Any],
@@ -379,7 +404,7 @@ def build_boundary_layer_regime(
     }
     ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
     regime_key = "synoptic"
-    dominant_mechanism = "大尺度环流控制"
+    dominant_mechanism = "背景环流与输送"
     if static_stable_score >= 1.30 and clearing_score >= 0.80 and static_stable_score >= max(advection_score, synoptic_score):
         regime_key = "boundary_layer_clearing"
         dominant_mechanism = "低云清除"
@@ -403,13 +428,13 @@ def build_boundary_layer_regime(
         confidence = "medium"
 
     if regime_key == "boundary_layer_clearing":
-        headline = "今日更偏静稳低层控制下的边界层清除过程，最高温更取决于低云雾何时被侵蚀，而不是强大尺度强迫。"
+        headline = "今天先看低云和雾何时散开；在它们真正减弱前，升温会比较慢，最高温也更容易被压住。"
         tracking_line = "优先看低云底是否抬升、温露差是否拉大、风速是否略增；若未来1-2报仍未明显开云，上沿需下修。"
     elif regime_key == "static_stable":
-        headline = "今日更像静稳低层控制/浅逆温约束型，午前升温效率偏低，上沿更容易受压。"
+        headline = "今天低层空气偏稳，近地面不容易很快升温；如果这种状态不松动，白天最高温就更难抬高。"
         tracking_line = "重点看低层稳层是否松动；若温露差继续很小、云底维持偏低、风场仍弱，则全天上沿更难抬高。"
     elif regime_key == "mixing_depth":
-        headline = "今日更偏混合深度控制，地面能否尽快打穿低层稳层，将决定后段升温效率。"
+        headline = "今天能不能升得更快，主要看近地面这层闷住的空气何时被打散；一旦混合起来，后段升温会顺很多。"
         tracking_line = "优先看风速与温度斜率是否同步放大；若见光后混合层迅速加深，后段仍可补涨。"
     elif regime_key == "advection":
         direction = thermal_advection_direction(adv_review, line850=line850)
@@ -436,28 +461,54 @@ def build_boundary_layer_regime(
             else:
                 tracking_line = "优先看风向是否转入更有利增温的象限、风速是否增强，以及实况是否重新转暖偏离同小时模式；这将决定后段能否抬高上沿。"
         else:
-            headline = "今日更偏低层温度输送主导，最高温更受低层热力信号能否在峰值窗前后真正落地影响。"
+            headline = "今天更要看低层空气本身是在变暖还是变冷，以及这种变化能不能真正传到地面。"
             tracking_line = "优先看风向风速是否发生持续重排，以及实况与同小时模式的温度偏差是否同向扩大，确认低层温度输送是否开始主导地面温度。"
     else:
-        headline = "今日仍更偏大尺度环流控制，大尺度背景与输送配置对上沿的解释力更强。"
-        tracking_line = "优先跟踪环流触发能否落地到近地风云结构，再决定是否需要重估上沿。"
+        background_bits: list[str] = []
+        if low_cloud_pct is not None and low_cloud_pct >= 50.0:
+            background_bits.append("低层云量能否进一步减弱")
+        if adv_state in {"confirmed", "probable"} or adv_role in {"dominant", "influence"}:
+            direction = thermal_advection_direction(adv_review, line850=line850)
+            if direction == "cold":
+                background_bits.append("偏冷输送是否继续落地")
+            elif direction == "warm":
+                background_bits.append("偏暖输送是否继续落地")
+            else:
+                background_bits.append("低层输送是否继续重排")
+        if not background_bits:
+            background_bits.append("云量配置")
+            background_bits.append("低层输送")
+
+        if h500_regime:
+            headline = (
+                f"今日缺少单一的低层清除、静稳或平流主导触发，最高温更受{h500_regime}背景下的"
+                + "、".join(background_bits[:2])
+                + "与午后升温效率共同影响。"
+            )
+        else:
+            headline = (
+                "今日缺少单一的低层清除、静稳或平流主导触发，最高温更受"
+                + "、".join(background_bits[:2])
+                + "与午后升温效率共同影响。"
+            )
+        tracking_line = "优先看云量是否继续减少、近地风场是否持续重排，以及实况温度斜率能否顺着模式路径放大，再决定是否重估上沿。"
 
     layer_bits: list[str] = []
     for finding in list(thermo.get("layer_findings") or []):
-        txt = _as_text(finding).rstrip("。")
+        txt = _humanize_layer_finding(finding)
         if txt and txt not in layer_bits:
             layer_bits.append(txt)
     for finding in list(thermo.get("relationship_findings") or []):
-        txt = _as_text(finding).rstrip("。")
+        txt = _humanize_layer_finding(finding)
         if txt and txt not in layer_bits:
             layer_bits.append(txt)
     if not layer_bits:
         if cap_score >= 0.65:
-            layer_bits.append("低层浅稳层/弱逆温仍在")
+            layer_bits.append("近地面这层空气还比较稳")
         if mid_dry_score >= 0.55:
-            layer_bits.append("700hPa附近偏干")
+            layer_bits.append("中层偏干")
         elif mid_moist_score >= 0.55:
-            layer_bits.append("700hPa附近偏湿")
+            layer_bits.append("中层偏湿")
     layer_summary = "；".join(layer_bits[:3]) + "。" if layer_bits else ""
 
     reason_codes: list[str] = []
@@ -484,7 +535,6 @@ def build_boundary_layer_regime(
         "schema_version": BOUNDARY_LAYER_REGIME_SCHEMA_VERSION,
         "regime_key": regime_key,
         "dominant_mechanism": dominant_mechanism,
-        "dominant_question": dominant_mechanism,
         "confidence": confidence,
         "sounding_mode": str(thermo.get("profile_source") or "model_proxy"),
         "scores": scores,

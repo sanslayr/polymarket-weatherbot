@@ -24,6 +24,13 @@ import requests
 
 PROCESS_T0 = time.perf_counter()
 
+
+def _format_local_header_time(now_utc: datetime, now_local: datetime) -> str:
+    local_time = now_local.strftime("%H:%M")
+    if now_local.date() != now_utc.date():
+        local_time = f"{now_local.month}/{now_local.day} {local_time}"
+    return f"{local_time} Local ({format_utc_offset(now_local)})"
+
 from forecast_pipeline import load_or_build_forecast_decision
 from realtime_pipeline import classify_window_phase
 from look_change_guard import build_cached_result_meta, build_unchanged_notice
@@ -298,7 +305,7 @@ def _render_metar_only_report(
     now_local = now_utc.astimezone(tz)
     header = (
         f"📍 **{st.icao} ({st.city}) | {abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}**\n"
-        f"判断时间: {now_utc.strftime('%Y/%m/%d %H:%M')} UTC | {now_local.strftime('%Y/%m/%d %H:%M')} Local ({format_utc_offset(now_local)})\n"
+        f"判断时间: {now_utc.strftime('%Y/%m/%d %H:%M')} UTC | {_format_local_header_time(now_utc, now_local)}\n"
         f"分析链路: 小时预报/3D背景不可用（最近运行时次参考: {rt_fmt}）\n"
         "**🦞龙虾学习中，不提供交易建议🦞**"
     )
@@ -676,7 +683,7 @@ def render_report(
 
         header_lines = [
             f"📍 **{st.icao} ({st.city}) | {head_geo}**",
-            f"生成时间: {datetime.now(timezone.utc).strftime('%Y/%m/%d %H:%M')} UTC | {now_local.strftime('%Y/%m/%d %H:%M')} Local ({format_utc_offset(now_local)})",
+            f"生成时间: {now_utc.strftime('%Y/%m/%d %H:%M')} UTC | {_format_local_header_time(now_utc, now_local)}",
         ]
         if not compact_synoptic:
             cycle_bits = []
@@ -688,7 +695,7 @@ def render_report(
                 cycle_bits.append(f"对比前一时次 {syn_prev_rt_fmt}")
             cycle_txt = " | ".join(cycle_bits) if cycle_bits else rt_fmt
             header_lines.append(
-                f"分析链路: 小时预报源 {provider_used} | 3D场源 {synoptic_provider_used}（数值模型时次: {cycle_txt}）"
+                f"分析链路: 小时预报源 {provider_used} | 数值预报场源 {synoptic_provider_used}（数值模型时次: {cycle_txt}）"
             )
             if direction_factor:
                 header_lines.append(f"方位因子: {direction_factor}")
@@ -702,11 +709,11 @@ def render_report(
             provider_requested_3d = str(quality.get("synoptic_provider_requested") or SYNOPTIC_PROVIDER)
             if provider_requested_3d != provider_used_3d:
                 header_lines.append(
-                    f"⚠️ 数据提醒：3D场已从 {provider_requested_3d} 回退到 {provider_used_3d}。"
+                    f"⚠️ 数据提醒：数值预报场已从 {provider_requested_3d} 回退到 {provider_used_3d}。"
                 )
             elif syn_fail and _synoptic_error:
                 header_lines.append(
-                    f"⚠️ 数据提醒：3D场({provider_used_3d}) 层存在降级，部分环流诊断可能偏弱。"
+                    f"⚠️ 数据提醒：数值预报场({provider_used_3d}) 层存在降级，部分环流诊断可能偏弱。"
                 )
         except Exception:
             pass

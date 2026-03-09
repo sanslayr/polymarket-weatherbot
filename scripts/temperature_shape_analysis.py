@@ -381,6 +381,11 @@ def analyze_temperature_shape(
                 enriched["gap_vs_current_c"] = round(float(candidate["peak_temp_c"]) - latest_temp, 2)
             else:
                 enriched["gap_vs_current_c"] = None
+            enriched["candidate_role"] = (
+                "primary_remaining_peak"
+                if primary_candidate is not None and int(candidate["peak_index"]) == int(primary_candidate["peak_index"])
+                else "secondary_peak_candidate"
+            )
             future_ranked.append(enriched)
         if future_ranked:
             future_candidate = future_ranked[0]

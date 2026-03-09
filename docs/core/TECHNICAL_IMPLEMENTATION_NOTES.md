@@ -6,7 +6,6 @@ Last updated: 2026-03-09
 
 ## 0) 已退役模块
 - 旧概率计算层（`probability_*` / `scoring_engine` / `market_mapper` 等）已从运行代码移除。
-- 历史说明保留在 `docs/archive/PROBABILITY_LIBRARY.md`，不再参与 `/look` 执行链路。
 
 ## 0.1) 入口拆分约束（持续执行）
 - `telegram_report_cli.py` 仅保留 orchestration + 最终文案渲染。

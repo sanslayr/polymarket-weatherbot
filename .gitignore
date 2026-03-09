@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+.venv_gfs/
 cache/historical_reference/
 cache/runtime/
 runtime/

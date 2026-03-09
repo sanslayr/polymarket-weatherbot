@@ -111,9 +111,21 @@ class AnalysisSnapshotServiceTest(unittest.TestCase):
         self.assertIn("temp_phase_decision", snapshot)
         self.assertIn("peak_data", snapshot)
         self.assertIn("synoptic_summary", snapshot)
+        self.assertIn("canonical_raw_state", snapshot)
+        self.assertIn("posterior_feature_vector", snapshot)
+        self.assertIn("quality_snapshot", snapshot)
+        self.assertIn("weather_posterior", snapshot)
         self.assertIn("summary", snapshot["peak_data"])
         self.assertIn("block", snapshot["peak_data"])
-        self.assertTrue(any("主导系统" in line for line in snapshot["synoptic_summary"]["lines"]))
+        self.assertTrue(any("相关链路" in line for line in snapshot["synoptic_summary"]["lines"]))
+        self.assertEqual(snapshot["schema_version"], "analysis-snapshot.v6")
+        self.assertEqual(snapshot["canonical_raw_state"]["schema_version"], "canonical-raw-state.v2")
+        self.assertEqual(snapshot["posterior_feature_vector"]["schema_version"], "posterior-feature-vector.v2")
+        self.assertEqual(snapshot["quality_snapshot"]["schema_version"], "quality-snapshot.v2")
+        self.assertEqual(snapshot["weather_posterior"]["schema_version"], "weather-posterior.v1")
+        self.assertNotIn("headline", snapshot["posterior_feature_vector"].get("regime_state", {}))
+        self.assertIn("observation_state", snapshot["posterior_feature_vector"])
+        self.assertIn("quantiles", snapshot["weather_posterior"])
 
         snapshot["boundary_layer_regime"]["headline"] = "测试主导机制"
         rendered = choose_section_text(

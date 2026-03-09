@@ -4,26 +4,28 @@ Last updated: 2026-03-09
 
 ## Goal
 
-`polymarket-weatherbot` provides a station-centric Tmax analysis pipeline for `/look`.
+`polymarket-weatherbot` provides a station-centric Tmax analysis runtime.
 
 Current objectives:
 
 - produce a clear human-readable Tmax report
+- support future headless analysis, scheduled scanning, and opportunity triggers without depending on `/look`
 - keep weather inference independent from market labeling
 - preserve a structured analysis layer that can later feed posterior/probability and execution modules
 
 ## Current System Shape
 
-The current runtime chain is:
+The current user-facing runtime chain is:
 
 1. parse `/look` command and resolve station/date
 2. fetch hourly forecast, METAR, and 3D synoptic context
 3. build forecast decision artifacts and realtime observation diagnostics
 4. assemble a structured `analysis_snapshot`
-5. render human report output
-6. optionally render Polymarket market section from weather-side outputs
+5. build report-support focus bundle
+6. render human report output
+7. optionally render Polymarket market section from weather-side outputs
 
-This means human report output is now a consumer of the analysis layer, not the place where core Tmax logic should live.
+This means human report output is now a consumer of the analysis layer, not the place where core Tmax logic should live. `/look` is the current public entrypoint, not the intended long-term boundary of the system.
 
 ## Main Layers
 
@@ -59,10 +61,14 @@ This means human report output is now a consumer of the analysis layer, not the 
 - `scripts/diagnostics_sounding.py`
 - `scripts/synoptic_summary_service.py`
 - `scripts/peak_range_service.py`
+- `scripts/peak_range_signal_service.py`
+- `scripts/peak_range_history_service.py`
+- `scripts/peak_range_render_service.py`
 
 ### 4) Snapshot / Rendering
 
 - `scripts/analysis_snapshot_service.py`
+- `scripts/report_focus_service.py`
 - `scripts/report_render_service.py`
 - `scripts/metar_analysis_service.py`
 - `scripts/polymarket_render_service.py`
@@ -72,11 +78,11 @@ This means human report output is now a consumer of the analysis layer, not the 
 
 The architecture is materially cleaner than the pre-snapshot stage, but three issues still matter:
 
-1. `analysis_snapshot` is now the main structured handoff, but there is still no single formal `canonical_raw_state`.
-2. `report_render_service.py` is thinner than before, but render fallback logic still exists and should keep shrinking.
-3. `peak_range_service.py` has become the new hotspot; long-term it should be split into:
+1. `analysis_snapshot` 现在已显式带 `canonical_raw_state`、`posterior_feature_vector`、`quality_snapshot` 和 `weather_posterior`，天气主链 contract 已立起来，但字段覆盖仍需继续扩展。
+2. `report_render_service.py` 已退出主关注项推理，当前主路径只消费 snapshot 与 `report_focus_service.py` 的结果。
+3. `peak_range_service.py` has become the new hotspot; render/history/signal helpers have already been split out, but the core range computation remains large. Long-term it should continue splitting into:
    - posterior/range computation
-   - text rendering
+   - historical/calibration helpers
 
 ## Recommended Next-Step Direction
 

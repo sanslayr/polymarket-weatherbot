@@ -915,14 +915,7 @@ def metar_observation_block(
         except Exception:
             rad_eff_trend = None
 
-    summary_bits = [trend_hint, cloud_hint]
-    if wx_hint:
-        summary_bits.append(wx_hint)
-    if wx_change_hint:
-        summary_bits.append(wx_change_hint)
-
-    # 合并“简评 + 近两小时节奏”为单行趋势描述
-    rhythm_chunks: list[str] = []
+    reminder_bits: list[str] = []
     try:
         if prev is not None and prev2 is not None:
             t0 = float(latest.get("temp", 0.0))
@@ -951,36 +944,43 @@ def metar_observation_block(
 
             if temp_signal or press_signal or wind_signal or cloud_signal:
                 if dt_now >= 0.5 and dt_prev >= 0.2:
-                    rhythm_chunks.append("温度仍在上行")
+                    reminder_bits.append("短时升温仍在延续")
                 elif dt_now <= -0.5 and dt_prev <= -0.2:
-                    rhythm_chunks.append("温度有回落迹象")
+                    reminder_bits.append("温度有回落迹象")
                 elif temp_signal:
-                    rhythm_chunks.append("温度在窄幅震荡")
+                    reminder_bits.append("温度在窄幅震荡")
 
                 if press_signal:
                     if dp2h <= -1.2:
-                        rhythm_chunks.append("气压继续走低")
+                        reminder_bits.append("气压继续走低")
                     elif dp2h >= 1.2:
-                        rhythm_chunks.append("气压明显回升")
+                        reminder_bits.append("气压明显回升")
 
                 if wind_signal:
-                    rhythm_chunks.append("风向正在重排")
+                    reminder_bits.append("风向正在重排")
 
                 if cloud_signal:
                     if "回补" in cloud_txt or "增加" in cloud_txt:
-                        rhythm_chunks.append("云量有回补")
+                        reminder_bits.append("云量有回补")
                     elif "开窗" in cloud_txt or "减少" in cloud_txt:
-                        rhythm_chunks.append("云量在转疏")
+                        reminder_bits.append("云量在转疏")
     except Exception:
-        rhythm_chunks = []
+        reminder_bits = []
 
-    merged_bits = list(summary_bits)
-    for c in rhythm_chunks:
-        if c not in merged_bits:
-            merged_bits.append(c)
+    if wx_change_hint:
+        reminder_bits.append(wx_change_hint)
+    elif wx_hint and wx_trend in {"steady"}:
+        reminder_bits.append(wx_hint)
 
-    lines.append("")
-    lines.append(f"• 最近两小时实况趋势：{'，'.join(merged_bits)}。")
+    deduped_reminders: list[str] = []
+    for item in reminder_bits:
+        text = str(item).strip()
+        if text and text not in deduped_reminders:
+            deduped_reminders.append(text)
+
+    if deduped_reminders:
+        lines.append("")
+        lines.append(f"• 实况提醒：{'，'.join(deduped_reminders)}。")
 
     wind_dir_change = None
     wind_speed_step = None

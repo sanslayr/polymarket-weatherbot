@@ -2,14 +2,15 @@
 
 Last updated: 2026-03-09
 
-目标：让 `/look` 的天气分析链路足够清晰、可扩展、可复用，并为后续 Tmax 概率层和自动交易层保留稳定接口。
+目标：让天气分析链路足够清晰、可扩展、可复用，并为后续 Tmax 概率层、自动扫描和自动交易层保留稳定接口。
 
 ## 1) 当前主链路
 
 ### A. Ingress / Orchestrator
 
 - `scripts/telegram_report_cli.py`
-  - 负责 `/look` 入口、运行编排、降级兜底、最终文本拼装
+  - 当前主要负责 `/look` 人类查询入口、运行编排、降级兜底、最终文本拼装
+  - 长期目标不是唯一入口；后续可被定时扫描器和策略运行器旁路复用
 - `scripts/look_command.py`
   - 命令解析与帮助文本
 - `scripts/station_catalog.py`
@@ -62,19 +63,33 @@ Last updated: 2026-03-09
 - `scripts/boundary_layer_regime.py`
   - 主导机制、层结摘要、关注变量跟踪线
   - 当前正式机制字段：`dominant_mechanism`
-  - `dominant_question` 仅作为兼容别名保留
 - `scripts/synoptic_summary_service.py`
   - 结构化环流摘要
 - `scripts/peak_range_service.py`
-  - 结构化峰值区间分析 + 峰值区间文本块
+  - 结构化峰值区间分析
+- `scripts/peak_range_signal_service.py`
+  - 区间分析用的信号评分与探空评分 helper
+- `scripts/peak_range_history_service.py`
+  - 历史参考融合与历史参考展示字段构造
+- `scripts/peak_range_render_service.py`
+  - 峰值区间文本块渲染
 
 ### E. Snapshot / Render Layer
 
 - `scripts/analysis_snapshot_service.py`
   - 汇总当前主要结构化分析结果
-  - 当前 schema：`analysis-snapshot.v2`
+  - 当前 schema：`analysis-snapshot.v6`
+  - 当前已包含：
+    - `canonical_raw_state`
+    - `posterior_feature_vector`
+    - `quality_snapshot`
+    - `weather_posterior`
+- `scripts/report_focus_service.py`
+  - 负责“关注变量 / 实况分析附注 / market label policy”这类报告支持块
+  - `report_render_service.py` 只消费其结构化结果，不再承担主推理
 - `scripts/report_render_service.py`
   - 只负责把 snapshot 和 report evidence 转成正文
+  - 已清除旧的变量/市场 fallback 推理函数
 - `scripts/metar_analysis_service.py`
   - 实况诊断与 METAR block
 - `scripts/polymarket_render_service.py`
@@ -105,7 +120,12 @@ Last updated: 2026-03-09
 - `forecast-decision.v8`
 - `forecast-3d-bundle.v2`
 - `objects-3d.v2`
-- `analysis-snapshot.v2`
+- `canonical-raw-state.v2`
+- `posterior-feature-vector.v2`
+- `quality-snapshot.v2`
+- `weather-posterior-core.v1`
+- `weather-posterior.v1`
+- `analysis-snapshot.v6`
 - `synoptic-cache.v3`
 
 运行时缓存 envelope 统一由 `runtime-cache.v1` 包裹。
@@ -114,22 +134,22 @@ Last updated: 2026-03-09
 
 1. 3D provider 已从单一 GFS 改成 router 模式，默认 ECMWF，更利于后续多模型扩展。
 2. `analysis_snapshot_service.py` 已建立结构化 handoff，报告层不再是唯一逻辑中心。
-3. `peak_range_service.py` 和 `synoptic_summary_service.py` 已把一部分“边渲染边推理”逻辑收回分析层。
-4. `vertical_3d.py` 已具备基础 tracking 能力，不再只是静态单帧 object 摘要。
+3. `analysis_snapshot_service.py` 已显式产出 `canonical_raw_state`、`posterior_feature_vector`、`quality_snapshot` 与 `weather_posterior`，天气后验层已有 `core + calibration hook` 结构。
+4. `peak_range_service.py`、`peak_range_history_service.py`、`peak_range_signal_service.py` 和 `synoptic_summary_service.py` 已把一部分“边渲染边推理”逻辑收回分析层。
+5. `vertical_3d.py` 已具备基础 tracking 能力，不再只是静态单帧 object 摘要。
 
 ## 5) 当前仍需继续收口的问题
 
-1. 缺少正式的 `canonical_raw_state`
-   - provider 原始状态仍然分散在 hourly / synoptic / metar / sounding 多条链
-2. 缺少独立的 `posterior_feature_vector`
-   - 当前 `analysis_snapshot` 仍混有部分面向报告的字段
-3. `report_render_service.py` 仍有 fallback 推理
-   - 目标仍应是“render consumes analysis”, 而不是“render retries analysis”
-4. `peak_range_service.py` 已成为新的复杂度热点
+1. `canonical_raw_state` 和 `posterior_feature_vector` 已开始落地
+   - provider 原始状态与 feature 轴已初步收口，后续仍需继续扩字段并压缩零散兼容输入
+2. `report_render_service.py` 的主路径已退出变量/后验推理
+   - 关注变量与市场标签策略已迁到 `report_focus_service.py`
+   - 当前已基本收成纯 render；后续重点应转向删减零散 presentation fallback
+3. `peak_range_service.py` 已成为新的复杂度热点
    - 后续建议拆成：
      - peak posterior / range computation
-     - peak text render
-5. 3D tracking 仍是轻量 heuristic
+     - historical/calibration helper
+4. 3D tracking 仍是轻量 heuristic
    - 目前能区分 `approaching / receding / passing / steady`
    - 还不等于完整的 split/merge/trajectory solver
 
@@ -141,3 +161,4 @@ Last updated: 2026-03-09
   - [LOOK_OUTPUT_CONTRACT.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/LOOK_OUTPUT_CONTRACT.md)
 - 目标版 weather/market/research 分层：
   - [TARGET_ARCHITECTURE.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/TARGET_ARCHITECTURE.md)
+  - [MARKET_ARCHITECTURE.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/MARKET_ARCHITECTURE.md)

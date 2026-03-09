@@ -46,6 +46,10 @@ class TemperatureShapeAnalysisTest(unittest.TestCase):
         self.assertEqual(shape["forecast"]["shape_type"], "multi_peak")
         self.assertEqual(shape["forecast"]["multi_peak_state"], "likely")
         self.assertEqual(len(shape["forecast"]["candidates"]), 2)
+        self.assertEqual(shape["forecast"]["future_candidate"]["candidate_role"], "primary_remaining_peak")
+        self.assertTrue(
+            any(candidate["peak_local"] == "2026-03-08T15:00" for candidate in shape["forecast"]["candidates"])
+        )
         self.assertEqual(shape["forecast"]["future_candidate"]["peak_local"], "2026-03-08T15:00")
 
     def test_detects_broad_plateau_and_sustained_hold(self) -> None:
@@ -80,6 +84,41 @@ class TemperatureShapeAnalysisTest(unittest.TestCase):
         self.assertEqual(shape["forecast"]["plateau_state"], "broad")
         self.assertEqual(shape["forecast"]["multi_peak_state"], "none")
         self.assertEqual(shape["observed"]["plateau_state"], "sustained")
+
+    def test_marks_future_primary_peak_as_remaining_main_peak_not_secondary(self) -> None:
+        hourly_day = {
+            "time": [
+                "2026-03-09T06:00",
+                "2026-03-09T07:00",
+                "2026-03-09T08:00",
+                "2026-03-09T09:00",
+                "2026-03-09T10:00",
+                "2026-03-09T11:00",
+                "2026-03-09T12:00",
+                "2026-03-09T13:00",
+                "2026-03-09T14:00",
+                "2026-03-09T15:00",
+            ],
+            "temperature_2m": [8.2, 7.8, 7.4, 7.6, 8.4, 9.8, 11.1, 12.0, 12.6, 12.2],
+            "temperature_850hPa": [2.0] * 10,
+            "wind_speed_850hPa": [14.0] * 10,
+            "wind_direction_850hPa": [220.0] * 10,
+            "cloud_cover_low": [70.0, 75.0, 80.0, 70.0, 60.0, 45.0, 35.0, 25.0, 20.0, 30.0],
+            "pressure_msl": [1014.0] * 10,
+        }
+        metar_diag = {
+            "latest_report_local": "2026-03-09T08:30:00+00:00",
+            "observed_max_time_local": "2026-03-09T06:30:00+00:00",
+            "observed_max_temp_c": 8.2,
+            "latest_temp": 7.4,
+            "temp_trend_smooth_c": -0.2,
+        }
+
+        shape = analyze_temperature_shape(hourly_day, metar_diag=metar_diag, station_icao="EGLC")
+
+        self.assertEqual(shape["forecast"]["shape_type"], "single_peak")
+        self.assertEqual(shape["forecast"]["multi_peak_state"], "none")
+        self.assertEqual(shape["forecast"]["future_candidate"]["candidate_role"], "primary_remaining_peak")
 
 
 if __name__ == "__main__":

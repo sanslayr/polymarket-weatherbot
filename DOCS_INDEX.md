@@ -17,6 +17,8 @@ Last updated: 2026-03-09
 ### A. Core（稳定规则 / 设计真源）
 - `docs/core/ARCHITECTURE.md`
 - `docs/core/TARGET_ARCHITECTURE.md`
+- `docs/core/MARKET_ARCHITECTURE.md`
+- `docs/core/MARKET_TRADING_PLAN.md`
 - `docs/core/DECISION_SCHEMA.md`
 - `docs/core/FORECAST_3D_STORAGE.md`
 - `docs/core/LOOK_OUTPUT_CONTRACT.md`
@@ -44,8 +46,6 @@ Last updated: 2026-03-09
 ### D. Archive（旧规划/模板，非当前真源）
 - `docs/archive/City_Tmax_Analysis_Skill_Planning.md`
 - `docs/archive/LOOK_MD_TEMPLATE.md`
-- `docs/archive/PROBABILITY_LIBRARY.md`
-- `docs/archive/SCENARIO_QUANT_FEATURES.md`
 
 ---
 
