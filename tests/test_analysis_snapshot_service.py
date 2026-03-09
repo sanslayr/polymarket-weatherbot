@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,7 +14,7 @@ from report_render_service import choose_section_text  # noqa: E402
 
 
 class AnalysisSnapshotServiceTest(unittest.TestCase):
-    def test_snapshot_drives_render_headline(self) -> None:
+    def _sample_inputs(self):
         primary_window = {
             "start_local": "2026-03-09T11:00",
             "peak_local": "2026-03-09T14:00",
@@ -98,6 +99,10 @@ class AnalysisSnapshotServiceTest(unittest.TestCase):
                 },
             },
         }
+        return primary_window, metar_diag, forecast_decision
+
+    def test_snapshot_drives_render_headline(self) -> None:
+        primary_window, metar_diag, forecast_decision = self._sample_inputs()
 
         snapshot = build_analysis_snapshot(
             primary_window=primary_window,
@@ -138,6 +143,44 @@ class AnalysisSnapshotServiceTest(unittest.TestCase):
         )
 
         self.assertIn("测试主导机制", rendered)
+
+    def test_market_range_hint_uses_peak_block_ranges(self) -> None:
+        primary_window, metar_diag, forecast_decision = self._sample_inputs()
+        snapshot = build_analysis_snapshot(
+            primary_window=primary_window,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            temp_unit="C",
+        )
+        snapshot["peak_data"]["summary"]["ranges"]["display"]["lo"] = 7.0
+        snapshot["peak_data"]["summary"]["ranges"]["display"]["hi"] = 7.2
+        snapshot["peak_data"]["summary"]["ranges"]["core"]["lo"] = 7.05
+        snapshot["peak_data"]["summary"]["ranges"]["core"]["hi"] = 7.2
+        snapshot["weather_posterior"]["range_hint"] = {
+            "display": {"lo_c": 7.8, "hi_c": 9.0},
+            "core": {"lo_c": 8.0, "hi_c": 8.8},
+        }
+
+        with patch("report_render_service._build_polymarket_section", return_value="") as mock_poly:
+            choose_section_text(
+                primary_window,
+                "样例 METAR 文本",
+                metar_diag,
+                "https://polymarket.com/event/test",
+                forecast_decision=forecast_decision,
+                analysis_snapshot=snapshot,
+            )
+
+        kwargs = mock_poly.call_args.kwargs
+        self.assertEqual(
+            kwargs["range_hint"],
+            {
+                "display_lo": 7.0,
+                "display_hi": 7.2,
+                "core_lo": 7.05,
+                "core_hi": 7.2,
+            },
+        )
 
 
 if __name__ == "__main__":

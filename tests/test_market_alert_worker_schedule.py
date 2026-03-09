@@ -28,8 +28,8 @@ class MarketAlertWorkerScheduleTest(unittest.TestCase):
             "routine_cadence_min": 30.0,
         }
         start, end, scheduled = _current_or_next_window(ctx, datetime(2026, 3, 9, 9, 21, 30, tzinfo=timezone.utc))
-        self.assertEqual(start, datetime(2026, 3, 9, 9, 21, tzinfo=timezone.utc))
-        self.assertEqual(end, datetime(2026, 3, 9, 9, 23, tzinfo=timezone.utc))
+        self.assertEqual(start, datetime(2026, 3, 9, 9, 20, 30, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2026, 3, 9, 9, 25, tzinfo=timezone.utc))
         self.assertEqual(scheduled, "2026-03-09T09:20:00Z")
 
     def test_current_or_next_window_rolls_forward_to_next_report(self) -> None:
@@ -38,8 +38,8 @@ class MarketAlertWorkerScheduleTest(unittest.TestCase):
             "routine_cadence_min": 30.0,
         }
         start, end, scheduled = _current_or_next_window(ctx, datetime(2026, 3, 9, 9, 40, tzinfo=timezone.utc))
-        self.assertEqual(start, datetime(2026, 3, 9, 9, 51, tzinfo=timezone.utc))
-        self.assertEqual(end, datetime(2026, 3, 9, 9, 53, tzinfo=timezone.utc))
+        self.assertEqual(start, datetime(2026, 3, 9, 9, 50, 30, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2026, 3, 9, 9, 55, tzinfo=timezone.utc))
         self.assertEqual(scheduled, "2026-03-09T09:50:00Z")
 
 

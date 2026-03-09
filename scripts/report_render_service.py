@@ -139,14 +139,15 @@ def choose_section_text(
         metar_block = metar_block + "\n\n**实况分析**\n" + "\n".join(metar_analysis_lines)
 
     label_policy = dict(report_focus.get("market_label_policy") or {})
-    posterior_range = dict(weather_posterior.get("range_hint") or {})
-    posterior_display = dict(posterior_range.get("display") or {})
-    posterior_core = dict(posterior_range.get("core") or {})
     range_hint = {
-        "display_lo": float(posterior_display.get("lo_c")) if posterior_display.get("lo_c") is not None else float(disp_lo),
-        "display_hi": float(posterior_display.get("hi_c")) if posterior_display.get("hi_c") is not None else float(disp_hi),
-        "core_lo": float(posterior_core.get("lo_c")) if posterior_core.get("lo_c") is not None else float(core_lo),
-        "core_hi": float(posterior_core.get("hi_c")) if posterior_core.get("hi_c") is not None else float(core_hi),
+        # Keep the market ladder aligned with the same peak-range block shown above.
+        # Using a broader posterior-only hint here can produce contradictory output
+        # such as "likely capped" in the peak block while tagging a hotter tail bin
+        # as "most likely" in the Polymarket block.
+        "display_lo": float(disp_lo),
+        "display_hi": float(disp_hi),
+        "core_lo": float(core_lo),
+        "core_hi": float(core_hi),
     }
 
     poly_block = ""

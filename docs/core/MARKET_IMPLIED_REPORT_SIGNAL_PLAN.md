@@ -20,7 +20,7 @@ Example:
 
 - market: `6°C or below`
 - before report: `best_bid >= 0.02`
-- during `+1 to +3 minutes` after routine report time: `best_bid -> 0` or `best_ask <= 0.01`
+- during `+0.5 to +5 minutes` after routine report time: `best_bid -> 0` or `best_ask <= 0.01`
 - this can imply the market is already trading as if the latest report is `> 6°C`
 
 This does **not** require `7°C` or `8°C` buckets to rise immediately.
@@ -123,7 +123,7 @@ Baseline trigger:
 - bucket kind is `at_or_below`
 - threshold is `X`
 - previous `best_bid >= 0.02`
-- event occurs within `[+60s, +180s]` of scheduled report time
+- event occurs within `[+30s, +300s]` of scheduled report time
 - and one of:
   - current `best_bid <= 0.001` or no meaningful bid
   - current `best_ask <= 0.01`
@@ -207,7 +207,7 @@ Push format should be short:
 
 ```text
 盘口异常提示
-London | 常规报后 1-3 分钟
+London | 常规报后 0.5-5 分钟
 `6°C or below` 买盘被扫空 / ask 下压到 0.01
 市场隐含最新报下界：>= 7°C
 说明：这只是市场先行反应，不等于官方实况已确认

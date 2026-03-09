@@ -125,19 +125,19 @@ def _next_report_window_start(latest_report_utc: datetime, cadence_min: float, n
     next_report = latest_report_utc
     while next_report <= now_utc:
         next_report = next_report + timedelta(minutes=cadence)
-    return next_report + timedelta(seconds=60)
+    return next_report + timedelta(seconds=30)
 
 
 def _current_or_next_window(ctx: dict[str, Any], now_utc: datetime) -> tuple[datetime, datetime, str]:
     latest_report_utc = ctx["latest_report_utc"]
     cadence_min = float(ctx["routine_cadence_min"])
-    current_start = latest_report_utc + timedelta(seconds=60)
-    current_end = latest_report_utc + timedelta(seconds=180)
+    current_start = latest_report_utc + timedelta(seconds=30)
+    current_end = latest_report_utc + timedelta(seconds=300)
     if current_start <= now_utc <= current_end:
         return current_start, current_end, latest_report_utc.isoformat().replace("+00:00", "Z")
     next_start = _next_report_window_start(latest_report_utc, cadence_min, now_utc)
-    scheduled_report = next_start - timedelta(seconds=60)
-    next_end = scheduled_report + timedelta(seconds=180)
+    scheduled_report = next_start - timedelta(seconds=30)
+    next_end = scheduled_report + timedelta(seconds=300)
     return next_start, next_end, scheduled_report.isoformat().replace("+00:00", "Z")
 
 
@@ -176,7 +176,7 @@ def _station_task(row: dict[str, str], metar_ctx: dict[str, Any], scheduled_repo
         observed_max_temp_c=metar_ctx.get("observed_max_temp_c"),
         scheduled_report_utc=scheduled_report_utc,
         daily_peak_state="open",
-        stream_seconds=float(os.getenv("MARKET_EVENT_WINDOW_STREAM_SECONDS", "125") or "125"),
+        stream_seconds=float(os.getenv("MARKET_EVENT_WINDOW_STREAM_SECONDS", "275") or "275"),
         baseline_seconds=float(os.getenv("MARKET_EVENT_WINDOW_BASELINE_SECONDS", "2") or "2"),
         core_only=True,
     )

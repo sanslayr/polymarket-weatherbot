@@ -81,7 +81,7 @@ def format_market_signal_alert(
         if bid_v is not None and bid_v <= 0.001:
             parts.append("买盘接近归零")
         if ask_v is not None and ask_v <= 0.01:
-            parts.append("卖盘压到 0.01 或更低")
+            parts.append("卖盘压到 1¢ 或更低")
         if not parts:
             return ""
         return f"📉 观察盘口：{bucket_label} " + "，".join(parts) + "。"
@@ -113,7 +113,7 @@ def format_market_signal_alert(
                 bucket_label,
                 bid_now=evidence.get("best_bid"),
                 ask_now=evidence.get("best_ask"),
-            ) or f"📉 观察盘口：{bucket_label} 买盘接近归零或卖盘压到 0.01 或更低。"
+            ) or f"📉 观察盘口：{bucket_label} 买盘接近归零或卖盘压到 1¢ 或更低。"
 
     lines = [f"⚠️ **盘口异常提示 | {city}**"]
     if observed_at:

@@ -61,7 +61,7 @@ class MarketSignalAlertServiceTest(unittest.TestCase):
             },
         )
         self.assertIn("📈 市场隐含最新报下界：>= 7°C", text)
-        self.assertIn("📉 观察盘口：6°C 买盘接近归零，卖盘压到 0.01 或更低。", text)
+        self.assertIn("📉 观察盘口：6°C 买盘接近归零，卖盘压到 1¢ 或更低。", text)
 
     def test_omits_local_when_same_as_utc(self) -> None:
         text = format_market_signal_alert(

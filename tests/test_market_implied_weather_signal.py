@@ -92,6 +92,42 @@ class MarketImpliedWeatherSignalTest(unittest.TestCase):
 
         self.assertFalse(signal["triggered"])
 
+    def test_triggers_from_half_minute_after_report(self) -> None:
+        signal = infer_market_implied_report_signal(
+            bucket_snapshots=[
+                {
+                    "bucket_label": "6°C or below",
+                    "bucket_kind": "at_or_below",
+                    "threshold_c": 6,
+                    "prev_best_bid": 0.05,
+                    "best_bid": 0.0,
+                    "best_ask": 0.01,
+                }
+            ],
+            scheduled_report_utc="2026-03-09T09:30:00Z",
+            now_utc="2026-03-09T09:30:35Z",
+        )
+
+        self.assertTrue(signal["triggered"])
+
+    def test_triggers_until_five_minutes_after_report(self) -> None:
+        signal = infer_market_implied_report_signal(
+            bucket_snapshots=[
+                {
+                    "bucket_label": "6°C or below",
+                    "bucket_kind": "at_or_below",
+                    "threshold_c": 6,
+                    "prev_best_bid": 0.05,
+                    "best_bid": 0.0,
+                    "best_ask": 0.01,
+                }
+            ],
+            scheduled_report_utc="2026-03-09T09:30:00Z",
+            now_utc="2026-03-09T09:34:40Z",
+        )
+
+        self.assertTrue(signal["triggered"])
+
     def test_top_or_higher_lock_in_triggers_when_all_lower_buckets_die(self) -> None:
         signal = infer_market_implied_report_signal(
             bucket_snapshots=[

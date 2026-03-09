@@ -87,8 +87,8 @@ def infer_market_implied_report_signal(
     now_utc: str | datetime | None = None,
     latest_observed_temp_c: float | None = None,
     price_floor: float = 0.02,
-    trigger_window_start_seconds: int = 60,
-    trigger_window_end_seconds: int = 180,
+    trigger_window_start_seconds: int = 30,
+    trigger_window_end_seconds: int = 300,
     ask_collapse_threshold: float = 0.01,
 ) -> dict[str, Any]:
     now_dt = _to_dt(now_utc) or datetime.now(timezone.utc)
