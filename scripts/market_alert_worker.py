@@ -320,26 +320,37 @@ def _detect_schedule_drift(
     }
 
 
+def _latest_scheduled_report_from_slots(now_utc: datetime, tz: ZoneInfo, minute_slots: list[int]) -> datetime | None:
+    normalized = sorted({int(minute) for minute in minute_slots if 0 <= int(minute) < 60})
+    if not normalized:
+        return None
+    local_now = now_utc.astimezone(tz)
+    anchors = [local_now.date(), (local_now - timedelta(days=1)).date()]
+    candidates: list[datetime] = []
+    for local_date in anchors:
+        for hour in range(24):
+            for minute in normalized:
+                candidate_local = datetime(local_date.year, local_date.month, local_date.day, hour, minute, tzinfo=tz)
+                candidate_utc = candidate_local.astimezone(timezone.utc)
+                if candidate_utc <= now_utc:
+                    candidates.append(candidate_utc)
+    return max(candidates) if candidates else None
+
+
 def _latest_metar_context(station: Station) -> dict[str, Any] | None:
     rows = fetch_metar_24h(station.icao, force_refresh=False)
-    if not rows:
-        return None
     tz = ZoneInfo(station_timezone_name(station))
     today_local = _utc_now().astimezone(tz).date()
     valid_rows: list[dict[str, Any]] = []
-    for row in rows:
+    for row in rows or []:
         try:
             report_utc = metar_obs_time_utc(row)
         except Exception:
             continue
         if report_utc.astimezone(tz).date() == today_local:
             valid_rows.append(row)
-    if not valid_rows:
-        return None
     routine_rows = [row for row in valid_rows if is_routine_metar_report(row)]
-    if not routine_rows:
-        return None
-    latest = max(routine_rows, key=metar_obs_time_utc)
+    latest = max(routine_rows, key=metar_obs_time_utc) if routine_rows else None
     obs_max = None
     for row in valid_rows:
         try:
@@ -347,9 +358,9 @@ def _latest_metar_context(station: Station) -> dict[str, Any] | None:
         except Exception:
             continue
         obs_max = temp if obs_max is None else max(obs_max, temp)
-    inferred_cadence_min = _estimate_routine_cadence_minutes(routine_rows)
-    minute_counts = _routine_minute_counts(routine_rows)
-    inferred_minute_slots = _infer_routine_minute_slots(routine_rows, inferred_cadence_min)
+    inferred_cadence_min = _estimate_routine_cadence_minutes(routine_rows) if routine_rows else None
+    minute_counts = _routine_minute_counts(routine_rows) if routine_rows else Counter()
+    inferred_minute_slots = _infer_routine_minute_slots(routine_rows, inferred_cadence_min) if routine_rows else []
     configured_schedule = _configured_schedule_for_station(station.icao)
     cadence_min = configured_schedule.get("cadence_min") or inferred_cadence_min
     minute_slots = configured_schedule.get("minute_slots") or inferred_minute_slots
@@ -360,7 +371,11 @@ def _latest_metar_context(station: Station) -> dict[str, Any] | None:
         inferred_minute_slots=inferred_minute_slots,
         minute_counts=minute_counts,
     )
-    latest_report_utc = metar_obs_time_utc(latest)
+    latest_report_utc = metar_obs_time_utc(latest) if latest is not None else None
+    if latest_report_utc is None and minute_slots:
+        latest_report_utc = _latest_scheduled_report_from_slots(_utc_now(), tz, minute_slots)
+    if latest_report_utc is None or cadence_min is None:
+        return None
     return {
         "latest_report_utc": latest_report_utc,
         "observed_max_temp_c": obs_max,

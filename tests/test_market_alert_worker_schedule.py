@@ -103,6 +103,23 @@ class MarketAlertWorkerScheduleTest(unittest.TestCase):
         self.assertEqual(schedule["cadence_min"], 30.0)
         self.assertEqual(schedule["minute_slots"], [20, 50])
 
+    def test_latest_metar_context_falls_back_to_config_schedule_when_metar_missing(self) -> None:
+        station = Station(city="London", icao="EGLC", lat=51.50, lon=0.05)
+        from unittest.mock import patch
+
+        with patch("market_alert_worker.fetch_metar_24h", return_value=[]), patch(
+            "market_alert_worker._utc_now",
+            return_value=datetime(2026, 3, 10, 13, 21, tzinfo=timezone.utc),
+        ):
+            ctx = _latest_metar_context(station)
+
+        self.assertIsNotNone(ctx)
+        self.assertEqual(ctx["routine_cadence_min"], 30.0)
+        self.assertEqual(ctx["routine_minute_slots"], [20, 50])
+        self.assertEqual(ctx["latest_report_utc"], datetime(2026, 3, 10, 13, 20, tzinfo=timezone.utc))
+        self.assertEqual(ctx["schedule_source"], "config")
+
+
     def test_infer_routine_minute_slots_extracts_fixed_half_hour_pattern(self) -> None:
         rows = [
             {"reportTime": "2026-03-09T08:00:00Z", "rawOb": "METAR TEST 090820Z"},
