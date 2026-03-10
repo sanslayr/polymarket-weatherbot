@@ -21,6 +21,40 @@ PHASE_LABELS = {
 DEFAULT_TRACK_LINE = "• 临窗前继续跟踪温度斜率与风向节奏，必要时再改判。"
 
 
+def _clean_synoptic_line(line: str) -> str:
+    txt = str(line or "").strip()
+    if not txt:
+        return ""
+    if txt.startswith("🧭"):
+        txt = txt[1:].strip()
+    if txt.startswith("-"):
+        txt = txt[1:].strip()
+    txt = txt.replace("**", "").strip()
+    if txt.startswith("环流形势对最高温影响"):
+        txt = txt.removeprefix("环流形势对最高温影响").strip("：: ")
+    if txt.startswith("主导机制："):
+        txt = txt.removeprefix("主导机制：").strip()
+    elif txt.startswith("主导机制:"):
+        txt = txt.removeprefix("主导机制:").strip()
+    return txt.strip()
+
+
+def _compact_synoptic_block(lines: list[str]) -> str:
+    compact_parts: list[str] = []
+    seen: set[str] = set()
+    for raw in lines:
+        cleaned = _clean_synoptic_line(raw).rstrip("。；，")
+        if not cleaned:
+            continue
+        if cleaned in seen:
+            continue
+        seen.add(cleaned)
+        compact_parts.append(cleaned)
+    if not compact_parts:
+        return "🧭 环流形势：结构化环流摘要缺失，需回退到原始诊断。"
+    return f"🧭 环流形势：{'；'.join(compact_parts)}。"
+
+
 def _build_metar_block(
     metar_diag: dict[str, Any],
     metar_text: str,
@@ -66,7 +100,6 @@ def choose_section_text(
 ) -> str:
     """Render-only section builder."""
 
-    _ = compact_synoptic  # reserved for presentation-only layout tuning
     unit = "F" if str(temp_unit).upper() == "F" else "C"
 
     def _to_unit(c: float) -> float:
@@ -155,24 +188,27 @@ def choose_section_text(
         "latest_temp_c": metar_diag.get("latest_temp"),
         "observed_max_temp_c": metar_diag.get("observed_max_temp_c"),
     }
-    try:
-        poly_block = _build_polymarket_section(
-            polymarket_event_url,
-            primary_window,
-            weather_anchor=market_weather_anchor,
-            range_hint=range_hint,
-            allow_best_label=bool(label_policy.get("allow_best_label", True)),
-            allow_alpha_label=bool(label_policy.get("allow_alpha_label", True)),
-            label_policy=label_policy,
-            prefetched_event=polymarket_prefetched_event,
-        )
-        if str(poly_block).startswith("Polymarket："):
+    if str(polymarket_event_url or "").strip():
+        try:
+            poly_block = _build_polymarket_section(
+                polymarket_event_url,
+                primary_window,
+                weather_anchor=market_weather_anchor,
+                range_hint=range_hint,
+                allow_best_label=bool(label_policy.get("allow_best_label", True)),
+                allow_alpha_label=bool(label_policy.get("allow_alpha_label", True)),
+                label_policy=label_policy,
+                prefetched_event=polymarket_prefetched_event,
+            )
+            if str(poly_block).startswith("Polymarket："):
+                poly_block = ""
+        except Exception:
             poly_block = ""
-    except Exception:
-        poly_block = ""
+
+    synoptic_block = _compact_synoptic_block(syn_lines) if compact_synoptic else "\n".join(syn_lines)
 
     parts = [
-        "\n".join(syn_lines),
+        synoptic_block,
         metar_block,
         "\n".join(peak_range_block),
         "\n".join(vars_block),

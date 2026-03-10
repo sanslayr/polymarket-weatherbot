@@ -21,7 +21,7 @@ def parse_telegram_command(text: str) -> dict[str, str]:
         raise ValueError("Empty command")
 
     parts = text.split()
-    cmd = parts[0].lstrip("/").lower()
+    cmd = parts[0].lstrip("/").split("@", 1)[0].lower()
     params: dict[str, str] = {"cmd": cmd}
 
     key_aliases = {

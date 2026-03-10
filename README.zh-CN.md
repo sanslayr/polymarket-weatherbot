@@ -270,17 +270,28 @@ flowchart LR
 - `scripts/polymarket_render_service.py`
 - `scripts/market_label_policy.py`
 - `scripts/polymarket_client.py`
+- `scripts/market_metadata_service.py`
+- `scripts/market_stream_service.py`
+- `scripts/market_monitor_service.py`
+- `scripts/market_implied_weather_signal.py`
+- `scripts/market_signal_alert_service.py`
+- `scripts/alert_delivery_policy.py`
+- `scripts/telegram_notifier.py`
+- `scripts/market_alert_worker.py`
 
 ---
 
 ## 文档导航
 
 - 当前 runtime 架构：[`docs/core/ARCHITECTURE.md`](./docs/core/ARCHITECTURE.md)
+- 市场分支架构：[`docs/core/MARKET_ARCHITECTURE.md`](./docs/core/MARKET_ARCHITECTURE.md)
+- 盘口异动信号方案：[`docs/core/MARKET_IMPLIED_REPORT_SIGNAL_PLAN.md`](./docs/core/MARKET_IMPLIED_REPORT_SIGNAL_PLAN.md)
 - 目标架构：[`docs/core/TARGET_ARCHITECTURE.md`](./docs/core/TARGET_ARCHITECTURE.md)
 - 运行时 contract：[`docs/core/DECISION_SCHEMA.md`](./docs/core/DECISION_SCHEMA.md), [`docs/core/FORECAST_3D_STORAGE.md`](./docs/core/FORECAST_3D_STORAGE.md)
 - 输出规则：[`docs/core/LOOK_OUTPUT_CONTRACT.md`](./docs/core/LOOK_OUTPUT_CONTRACT.md)
 - 工程护栏与实现备注：[`docs/core/AGENT_UPDATE_GUARDRAILS.md`](./docs/core/AGENT_UPDATE_GUARDRAILS.md), [`docs/core/TECHNICAL_IMPLEMENTATION_NOTES.md`](./docs/core/TECHNICAL_IMPLEMENTATION_NOTES.md)
 - 研究对接：[`docs/core/HISTORICAL_RESEARCH_HANDOFF.md`](./docs/core/HISTORICAL_RESEARCH_HANDOFF.md)
+- 告警 worker 运维说明：[`docs/operations/MARKET_ALERT_WORKER.md`](./docs/operations/MARKET_ALERT_WORKER.md)
 - 文档总索引：[`DOCS_INDEX.md`](./DOCS_INDEX.md)
 
 ---

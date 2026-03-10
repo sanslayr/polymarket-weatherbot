@@ -159,6 +159,8 @@ class ReportFocusAndSynopticSummaryTest(unittest.TestCase):
         joined = "\n".join(summary["lines"])
         self.assertNotIn("锋性过渡", joined)
         self.assertNotIn("相关链路", joined)
+        self.assertNotIn("今天没有特别单一的主导因素", joined)
+        self.assertIn("后段更要看午后升温效率能否继续维持，以及低层风场能否继续带动升温", joined)
         self.assertIn("上沿有一点受压风险", joined)
 
 

@@ -1,6 +1,9 @@
 ---
 name: look
 description: Run the current weatherbot `/look` flow for Polymarket Tmax analysis. Use when a Telegram or local request starts with `/look`, asks for a station/city Tmax weather report, or needs the weatherbot command-style output. This skill is implemented in `polymarket-weatherbot` and supersedes any legacy `polymarket-weather-report` path.
+command-dispatch: tool
+command-tool: exec
+command-template: skills/polymarket-weatherbot/.venv_gfs/bin/python skills/polymarket-weatherbot/scripts/telegram_report_cli.py --command {slash_command}
 ---
 
 # Look
@@ -9,7 +12,7 @@ Use the current weatherbot runtime only.
 
 ## Entry point
 
-- Run `scripts/telegram_report_cli.py`.
+- Run `skills/polymarket-weatherbot/.venv_gfs/bin/python skills/polymarket-weatherbot/scripts/telegram_report_cli.py`.
 - Parse command text through `scripts/look_command.py`.
 - Resolve stations through `scripts/station_catalog.py`.
 
@@ -28,7 +31,7 @@ mu
   treat the user input as the station token and run:
 
 ```bash
-python3 scripts/telegram_report_cli.py --command '/look mu'
+skills/polymarket-weatherbot/.venv_gfs/bin/python skills/polymarket-weatherbot/scripts/telegram_report_cli.py --command '/look mu'
 ```
 
 - Do not ask the user to restate the command if the token can be passed directly to the runtime.

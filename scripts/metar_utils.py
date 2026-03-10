@@ -11,6 +11,7 @@ from runtime_cache_policy import runtime_cache_enabled
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT / "cache" / "runtime"
+RAW_OB_TIME_RE = re.compile(r"\b(\d{2})(\d{2})(\d{2})Z\b")
 
 
 def _cache_file(icao: str) -> Path:
@@ -29,6 +30,65 @@ def _parse_iso_utc(v: Any) -> datetime | None:
         return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
     except Exception:
         return None
+
+
+def _reference_utc_for_metar(metar: dict[str, Any]) -> datetime | None:
+    for key in ("reportTime", "receiptTime"):
+        dt = _parse_iso_utc(metar.get(key))
+        if dt is not None:
+            return dt
+    try:
+        obs_time = metar.get("obsTime")
+        if obs_time not in (None, ""):
+            return datetime.fromtimestamp(float(obs_time), tz=timezone.utc)
+    except Exception:
+        pass
+    return None
+
+
+def metar_raw_prefix(metar: dict[str, Any]) -> str:
+    raw = str(metar.get("rawOb") or "").strip().upper()
+    if raw.startswith("SPECI "):
+        return "SPECI"
+    if raw.startswith("METAR "):
+        return "METAR"
+    return ""
+
+
+def is_routine_metar_report(metar: dict[str, Any]) -> bool:
+    return metar_raw_prefix(metar) == "METAR"
+
+
+def metar_raw_ob_time_utc(metar: dict[str, Any]) -> datetime | None:
+    raw = (metar.get("rawOb") or "").strip()
+    match = RAW_OB_TIME_RE.search(raw)
+    if not match:
+        return None
+
+    ref = _reference_utc_for_metar(metar)
+    if ref is None:
+        return None
+
+    day, hh, mm = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    candidate = datetime(ref.year, ref.month, 1, tzinfo=timezone.utc) + timedelta(
+        days=day - 1,
+        hours=hh,
+        minutes=mm,
+    )
+
+    # METAR raw issue times carry DDHHMMZ but not month/year. Anchor on the nearest
+    # plausible month around the API timestamp so month boundaries do not drift.
+    best = candidate
+    best_delta = abs((candidate - ref).total_seconds())
+    for month_shift in (-1, 1):
+        shifted_anchor = (datetime(ref.year, ref.month, 15, tzinfo=timezone.utc) + timedelta(days=32 * month_shift))
+        shifted_month_start = datetime(shifted_anchor.year, shifted_anchor.month, 1, tzinfo=timezone.utc)
+        shifted = shifted_month_start + timedelta(days=day - 1, hours=hh, minutes=mm)
+        delta = abs((shifted - ref).total_seconds())
+        if delta < best_delta:
+            best = shifted
+            best_delta = delta
+    return best
 
 
 def _normalize_metar_payload(payload: Any) -> list[dict[str, Any]]:
@@ -110,13 +170,13 @@ def fetch_metar_24h(icao: str, *, force_refresh: bool = False) -> list[dict[str,
 
 
 def metar_obs_time_utc(metar: dict[str, Any]) -> datetime:
-    raw = (metar.get("rawOb") or "").strip()
-    m = re.search(r"\b(\d{2})(\d{2})(\d{2})Z\b", raw)
-    if m:
-        day, hh, mm = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        rt = datetime.fromisoformat(metar["reportTime"].replace("Z", "+00:00")).astimezone(timezone.utc)
-        return datetime(rt.year, rt.month, day, hh, mm, tzinfo=timezone.utc)
-    return datetime.fromisoformat(metar["reportTime"].replace("Z", "+00:00")).astimezone(timezone.utc)
+    raw_dt = metar_raw_ob_time_utc(metar)
+    if raw_dt is not None:
+        return raw_dt
+    report_dt = _parse_iso_utc(metar.get("reportTime"))
+    if report_dt is not None:
+        return report_dt
+    raise ValueError("METAR record missing rawOb issue time and reportTime")
 
 
 def is_intish_value(v: Any) -> bool:

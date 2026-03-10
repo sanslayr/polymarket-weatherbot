@@ -272,17 +272,28 @@ The architecture is already cleaner than the old report-centric version, but sev
 - `scripts/polymarket_render_service.py`
 - `scripts/market_label_policy.py`
 - `scripts/polymarket_client.py`
+- `scripts/market_metadata_service.py`
+- `scripts/market_stream_service.py`
+- `scripts/market_monitor_service.py`
+- `scripts/market_implied_weather_signal.py`
+- `scripts/market_signal_alert_service.py`
+- `scripts/alert_delivery_policy.py`
+- `scripts/telegram_notifier.py`
+- `scripts/market_alert_worker.py`
 
 ---
 
 ## Documentation
 
 - Current runtime architecture: [`docs/core/ARCHITECTURE.md`](./docs/core/ARCHITECTURE.md)
+- Market branch architecture: [`docs/core/MARKET_ARCHITECTURE.md`](./docs/core/MARKET_ARCHITECTURE.md)
+- Market-implied alert plan: [`docs/core/MARKET_IMPLIED_REPORT_SIGNAL_PLAN.md`](./docs/core/MARKET_IMPLIED_REPORT_SIGNAL_PLAN.md)
 - Target architecture: [`docs/core/TARGET_ARCHITECTURE.md`](./docs/core/TARGET_ARCHITECTURE.md)
 - Runtime contracts: [`docs/core/DECISION_SCHEMA.md`](./docs/core/DECISION_SCHEMA.md), [`docs/core/FORECAST_3D_STORAGE.md`](./docs/core/FORECAST_3D_STORAGE.md)
 - Output rules: [`docs/core/LOOK_OUTPUT_CONTRACT.md`](./docs/core/LOOK_OUTPUT_CONTRACT.md)
 - Guardrails and technical notes: [`docs/core/AGENT_UPDATE_GUARDRAILS.md`](./docs/core/AGENT_UPDATE_GUARDRAILS.md), [`docs/core/TECHNICAL_IMPLEMENTATION_NOTES.md`](./docs/core/TECHNICAL_IMPLEMENTATION_NOTES.md)
 - Research handoff: [`docs/core/HISTORICAL_RESEARCH_HANDOFF.md`](./docs/core/HISTORICAL_RESEARCH_HANDOFF.md)
+- Alert worker operations: [`docs/operations/MARKET_ALERT_WORKER.md`](./docs/operations/MARKET_ALERT_WORKER.md)
 - Full docs index: [`DOCS_INDEX.md`](./DOCS_INDEX.md)
 
 ---

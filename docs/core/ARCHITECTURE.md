@@ -97,6 +97,25 @@ Last updated: 2026-03-09
 - `scripts/market_label_policy.py`
   - 市场标签策略
 
+### F. Market Alert / Notification Layer
+
+- `scripts/market_metadata_service.py`
+  - 市场 bucket / token id 元信息映射
+- `scripts/market_stream_service.py`
+  - websocket 行情订阅、基线窗口与事件窗口监控
+- `scripts/market_monitor_service.py`
+  - 串联市场元信息、订阅计划、实时状态和 signal 推理
+- `scripts/market_implied_weather_signal.py`
+  - 从盘口异动推断 `market-implied observation hint`
+- `scripts/market_signal_alert_service.py`
+  - 将 signal 渲染成简短 Telegram 告警文本
+- `scripts/alert_delivery_policy.py`
+  - Telegram 告警目标解析与 direct/group 优先级策略
+- `scripts/telegram_notifier.py`
+  - weatherbot workspace 内的 Telegram 主动发送适配层
+- `scripts/market_alert_worker.py`
+  - 基于 METAR 常规报窗口调度主动监控和去重推送
+
 ## 2) 当前数据策略
 
 - 小时预报：
@@ -137,6 +156,7 @@ Last updated: 2026-03-09
 3. `analysis_snapshot_service.py` 已显式产出 `canonical_raw_state`、`posterior_feature_vector`、`quality_snapshot` 与 `weather_posterior`，天气后验层已有 `core + calibration hook` 结构。
 4. `peak_range_service.py`、`peak_range_history_service.py`、`peak_range_signal_service.py` 和 `synoptic_summary_service.py` 已把一部分“边渲染边推理”逻辑收回分析层。
 5. `vertical_3d.py` 已具备基础 tracking 能力，不再只是静态单帧 object 摘要。
+6. 市场异动通知链路已经从 `/look` 主链路中剥离出来，形成独立的 monitor -> signal -> notifier -> worker 层，适合放在 weatherbot workspace 内长期运行。
 
 ## 5) 当前仍需继续收口的问题
 
@@ -162,3 +182,5 @@ Last updated: 2026-03-09
 - 目标版 weather/market/research 分层：
   - [TARGET_ARCHITECTURE.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/TARGET_ARCHITECTURE.md)
   - [MARKET_ARCHITECTURE.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/MARKET_ARCHITECTURE.md)
+- 主动告警运维说明：
+  - [MARKET_ALERT_WORKER.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/operations/MARKET_ALERT_WORKER.md)

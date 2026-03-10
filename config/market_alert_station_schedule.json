@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "stations": {
+    "CYYZ": {"cadence_min": 60, "minute_slots": [0]},
+    "EDDM": {"cadence_min": 30, "minute_slots": [20, 50]},
+    "EGLC": {"cadence_min": 30, "minute_slots": [20, 50]},
+    "KATL": {"cadence_min": 60, "minute_slots": [52]},
+    "KDAL": {"cadence_min": 60, "minute_slots": [53]},
+    "KLGA": {"cadence_min": 60, "minute_slots": [51]},
+    "KMIA": {"cadence_min": 60, "minute_slots": [53]},
+    "KORD": {"cadence_min": 60, "minute_slots": [51]},
+    "KSEA": {"cadence_min": 60, "minute_slots": [53]},
+    "LFPG": {"cadence_min": 30, "minute_slots": [0, 30]},
+    "LTAC": {"cadence_min": 30, "minute_slots": [20, 50]},
+    "NZWN": {"cadence_min": 30, "minute_slots": [0, 30]},
+    "RKSI": {"cadence_min": 30, "minute_slots": [0, 30]},
+    "SAEZ": {"cadence_min": 60, "minute_slots": [0]},
+    "SBGR": {"cadence_min": 60, "minute_slots": [0]},
+    "VILK": {"cadence_min": 30, "minute_slots": [0, 30]}
+  }
+}

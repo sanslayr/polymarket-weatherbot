@@ -13,17 +13,35 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 from zoneinfo import ZoneInfo
 
-import requests
+
+def _reexec_into_skill_venv() -> None:
+    if str(os.getenv("WEATHERBOT_SKIP_VENV_REEXEC", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+    script_path = Path(__file__).resolve()
+    venv_python = script_path.parent.parent / ".venv_gfs" / "bin" / "python"
+    if not venv_python.exists():
+        return
+    current_python = Path(sys.executable).resolve() if sys.executable else None
+    try:
+        target_python = venv_python.resolve()
+    except FileNotFoundError:
+        return
+    if current_python == target_python:
+        return
+    env = dict(os.environ)
+    env["WEATHERBOT_SKIP_VENV_REEXEC"] = "1"
+    os.execvpe(str(target_python), [str(target_python), str(script_path), *sys.argv[1:]], env)
+
+
+_reexec_into_skill_venv()
 
 PROCESS_T0 = time.perf_counter()
-
 
 def _format_local_header_time(now_utc: datetime, now_local: datetime) -> str:
     local_time = now_local.strftime("%H:%M")
@@ -31,89 +49,75 @@ def _format_local_header_time(now_utc: datetime, now_local: datetime) -> str:
         local_time = f"{now_local.month}/{now_local.day} {local_time}"
     return f"{local_time} Local ({format_utc_offset(now_local)})"
 
-from forecast_pipeline import load_or_build_forecast_decision
-from realtime_pipeline import classify_window_phase
+from hourly_data_service import prune_runtime_cache as _prune_runtime_cache
 from look_change_guard import build_cached_result_meta, build_unchanged_notice
 from look_command import parse_telegram_command, render_look_help
+from look_report_service import LookReportBundle, build_look_report_bundle
 from look_runtime_control import LookRuntimeContext, LookRuntimeController, build_request_key
-from analysis_snapshot_service import build_analysis_snapshot
-import build_station_links as BSL
-from hourly_data_service import (
-    build_post_eval_window as _build_post_eval_window,
-    build_post_focus_window as _build_post_focus_window,
-    detect_tmax_windows,
-    fetch_hourly_router,
-    prune_runtime_cache as _prune_runtime_cache,
-    slice_hourly_local_day,
-)
-from metar_utils import fetch_metar_24h
-from metar_analysis_service import metar_observation_block
-from historical_context_provider import (
-    build_historical_context,
-    historical_context_enabled,
-)
-from historical_payload import attach_historical_payload
-from polymarket_render_service import _build_polymarket_section
-from report_render_service import choose_section_text
-from polymarket_client import prefetch_polymarket_event as _prefetch_polymarket_event
 from station_catalog import (
     Station,
     default_model_for_station,
     direction_factor_for as _direction_factor_for,
-    factor_summary_for as _factor_summary_for,
     format_utc_offset,
     resolve_station,
     site_tag_for as _site_tag_for,
     station_timezone_name,
     terrain_tag_for as _terrain_tag_for,
 )
-from temperature_shape_analysis import analyze_temperature_shape
-from temperature_window_resolver import resolve_temperature_window
-from synoptic_provider_router import DEFAULT_SYNOPTIC_PROVIDER, normalize_synoptic_provider
+from telegram_notifier import send_telegram_message
 
-ROOT = Path(__file__).resolve().parent.parent
-STATION_CSV = ROOT / "station_links.csv"
-SCRIPTS_DIR = ROOT / "scripts"
+LOOK_SEND_PENDING_NOTICE = str(os.getenv("LOOK_SEND_PENDING_NOTICE", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 
-CACHE_DIR = ROOT / "cache" / "runtime"
-PERF_LOG_ENABLED = os.getenv("LOOK_PERF_LOG", "0") == "1"
-SYNOPTIC_PROVIDER = DEFAULT_SYNOPTIC_PROVIDER
-_POLY_PREFETCH_POOL = ThreadPoolExecutor(max_workers=2)
-_METAR_FETCH_POOL = ThreadPoolExecutor(max_workers=4)
-LOOK_FORCE_LIVE_METAR = str(os.getenv("LOOK_FORCE_LIVE_METAR", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
-LOOK_FORCE_LIVE_POLYMARKET = str(os.getenv("LOOK_FORCE_LIVE_POLYMARKET", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _sounding_model_for_provider(provider: str | None) -> str:
-    txt = str(provider or "").strip().lower()
-    if txt == "gfs-grib2":
-        return "gfs"
-    return "ecmwf"
+def _resolve_target_date_for_station(raw_target_date: str | None, tz_name_station: str) -> str:
+    normalized = raw_target_date
+    if normalized and len(normalized) == 8 and normalized.isdigit():
+        normalized = f"{normalized[0:4]}-{normalized[4:6]}-{normalized[6:8]}"
+    now_utc = datetime.now(timezone.utc)
+    if normalized:
+        return normalized
+    try:
+        return now_utc.astimezone(ZoneInfo(tz_name_station)).strftime("%Y-%m-%d")
+    except Exception:
+        return now_utc.strftime("%Y-%m-%d")
 
 
-def _attach_historical_context(
-    metar_diag: dict[str, Any],
-    *,
-    station_icao: str,
-    target_date: str,
-    forecast_decision: dict[str, Any] | None,
-    synoptic_context: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    if not historical_context_enabled():
+def _parse_env_int(name: str) -> int | None:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
         return None
-    historical_context = build_historical_context(
-        station_icao,
-        target_date,
-        metar_diag,
-        forecast_decision=forecast_decision,
-        synoptic_context=synoptic_context,
-        site_tag=_site_tag_for(station_icao),
-        terrain_tag=_terrain_tag_for(station_icao),
-        direction_factor=_direction_factor_for(station_icao),
-        factor_summary=_factor_summary_for(station_icao),
-    )
-    attach_historical_payload(metar_diag, historical_context)
-    return historical_context
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _send_pending_look_notice(st: Station, target_date: str) -> None:
+    if not LOOK_SEND_PENDING_NOTICE:
+        return
+    channel = str(os.getenv("OPENCLAW_CHANNEL") or "").strip().lower()
+    if channel != "telegram":
+        return
+    peer_id = str(os.getenv("OPENCLAW_PEER_ID") or "").strip()
+    account_id = str(os.getenv("OPENCLAW_ACCOUNT_ID") or "weatherbot").strip() or "weatherbot"
+    reply_to_message_id = _parse_env_int("OPENCLAW_MESSAGE_ID")
+    message_thread_id = _parse_env_int("OPENCLAW_THREAD_ID")
+    if not peer_id or reply_to_message_id is None:
+        return
+    query_label = f"{st.city}({st.icao})-{target_date.replace('-', '')}"
+    text = f"👀正在查看{query_label}天气形势......"
+    try:
+        send_telegram_message(
+            text,
+            chat_id=peer_id,
+            account=account_id,
+            parse_mode=None,
+            disable_web_page_preview=True,
+            reply_to_message_id=reply_to_message_id,
+            message_thread_id=message_thread_id,
+            timeout=5.0,
+        )
+    except Exception:
+        return
 
 
 def _perf_log(stage: str, seconds: float) -> None:
@@ -121,242 +125,74 @@ def _perf_log(stage: str, seconds: float) -> None:
     return
 
 
+def _format_runtime_tag(tag: str) -> str:
+    txt = str(tag or "").strip()
+    if len(txt) == 10 and txt.isdigit():
+        return f"{txt[0:4]}/{txt[4:6]}/{txt[6:8]} {txt[8:10]}Z"
+    if txt.endswith("Z") and len(txt) == 11 and txt[:10].isdigit():
+        return f"{txt[0:4]}/{txt[4:6]}/{txt[6:8]} {txt[8:10]}Z"
+    return txt
 
 
-def run_synoptic_section(
-    st: Station,
-    target_date: str,
-    peak_local: str,
-    tz_name: str,
-    model: str,
-    runtime_tag: str,
-    pass_mode: str = "full",
-) -> dict[str, Any]:
-    from synoptic_runner import run_synoptic_section as _run
-
-    return _run(
-        st=st,
-        target_date=target_date,
-        peak_local=peak_local,
-        tz_name=tz_name,
-        model=model,
-        runtime_tag=runtime_tag,
-        scripts_dir=SCRIPTS_DIR,
-        cache_dir=CACHE_DIR,
-        provider=SYNOPTIC_PROVIDER,
-        pass_mode=pass_mode,
-        perf_log=_perf_log,
-    )
-
-
-
-
-def _fetch_mgm_reference(st: Station) -> dict[str, Any] | None:
-    """Fetch MGM real-time reference for Ankara/Esenboğa (LTAC).
-
-    MGM endpoint blocks requests without browser-like headers.
-    """
-    if str(st.icao).upper() != "LTAC":
-        return None
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://www.mgm.gov.tr/",
-        "Origin": "https://www.mgm.gov.tr",
-        "Accept": "application/json, text/plain, */*",
-    }
-    try:
-        q = requests.utils.quote("esenboga")
-        cands = requests.get(
-            f"https://servis.mgm.gov.tr/web/merkezler?sorgu={q}",
-            headers=headers,
-            timeout=12,
-        ).json()
-        if not isinstance(cands, list) or not cands:
-            return None
-        center = cands[0]
-        mid = center.get("merkezId")
-        if mid is None:
-            return None
-        obs = requests.get(
-            f"https://servis.mgm.gov.tr/web/sondurumlar?merkezid={mid}",
-            headers=headers,
-            timeout=12,
-        ).json()
-        if not isinstance(obs, list) or not obs:
-            return None
-        row = obs[0] or {}
-        return {
-            "merkez_id": mid,
-            "veri_zamani": row.get("veriZamani"),
-            "temp_c": row.get("sicaklik"),
-            "rh": row.get("nem"),
-            "wind_kmh": row.get("ruzgarHiz"),
-            "wind_dir": row.get("ruzgarYon"),
-            "metar": row.get("rasatMetar"),
-            "ilce": center.get("ilce"),
-        }
-    except Exception:
-        return None
-
-
-def _wind_dir_text_cn(direction_deg: Any) -> str:
-    try:
-        deg = float(direction_deg) % 360.0
-    except Exception:
-        return "风向不定"
-    dirs = [
-        "北风", "东北偏北风", "东北风", "东北偏东风",
-        "东风", "东南偏东风", "东南风", "东南偏南风",
-        "南风", "西南偏南风", "西南风", "西南偏西风",
-        "西风", "西北偏西风", "西北风", "西北偏北风",
-    ]
-    idx = int(((deg + 11.25) % 360.0) // 22.5)
-    return dirs[idx]
-
-
-def _render_mgm_reference_line(mgm_ref: dict[str, Any], unit_pref: str) -> str:
-    def _fmt_temp_ref(v_c: Any) -> str:
-        try:
-            v = float(v_c)
-        except Exception:
-            return str(v_c)
-        if unit_pref == "F":
-            return f"{(v * 9.0 / 5.0 + 32.0):.1f}°F"
-        return f"{v:.1f}°C"
-
-    fields = []
-    vz = str(mgm_ref.get("veri_zamani") or "")
-    vz_txt = "--:-- Local"
-    if vz:
-        try:
-            parsed = datetime.fromisoformat(vz.replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            vz_txt = parsed.astimezone(ZoneInfo("Europe/Istanbul")).strftime("%H:%M Local")
-        except Exception:
-            if "T" in vz and len(vz) >= 16:
-                vz_txt = vz[11:16] + " Local"
-    fields.append(f"- MGM参考（{vz_txt}）")
-
-    try:
-        temp_c = float(mgm_ref.get("temp_c")) if mgm_ref.get("temp_c") is not None else None
-    except Exception:
-        temp_c = None
-    if temp_c is not None:
-        fields.append(f"气温={_fmt_temp_ref(temp_c)}")
-
-    rh = mgm_ref.get("rh")
-    if rh is not None:
-        fields.append(f"湿度={rh}%")
-
-    wind_dir = mgm_ref.get("wind_dir")
-    if wind_dir not in (None, ""):
-        try:
-            deg = float(wind_dir)
-            fields.append(f"风向={_wind_dir_text_cn(deg)}（{deg:.0f}°）")
-        except Exception:
-            fields.append(f"风向={wind_dir}")
-
-    wind_kmh = mgm_ref.get("wind_kmh")
-    if wind_kmh is not None:
-        try:
-            fields.append(f"风速={float(wind_kmh):.1f}km/h")
-        except Exception:
-            fields.append(f"风速={wind_kmh}km/h")
-
-    return "，".join(fields)
-
-
-def _is_openmeteo_rate_limited_error(exc: Exception) -> bool:
-    msg = str(exc)
-    return ("429" in msg) or ("Too Many Requests" in msg) or ("open-meteo breaker active" in msg)
-
-
-def _render_metar_only_report(
-    st: Station,
-    model: str,
-    links_payload: dict[str, Any],
-    reason: str,
-    tz_name: str,
-    metar24_prefetched: list[dict[str, Any]] | None = None,
-) -> str:
-    unit_pref = "F" if str(st.icao).upper().startswith("K") else "C"
-    metar24 = metar24_prefetched if metar24_prefetched is not None else fetch_metar_24h(st.icao, force_refresh=LOOK_FORCE_LIVE_METAR)
-    metar_text, _metar_diag = metar_observation_block(
-        metar24,
-        {"time": [], "temperature_2m": [], "pressure_msl": []},
-        tz_name,
-        temp_unit=unit_pref,
-    )
-    mgm_ref = _fetch_mgm_reference(st) if str(st.icao).upper() == "LTAC" else None
-    if mgm_ref:
-        metar_text = metar_text + "\n" + _render_mgm_reference_line(mgm_ref, unit_pref)
-
+def _render_report_header(st: Station, bundle: LookReportBundle) -> str:
     lat_hemi = "N" if st.lat >= 0 else "S"
     lon_hemi = "E" if st.lon >= 0 else "W"
-    rt = str(links_payload.get("runtime_utc") or "")
-    rt_fmt = rt
-    if len(rt) == 10 and rt.isdigit():
-        rt_fmt = f"{rt[0:4]}/{rt[4:6]}/{rt[6:8]} {rt[8:10]}Z"
+    terrain_tag = _terrain_tag_for(st.icao)
+    site_tag = _site_tag_for(st.icao)
+    direction_factor = _direction_factor_for(st.icao)
+    head_geo = f"{abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}"
+    if site_tag:
+        head_geo = f"{head_geo} ({site_tag})"
+    elif terrain_tag:
+        head_geo = f"{head_geo} ({terrain_tag})"
 
-    now_utc = datetime.now(timezone.utc)
-    tz = ZoneInfo(tz_name)
-    now_local = now_utc.astimezone(tz)
-    header = (
-        f"📍 **{st.icao} ({st.city}) | {abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}**\n"
-        f"判断时间: {now_utc.strftime('%Y/%m/%d %H:%M')} UTC | {_format_local_header_time(now_utc, now_local)}\n"
-        f"分析链路: 小时预报/3D背景不可用（最近运行时次参考: {rt_fmt}）\n"
-        "**🦞龙虾学习中，不提供交易建议🦞**"
-    )
+    header_lines = [
+        f"📍 **{st.icao} ({st.city}) | {head_geo}**",
+        f"生成时间: {bundle.now_utc.strftime('%Y/%m/%d %H:%M')} UTC | {_format_local_header_time(bundle.now_utc, bundle.now_local)}",
+    ]
 
-    pseudo_peak = float(_metar_diag.get("latest_temp") or 0.0)
-    pseudo_window = {
-        "peak_temp_c": pseudo_peak,
-        "start_local": now_utc.strftime("%Y-%m-%dT%H:%M"),
-        "end_local": now_utc.strftime("%Y-%m-%dT%H:%M"),
-    }
-    poly_block = ""
-    try:
-        purl = links_payload["links"]["polymarket_event"]
-        prefetched = _prefetch_polymarket_event(purl, force_refresh=LOOK_FORCE_LIVE_POLYMARKET)
-        poly_block = _build_polymarket_section(
-            purl,
-            pseudo_window,
-            weather_anchor={
-                "latest_temp_c": _metar_diag.get("latest_temp"),
-                "observed_max_temp_c": _metar_diag.get("observed_max_temp_c"),
-            },
-            prefetched_event=prefetched,
+    if bundle.mode == "metar_only":
+        header_lines.append(
+            f"分析链路: 小时预报/3D背景不可用（最近运行时次参考: {_format_runtime_tag(bundle.runtime_utc)}）"
         )
-        if str(poly_block).startswith("Polymarket："):
-            poly_block = ""
-    except Exception:
-        poly_block = ""
+    else:
+        if not bundle.compact_synoptic:
+            syn_rt_fmt = _format_runtime_tag(bundle.synoptic_runtime_used)
+            syn_prev_rt_fmt = _format_runtime_tag(bundle.synoptic_previous_runtime_used)
+            cycle_bits = []
+            if syn_rt_fmt:
+                cycle_bits.append(syn_rt_fmt + (f" {bundle.synoptic_stream_used}" if bundle.synoptic_stream_used else ""))
+            elif bundle.runtime_utc:
+                cycle_bits.append(_format_runtime_tag(bundle.runtime_utc))
+            if syn_prev_rt_fmt and syn_prev_rt_fmt != syn_rt_fmt:
+                cycle_bits.append(f"对比前一时次 {syn_prev_rt_fmt}")
+            cycle_txt = " | ".join(cycle_bits) if cycle_bits else _format_runtime_tag(bundle.runtime_utc)
+            header_lines.append(
+                f"分析链路: 小时预报源 {bundle.provider_used} | 数值预报场源 {bundle.synoptic_provider_used}（数值模型时次: {cycle_txt}）"
+            )
+            if direction_factor:
+                header_lines.append(f"方位因子: {direction_factor}")
 
-    body = (
-        "📡 **最新实况分析（METAR-only 降级）**\n"
-        f"- 触发原因：{reason}\n"
-        "- 说明：Open-Meteo 当前不可用，已降级为实况-only 输出；背景/窗口判断暂不展开。\n\n"
-        f"{metar_text}"
-    )
-    historical_context = _attach_historical_context(
-        _metar_diag,
-        station_icao=st.icao,
-        target_date=datetime.now(timezone.utc).astimezone(tz).strftime("%Y-%m-%d"),
-        forecast_decision=None,
-    )
-    if poly_block:
-        body += f"\n\n{poly_block}"
+        try:
+            quality = bundle.forecast_quality
+            missing = set(quality.get("missing_layers") or [])
+            degraded = str(quality.get("source_state") or "") == "degraded"
+            syn_fail = ("synoptic" in missing) or degraded
+            provider_used_3d = str(quality.get("synoptic_provider_used") or bundle.synoptic_provider_used)
+            provider_requested_3d = str(quality.get("synoptic_provider_requested") or bundle.synoptic_provider_used)
+            if provider_requested_3d and provider_requested_3d != provider_used_3d:
+                header_lines.append(
+                    f"⚠️ 数据提醒：数值预报场已从 {provider_requested_3d} 回退到 {provider_used_3d}。"
+                )
+            elif syn_fail and bundle.synoptic_error:
+                header_lines.append(
+                    f"⚠️ 数据提醒：数值预报场({provider_used_3d}) 层存在降级，部分环流诊断可能偏弱。"
+                )
+        except Exception:
+            pass
 
-    links = links_payload["links"]
-    footer = (
-        f"🔗[Polymarket]({links['polymarket_event']}) | "
-        f"[METAR]({links['metar_24h']}) | "
-        f"[Wunderground]({links['wunderground']}) | "
-        f"[探空图（Tropicaltidbits）]({links['sounding_tropicaltidbits']})"
-    )
-    return f"{header}\n\n{body}\n{footer}"
+    header_lines.append("**🦞龙虾学习中，不提供交易建议🦞**")
+    return "\n".join(header_lines)
 
 
 def render_report(
@@ -368,7 +204,6 @@ def render_report(
     sender_id: str | None = None,
     session_key: str | None = None,
 ) -> str:
-    req_start_utc = datetime.now(timezone.utc)
     t_e2e = time.perf_counter()
     bootstrap_elapsed = max(0.0, t_e2e - PROCESS_T0)
     perf_local: dict[str, float] = {}
@@ -394,23 +229,18 @@ def render_report(
         return f"{exc}\n\n{render_look_help()}"
     tz_name_station = station_timezone_name(st)
 
-    raw_target_date = params.get("date")
-    if raw_target_date and len(raw_target_date) == 8 and raw_target_date.isdigit():
-        raw_target_date = f"{raw_target_date[0:4]}-{raw_target_date[4:6]}-{raw_target_date[6:8]}"
-
-    now_utc = datetime.now(timezone.utc)
-    if raw_target_date:
-        target_date = raw_target_date
-    else:
-        try:
-            target_date = now_utc.astimezone(ZoneInfo(tz_name_station)).strftime("%Y-%m-%d")
-        except Exception:
-            target_date = now_utc.strftime("%Y-%m-%d")
+    target_date = _resolve_target_date_for_station(params.get("date"), tz_name_station)
 
     try:
         datetime.strptime(target_date, "%Y-%m-%d")
     except ValueError as exc:
         raise ValueError("date must be YYYY-MM-DD (or YYYYMMDD)") from exc
+
+    model = default_model_for_station(st).lower()
+    if model not in {"gfs", "ecmwf"}:
+        model = "gfs"
+
+    _send_pending_look_notice(st, target_date)
 
     runtime_context = LookRuntimeContext.from_runtime(
         channel=channel,
@@ -429,7 +259,7 @@ def render_report(
         unchanged_notice = build_unchanged_notice(
             query_label=f"{st.city}({st.icao})-{target_date.replace('-', '')}",
             icao=st.icao,
-            model=default_model_for_station(st),
+            model=model,
             cached_payload=cached_payload,
         )
         if unchanged_notice:
@@ -440,337 +270,15 @@ def render_report(
 
     # 统一输出：固定走当前主报告链路，对外命令仅暴露 station/date。
     try:
-        model = default_model_for_station(st).lower()
-        if model not in {"gfs", "ecmwf"}:
-            model = "gfs"
-        provider = "auto"
-        metar_future = _METAR_FETCH_POOL.submit(fetch_metar_24h, st.icao, force_refresh=LOOK_FORCE_LIVE_METAR)
-
-        t0 = time.perf_counter()
-        provider_used = "unknown"
-        try:
-            om, provider_used = fetch_hourly_router(st, target_date, model, provider=provider)
-        except Exception as exc:
-            # open-meteo rate-limit OR gfs provider unavailable/rate-limited => degrade to METAR-only
-            if _is_openmeteo_rate_limited_error(exc) or "gfs" in str(exc).lower() or "429" in str(exc):
-                fallback_valid_utc = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(hours=12)
-                degrade_model = "gfs" if provider in {"auto", "gfs", "gfs-grib2", "grib2"} else model
-                links_payload = BSL.build_links(
-                    row=BSL.load_station(STATION_CSV, st.icao),
-                    model=degrade_model,
-                    now_utc=datetime.now(timezone.utc),
-                    target_valid_utc=fallback_valid_utc,
-                    target_date_utc=datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc),
-                )
-                _mark("hourly_fetch", time.perf_counter() - t0)
-                metar_prefetched: list[dict[str, Any]] | None = None
-                try:
-                    metar_prefetched = metar_future.result(timeout=0.2)
-                except Exception:
-                    metar_prefetched = None
-                result_text = _render_metar_only_report(
-                    st,
-                    degrade_model,
-                    links_payload,
-                    reason=f"{provider} provider degraded: {exc}",
-                    tz_name=tz_name_station,
-                    metar24_prefetched=metar_prefetched,
-                )
-                runtime_control.success(
-                    result_text,
-                    result_meta=build_cached_result_meta(
-                        icao=st.icao,
-                        model=degrade_model,
-                        metar24=metar_prefetched,
-                    ),
-                )
-                return result_text
-            raise
-        _mark("hourly_fetch", time.perf_counter() - t0)
-
-        global SYNOPTIC_PROVIDER
-        # Strategy: hourly forecast prefers open-meteo; 3D field uses ECMWF Open Data by default, with GFS fallback inside the synoptic provider router.
-        pref_3d = os.getenv("FORECAST_3D_PROVIDER", DEFAULT_SYNOPTIC_PROVIDER)
-        SYNOPTIC_PROVIDER = normalize_synoptic_provider(pref_3d)
-
-        tz_name = tz_name_station or om.get("timezone", "UTC")
-        hourly_day = slice_hourly_local_day(om["hourly"], target_date)
-
-        tz = ZoneInfo(tz_name)
-        unit_pref = "F" if str(st.icao).upper().startswith("K") else "C"
-
-        t0 = time.perf_counter()
-        metar24 = metar_future.result(timeout=45)
-        metar_text, metar_diag = metar_observation_block(
-            metar24,
-            hourly_day,
-            tz_name,
-            target_date=target_date,
-            temp_unit=unit_pref,
-        )
-        mgm_ref = _fetch_mgm_reference(st) if str(st.icao).upper() == "LTAC" else None
-        if mgm_ref:
-            metar_text = metar_text + "\n" + _render_mgm_reference_line(mgm_ref, unit_pref)
-            metar_diag["mgm_reference"] = mgm_ref
-        metar_diag["station_icao"] = str(st.icao).upper()
-        try:
-            metar_diag["station_lat"] = float(st.lat)
-            metar_diag["station_lon"] = float(st.lon)
-        except Exception:
-            pass
-        _mark("metar_fetch_parse", time.perf_counter() - t0)
-
-        temp_shape_analysis = analyze_temperature_shape(
-            hourly_day,
-            metar_diag=metar_diag,
-            station_icao=st.icao,
-        )
-        windows, primary, peak_candidates = detect_tmax_windows(
-            hourly_day,
-            temp_shape_analysis=temp_shape_analysis,
-        )
-        if not primary:
-            raise RuntimeError("No Tmax window detected from forecast hourly data")
-
-        window_resolution = resolve_temperature_window(
-            primary,
-            hourly_day,
-            metar_diag,
-            station_icao=st.icao,
-            temp_shape_analysis=temp_shape_analysis,
-        )
-        primary = dict(window_resolution.get("resolved_window") or primary)
-        metar_diag["analysis_window_override_active"] = bool(window_resolution.get("override_active"))
-        metar_diag["analysis_window_mode"] = str(window_resolution.get("mode") or "forecast_primary")
-        metar_diag["analysis_window_reason_codes"] = list(window_resolution.get("reason_codes") or [])
-        if str(window_resolution.get("mode") or "") == "obs_peak_reanchor":
-            metar_diag["obs_correction_applied"] = True
-
-        analysis_window = dict(primary)
-        try:
-            gate_pre = classify_window_phase(primary, metar_diag)
-            if str(gate_pre.get("phase") or "") == "post":
-                post_focus = _build_post_focus_window(hourly_day, metar_diag)
-                if isinstance(post_focus, dict) and post_focus.get("peak_local"):
-                    analysis_window = post_focus
-                    metar_diag["post_focus_window_active"] = True
-                    metar_diag["post_window_mode"] = "focus_rebreak"
-                    metar_diag["post_focus_peak_local"] = str(post_focus.get("peak_local") or "")
-                    try:
-                        pf = float(post_focus.get("peak_temp_c"))
-                        metar_diag["post_focus_peak_temp_c"] = pf
-                        try:
-                            obs_mx = float(metar_diag.get("observed_max_temp_c")) if metar_diag.get("observed_max_temp_c") is not None else None
-                        except Exception:
-                            obs_mx = None
-                        if obs_mx is not None and pf <= obs_mx - 0.4:
-                            metar_diag["post_window_mode"] = "no_rebreak_eval"
-                    except Exception:
-                        pass
-                else:
-                    post_eval = _build_post_eval_window(hourly_day, metar_diag)
-                    if isinstance(post_eval, dict) and post_eval.get("peak_local"):
-                        analysis_window = post_eval
-                        metar_diag["post_focus_window_active"] = True
-                        metar_diag["post_window_mode"] = "no_rebreak_eval"
-        except Exception:
-            analysis_window = dict(primary)
-
-        peak_local_dt = datetime.strptime(analysis_window["peak_local"], "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
-        peak_utc = peak_local_dt.astimezone(timezone.utc)
-        now_for_links_utc = datetime.now(timezone.utc)
-        window_candidate_utc: list[datetime] = []
-        for k in ("start_local", "peak_local", "end_local"):
-            raw = str(analysis_window.get(k) or "").strip()
-            if not raw:
-                continue
-            try:
-                dt_local = datetime.strptime(raw, "%Y-%m-%dT%H:%M").replace(tzinfo=tz)
-                window_candidate_utc.append(dt_local.astimezone(timezone.utc))
-            except Exception:
-                continue
-        sounding_target_utc = (
-            min(window_candidate_utc, key=lambda t: abs((t - now_for_links_utc).total_seconds()))
-            if window_candidate_utc
-            else peak_utc
-        )
-
-        analysis_model = model
-        link_model = "gfs" if SYNOPTIC_PROVIDER == "gfs-grib2" else analysis_model
-        links_payload = BSL.build_links(
-            row=BSL.load_station(STATION_CSV, st.icao),
-            model=link_model,
-            now_utc=now_for_links_utc,
-            target_valid_utc=peak_utc,
-            sounding_target_valid_utc=sounding_target_utc,
-            target_date_utc=datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc),
-            sounding_model=_sounding_model_for_provider(SYNOPTIC_PROVIDER),
-        )
-
-        poly_prefetch_future = None
-        try:
-            purl = str((links_payload.get("links") or {}).get("polymarket_event") or "")
-            if purl:
-                poly_prefetch_future = _POLY_PREFETCH_POOL.submit(
-                    _prefetch_polymarket_event,
-                    purl,
-                    force_refresh=LOOK_FORCE_LIVE_POLYMARKET,
-                )
-        except Exception:
-            poly_prefetch_future = None
-
-        now_utc = datetime.now(timezone.utc)
-        now_local = now_utc.astimezone(tz)
-
-        t0 = time.perf_counter()
-        forecast_decision, _synoptic, _synoptic_error = load_or_build_forecast_decision(
+        bundle = build_look_report_bundle(
             station=st,
             target_date=target_date,
             model=model,
-            synoptic_provider=SYNOPTIC_PROVIDER,
-            now_utc=now_utc,
-            now_local=now_local,
-            station_lat=st.lat,
-            station_lon=st.lon,
-            primary_window=analysis_window,
-            tz_name=tz_name,
-            run_synoptic_fn=run_synoptic_section,
+            tz_name_station=tz_name_station,
             perf_log=_mark,
         )
-        forecast_elapsed = time.perf_counter() - t0
-        _mark("forecast_pipeline", forecast_elapsed)
-        forecast_quality = (forecast_decision.get("quality") or {}) if isinstance(forecast_decision, dict) else {}
-        synoptic_provider_used = str(forecast_quality.get("synoptic_provider_used") or SYNOPTIC_PROVIDER)
-        synoptic_runtime_used = str(forecast_quality.get("synoptic_analysis_runtime_used") or "")
-        synoptic_stream_used = str(forecast_quality.get("synoptic_analysis_stream_used") or "")
-        synoptic_previous_runtime_used = str(forecast_quality.get("synoptic_previous_runtime_used") or "")
-        sounding_model_used = _sounding_model_for_provider(synoptic_provider_used)
-        if str(links_payload.get("sounding_model") or "") != sounding_model_used:
-            links_payload = BSL.build_links(
-                row=BSL.load_station(STATION_CSV, st.icao),
-                model=link_model,
-                now_utc=now_for_links_utc,
-                target_valid_utc=peak_utc,
-                sounding_target_valid_utc=sounding_target_utc,
-                target_date_utc=datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc),
-                sounding_model=sounding_model_used,
-            )
-        lat_hemi = "N" if st.lat >= 0 else "S"
-        lon_hemi = "E" if st.lon >= 0 else "W"
-        rt = str(links_payload.get("runtime_utc") or "")
-        rt_fmt = rt
-        if len(rt) == 10 and rt.isdigit():
-            rt_fmt = f"{rt[0:4]}/{rt[4:6]}/{rt[6:8]} {rt[8:10]}Z"
-        syn_rt_fmt = synoptic_runtime_used
-        if synoptic_runtime_used.endswith("Z") and len(synoptic_runtime_used) == 11 and synoptic_runtime_used[:10].isdigit():
-            syn_rt_fmt = f"{synoptic_runtime_used[0:4]}/{synoptic_runtime_used[4:6]}/{synoptic_runtime_used[6:8]} {synoptic_runtime_used[8:10]}Z"
-        syn_prev_rt_fmt = synoptic_previous_runtime_used
-        if synoptic_previous_runtime_used.endswith("Z") and len(synoptic_previous_runtime_used) == 11 and synoptic_previous_runtime_used[:10].isdigit():
-            syn_prev_rt_fmt = f"{synoptic_previous_runtime_used[0:4]}/{synoptic_previous_runtime_used[4:6]}/{synoptic_previous_runtime_used[6:8]} {synoptic_previous_runtime_used[8:10]}Z"
-
-        terrain_tag = _terrain_tag_for(st.icao)
-        site_tag = _site_tag_for(st.icao)
-        direction_factor = _direction_factor_for(st.icao)
-        head_geo = f"{abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}"
-        if site_tag:
-            head_geo = f"{head_geo} ({site_tag})"
-        elif terrain_tag:
-            head_geo = f"{head_geo} ({terrain_tag})"
-
-        gate_now = classify_window_phase(primary, metar_diag)
-        phase_now = str(gate_now.get("phase") or "unknown")
-        compact_synoptic = phase_now in {"near_window", "in_window"}
-
-        header_lines = [
-            f"📍 **{st.icao} ({st.city}) | {head_geo}**",
-            f"生成时间: {now_utc.strftime('%Y/%m/%d %H:%M')} UTC | {_format_local_header_time(now_utc, now_local)}",
-        ]
-        if not compact_synoptic:
-            cycle_bits = []
-            if syn_rt_fmt:
-                cycle_bits.append(syn_rt_fmt + (f" {synoptic_stream_used}" if synoptic_stream_used else ""))
-            elif rt_fmt:
-                cycle_bits.append(rt_fmt)
-            if syn_prev_rt_fmt and syn_prev_rt_fmt != syn_rt_fmt:
-                cycle_bits.append(f"对比前一时次 {syn_prev_rt_fmt}")
-            cycle_txt = " | ".join(cycle_bits) if cycle_bits else rt_fmt
-            header_lines.append(
-                f"分析链路: 小时预报源 {provider_used} | 数值预报场源 {synoptic_provider_used}（数值模型时次: {cycle_txt}）"
-            )
-            if direction_factor:
-                header_lines.append(f"方位因子: {direction_factor}")
-
-        try:
-            quality = forecast_quality
-            missing = set(quality.get("missing_layers") or [])
-            degraded = str(quality.get("source_state") or "") == "degraded"
-            syn_fail = ("synoptic" in missing) or degraded
-            provider_used_3d = str(quality.get("synoptic_provider_used") or SYNOPTIC_PROVIDER)
-            provider_requested_3d = str(quality.get("synoptic_provider_requested") or SYNOPTIC_PROVIDER)
-            if provider_requested_3d != provider_used_3d:
-                header_lines.append(
-                    f"⚠️ 数据提醒：数值预报场已从 {provider_requested_3d} 回退到 {provider_used_3d}。"
-                )
-            elif syn_fail and _synoptic_error:
-                header_lines.append(
-                    f"⚠️ 数据提醒：数值预报场({provider_used_3d}) 层存在降级，部分环流诊断可能偏弱。"
-                )
-        except Exception:
-            pass
-
-        header_lines.append("**🦞龙虾学习中，不提供交易建议🦞**")
-
-        header = "\n".join(header_lines)
-
-        poly_prefetched_event = None
-        if poly_prefetch_future is not None:
-            try:
-                poly_prefetched_event = poly_prefetch_future.result(timeout=0.05)
-            except FuturesTimeoutError:
-                poly_prefetched_event = None
-            except Exception:
-                poly_prefetched_event = None
-
-        historical_context = _attach_historical_context(
-            metar_diag,
-            station_icao=st.icao,
-            target_date=target_date,
-            forecast_decision=forecast_decision,
-        )
-
-        analysis_snapshot = build_analysis_snapshot(
-            primary_window=primary,
-            metar_diag=metar_diag,
-            forecast_decision=forecast_decision,
-            temp_unit=unit_pref,
-            synoptic_window=analysis_window,
-            temp_shape_analysis=temp_shape_analysis,
-        )
-
-        t0 = time.perf_counter()
-        body = choose_section_text(
-            primary,
-            metar_text,
-            metar_diag,
-            links_payload["links"]["polymarket_event"],
-            forecast_decision=forecast_decision,
-            compact_synoptic=compact_synoptic,
-            temp_unit=unit_pref,
-            synoptic_window=analysis_window,
-            polymarket_prefetched_event=poly_prefetched_event,
-            temp_shape_analysis=temp_shape_analysis,
-            analysis_snapshot=analysis_snapshot,
-        )
-        _mark("render_body", time.perf_counter() - t0)
         total_elapsed = time.perf_counter() - t_e2e
-
-        links = links_payload["links"]
-        footer = (
-            f"🔗[Polymarket]({links['polymarket_event']}) | "
-            f"[METAR]({links['metar_24h']}) | "
-            f"[Wunderground]({links['wunderground']}) | "
-            f"[探空图（Tropicaltidbits）]({links['sounding_tropicaltidbits']})"
-        )
+        header = _render_report_header(st, bundle)
 
         show_perf = str(os.getenv("LOOK_SHOW_PERF", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
         if show_perf:
@@ -787,13 +295,13 @@ def render_report(
             )
             header = f"{header}\n{perf_line}"
 
-        result_text = f"{header}\n\n{body}\n{footer}"
+        result_text = f"{header}\n\n{bundle.body}\n{bundle.footer}"
         runtime_control.success(
             result_text,
             result_meta=build_cached_result_meta(
                 icao=st.icao,
-                model=model,
-                metar24=metar24,
+                model=bundle.model,
+                metar24=bundle.metar24,
             ),
         )
         return result_text

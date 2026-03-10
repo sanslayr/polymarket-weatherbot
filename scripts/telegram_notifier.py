@@ -40,8 +40,10 @@ def send_telegram_message(
     chat_id: str | None = None,
     bot_token: str | None = None,
     account: str = "weatherbot",
-    parse_mode: str = "Markdown",
+    parse_mode: str | None = "Markdown",
     disable_web_page_preview: bool = True,
+    reply_to_message_id: int | None = None,
+    message_thread_id: int | None = None,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
     token = str(bot_token or _resolve_bot_token(account)).strip()
@@ -53,9 +55,14 @@ def send_telegram_message(
     payload = {
         "chat_id": chat,
         "text": str(text or ""),
-        "parse_mode": parse_mode,
         "disable_web_page_preview": disable_web_page_preview,
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    if reply_to_message_id is not None:
+        payload["reply_to_message_id"] = int(reply_to_message_id)
+    if message_thread_id is not None:
+        payload["message_thread_id"] = int(message_thread_id)
     response = requests.post(url, json=payload, timeout=timeout)
     response.raise_for_status()
     return response.json()
@@ -71,17 +78,25 @@ def send_telegram_messages(
     timeout: float = 10.0,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
+    errors: list[str] = []
     for chat in resolve_telegram_alert_targets(chat_ids):
-        results.append(
-            send_telegram_message(
-                text,
-                chat_id=chat,
-                account=account,
-                parse_mode=parse_mode,
-                disable_web_page_preview=disable_web_page_preview,
-                timeout=timeout,
+        try:
+            results.append(
+                send_telegram_message(
+                    text,
+                    chat_id=chat,
+                    account=account,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=disable_web_page_preview,
+                    timeout=timeout,
+                )
             )
-        )
+        except Exception as exc:
+            errors.append(f"{chat}: {exc}")
+    if results:
+        return results
+    if errors:
+        raise RuntimeError("All Telegram deliveries failed: " + "; ".join(errors))
     return results
 
 
@@ -126,13 +141,21 @@ def send_telegram_messages_openclaw(
     timeout: float = 15.0,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
+    errors: list[str] = []
     for chat in resolve_telegram_alert_targets(chat_ids):
-        results.append(
-            send_telegram_message_openclaw(
-                text,
-                chat_id=chat,
-                account=account,
-                timeout=timeout,
+        try:
+            results.append(
+                send_telegram_message_openclaw(
+                    text,
+                    chat_id=chat,
+                    account=account,
+                    timeout=timeout,
+                )
             )
-        )
+        except Exception as exc:
+            errors.append(f"{chat}: {exc}")
+    if results:
+        return results
+    if errors:
+        raise RuntimeError("All Telegram deliveries failed: " + "; ".join(errors))
     return results

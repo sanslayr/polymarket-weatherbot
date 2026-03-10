@@ -88,10 +88,15 @@ def _write_3d_bundle(bundle: dict[str, Any], *parts: str) -> None:
     p.write_text(json.dumps(bundle, ensure_ascii=False), encoding="utf-8")
 
 
-def _read_recent_synoptic_bundle(*, station_icao: str, target_date: str, model: str, synoptic_provider: str, max_age_hours: int = 12) -> dict[str, Any] | None:
-    """Fallback: read most recent 3D bundle for same station/date/model/provider across runtime tags."""
+def _iter_synoptic_bundle_docs(
+    *,
+    station_icao: str,
+    target_date: str,
+    model: str,
+    synoptic_provider: str,
+) -> list[tuple[datetime, dict[str, Any]]]:
     if not runtime_cache_enabled():
-        return None
+        return []
     patt = str(CACHE_DIR / "forecast_3d_bundle_*.json")
     cands: list[tuple[datetime, dict[str, Any]]] = []
     for p in glob.glob(patt):
@@ -118,20 +123,67 @@ def _read_recent_synoptic_bundle(*, station_icao: str, target_date: str, model: 
         except Exception:
             ts = datetime.now(timezone.utc)
         cands.append((ts, doc))
-
-    if not cands:
-        return None
     cands.sort(key=lambda x: x[0], reverse=True)
-    ts, best = cands[0]
-    if (datetime.now(timezone.utc) - ts) > timedelta(hours=max_age_hours):
-        return None
+    return cands
+
+
+def _synoptic_from_bundle_doc(doc: dict[str, Any], *, synoptic_provider: str) -> dict[str, Any] | None:
     try:
-        merged = _merge_synoptic_payloads(best.get("slices") or [])
-        merged["_provider_requested"] = str(best.get("synoptic_provider") or synoptic_provider or "")
-        merged["_provider_used"] = str(best.get("synoptic_provider_used") or best.get("synoptic_provider") or synoptic_provider or "")
+        merged = _merge_synoptic_payloads(doc.get("slices") or [])
+        merged["_provider_requested"] = str(doc.get("synoptic_provider") or synoptic_provider or "")
+        merged["_provider_used"] = str(doc.get("synoptic_provider_used") or doc.get("synoptic_provider") or synoptic_provider or "")
+        merged["_pass_strategy"] = str(doc.get("synoptic_pass_strategy") or "")
+        merged["_anchors_local"] = [str(item).strip() for item in (doc.get("anchors_local") or []) if str(item).strip()]
+        merged["_outer500_anchors_local"] = [
+            str(item).strip() for item in (doc.get("outer500_anchors_local") or []) if str(item).strip()
+        ]
+        merged["_bundle_runtime"] = str(doc.get("runtime") or "")
         return merged
     except Exception:
         return None
+
+
+def _read_runtime_synoptic_bundle(
+    *,
+    station_icao: str,
+    target_date: str,
+    model: str,
+    synoptic_provider: str,
+    runtime: str,
+    max_age_hours: int = 12,
+) -> dict[str, Any] | None:
+    for ts, doc in _iter_synoptic_bundle_docs(
+        station_icao=station_icao,
+        target_date=target_date,
+        model=model,
+        synoptic_provider=synoptic_provider,
+    ):
+        if str(doc.get("runtime") or "") != runtime:
+            continue
+        if (datetime.now(timezone.utc) - ts) > timedelta(hours=max_age_hours):
+            return None
+        return _synoptic_from_bundle_doc(doc, synoptic_provider=synoptic_provider)
+    return None
+
+
+def _read_recent_synoptic_bundle(*, station_icao: str, target_date: str, model: str, synoptic_provider: str, max_age_hours: int = 12) -> dict[str, Any] | None:
+    """Fallback: read most recent 3D bundle for same station/date/model/provider across runtime tags."""
+    cands = _iter_synoptic_bundle_docs(
+        station_icao=station_icao,
+        target_date=target_date,
+        model=model,
+        synoptic_provider=synoptic_provider,
+    )
+
+    if not cands:
+        return None
+    for ts, best in cands:
+        if (datetime.now(timezone.utc) - ts) > timedelta(hours=max_age_hours):
+            return None
+        merged = _synoptic_from_bundle_doc(best, synoptic_provider=synoptic_provider)
+        if merged:
+            return merged
+    return None
 
 
 def _runtime_tag(model: str, now_utc: datetime) -> str:
@@ -634,6 +686,29 @@ def _merge_synoptic_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
     legacy_slices: list[dict[str, Any]] = []
     provider_requested = ""
     provider_used = ""
+    metadata_values: dict[str, list[Any]] = {}
+
+    def _append_metadata(key: str, value: Any) -> None:
+        if value in (None, "", [], {}):
+            return
+        bucket = metadata_values.setdefault(key, [])
+        if value not in bucket:
+            bucket.append(value)
+
+    def _pick_runtime(values: list[Any]) -> Any:
+        parsed: list[tuple[datetime, Any]] = []
+        for value in values:
+            text = str(value or "").strip()
+            if len(text) != 11 or not text.endswith("Z") or not text[:10].isdigit():
+                continue
+            try:
+                parsed.append((datetime.strptime(text, "%Y%m%d%HZ").replace(tzinfo=timezone.utc), value))
+            except Exception:
+                continue
+        if parsed:
+            parsed.sort(key=lambda item: item[0])
+            return parsed[-1][1]
+        return values[0]
 
     def _system_key(system: dict[str, Any]) -> tuple[str, str, int, int]:
         return (
@@ -655,6 +730,15 @@ def _merge_synoptic_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
             provider_requested = str(payload.get("_provider_requested") or "")
         if not provider_used:
             provider_used = str(payload.get("_provider_used") or "")
+        for key in (
+            "analysis_runtime_used",
+            "analysis_fh_used",
+            "analysis_stream_used",
+            "previous_runtime_used",
+            "previous_fh_used",
+            "previous_stream_used",
+        ):
+            _append_metadata(key, payload.get(key))
         systems = ((payload.get("scale_summary") or {}).get("synoptic") or {}).get("systems") or []
         analysis_time_utc = str(payload.get("analysis_time_utc") or "").strip()
         analysis_time_local = str(payload.get("analysis_time_local") or "").strip()
@@ -714,6 +798,13 @@ def _merge_synoptic_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
     merged["anchor_count"] = len(merged["anchor_slices"])
     merged["_provider_requested"] = provider_requested
     merged["_provider_used"] = provider_used or provider_requested
+    for key, values in metadata_values.items():
+        if not values:
+            continue
+        merged[key] = _pick_runtime(values) if key.endswith("_runtime_used") else values[0]
+        if len(values) > 1:
+            merged[f"{key}_values"] = list(values)
+            merged[f"{key}_mixed"] = True
     return merged
 
 
@@ -731,6 +822,7 @@ def load_or_build_forecast_decision(
     tz_name: str,
     run_synoptic_fn: Callable[..., dict[str, Any]],
     perf_log: Callable[[str, float], None] | None = None,
+    prefer_cached_synoptic: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
     def _log(stage: str, start: float) -> None:
         if perf_log:
@@ -763,142 +855,210 @@ def load_or_build_forecast_decision(
         # cache-hit 不再强制重跑 synoptic（此前这是主要耗时来源）
         return cached, synoptic, None
 
-    t = time.perf_counter()
-    syn_payloads: list[dict[str, Any]] = []
     synoptic_from_fallback = False
-    anchor_locals = _full_day_anchor_locals(target_date, tz_name, model)
-    anchor_telemetry: list[dict[str, Any]] = []
-    # Default to full-day anchors; set FORECAST_ANCHOR_LIMIT>0 to cap for performance tests.
-    anchor_limit = int(os.getenv("FORECAST_ANCHOR_LIMIT", "0") or "0")
-    if anchor_limit > 0:
-        anchor_locals = anchor_locals[:anchor_limit]
-    inner_anchor_locals = _select_inner_anchor_locals(
-        anchor_locals=anchor_locals,
-        primary_window=primary_window,
-        now_local=now_local,
-        tz_name=tz_name,
-    )
-
-    def _pull_anchor(a_local: str, pass_mode: str) -> tuple[str, dict[str, Any] | None, str | None, list[dict[str, Any]]]:
-        t_anchor = time.perf_counter()
-        try:
-            # Optional jitter to smooth provider burst limits.
-            jitter_ms = int(os.getenv("FORECAST_ANCHOR_JITTER_MS", "0") or "0")
-            if jitter_ms > 0:
-                time.sleep(random.uniform(0.0, max(0.0, jitter_ms / 1000.0)))
-            p = run_synoptic_fn(station, target_date, a_local, tz_name, model, runtime, pass_mode=pass_mode)
-            tele: list[dict[str, Any]] = []
-            tnode = p.get("_telemetry") if isinstance(p, dict) else None
-            if isinstance(tnode, dict):
-                for ev in (tnode.get("passes") or []):
-                    if not isinstance(ev, dict):
-                        continue
-                    row = dict(ev)
-                    row.setdefault("anchor_local", a_local)
-                    row.setdefault("pass_mode", pass_mode)
-                    tele.append(row)
-            if perf_log:
-                perf_log(f"forecast.anchor.{a_local}.{pass_mode}", time.perf_counter() - t_anchor)
-            return a_local, p, None, tele
-        except Exception as exc:
-            if perf_log:
-                perf_log(f"forecast.anchor.{a_local}.{pass_mode}.failed", time.perf_counter() - t_anchor)
-            return a_local, None, str(exc), []
-
-    def _run_anchor_batch(anchors: list[str], pass_mode: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
-        out_payloads: list[dict[str, Any]] = []
-        out_telemetry: list[dict[str, Any]] = []
-        ok = 0
-        if not anchors:
-            return out_payloads, out_telemetry, ok
-        max_workers = max(1, int(os.getenv("FORECAST_MAX_WORKERS", "3") or "3"))
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futs = [ex.submit(_pull_anchor, a, pass_mode) for a in anchors]
-            for fut in as_completed(futs):
-                _a, payload, err, tele = fut.result()
-                if tele:
-                    out_telemetry.extend(tele)
-                if payload is not None:
-                    out_payloads.append(payload)
-                    ok += 1
-                elif err:
-                    out_telemetry.append({
-                        "anchor_local": _a,
-                        "pass_mode": pass_mode,
-                        "status": "failed",
-                        "stage": "runner",
-                        "error_type": _classify_anchor_error(err),
-                        "error": str(err)[:300],
-                    })
-        return out_payloads, out_telemetry, ok
-
+    synoptic_from_bundle_cache = False
     strategy = str(os.getenv("FORECAST_SYNOPTIC_PASS_STRATEGY", "split_outer500") or "split_outer500").strip().lower()
-    inner_ok = 0
+    inner_anchor_locals: list[str] = []
     outer500_anchors: list[str] = []
+    inner_ok = 0
     outer500_ok = 0
+    anchor_telemetry: list[dict[str, Any]] = []
 
-    if strategy in {"full", "legacy"}:
-        batch_payloads, batch_tele, batch_ok = _run_anchor_batch(inner_anchor_locals, "full")
-        syn_payloads.extend(batch_payloads)
-        anchor_telemetry.extend(batch_tele)
-        inner_ok = batch_ok
-    else:
-        inner_payloads, inner_tele, inner_ok = _run_anchor_batch(inner_anchor_locals, "inner_only")
-        syn_payloads.extend(inner_payloads)
-        anchor_telemetry.extend(inner_tele)
+    if prefer_cached_synoptic and (not force_rebuild):
+        t = time.perf_counter()
+        cached_runtime_syn = _read_runtime_synoptic_bundle(
+            station_icao=str(getattr(station, "icao", "")),
+            target_date=target_date,
+            model=model,
+            synoptic_provider=synoptic_provider,
+            runtime=runtime,
+            max_age_hours=int(os.getenv("FORECAST_RUNTIME_BUNDLE_REUSE_HOURS", "12") or "12"),
+        )
+        _log("forecast.synoptic_runtime_bundle_cache", t)
+        if cached_runtime_syn:
+            synoptic = cached_runtime_syn
+            actual_synoptic_provider = str(cached_runtime_syn.get("_provider_used") or synoptic_provider or "")
+            strategy = str(cached_runtime_syn.get("_pass_strategy") or strategy)
+            inner_anchor_locals = [str(item) for item in (cached_runtime_syn.get("_anchors_local") or []) if str(item)]
+            outer500_anchors = [str(item) for item in (cached_runtime_syn.get("_outer500_anchors_local") or []) if str(item)]
+            if not inner_anchor_locals:
+                inner_anchor_locals = [
+                    str(item.get("analysis_time_local") or item.get("analysis_time_utc") or "").strip()
+                    for item in (cached_runtime_syn.get("anchor_slices") or [])
+                    if isinstance(item, dict) and str(item.get("analysis_time_local") or item.get("analysis_time_utc") or "").strip()
+                ]
+            inner_ok = len(inner_anchor_locals)
+            outer500_ok = len(outer500_anchors)
+            synoptic_from_bundle_cache = True
+        else:
+            fallback_syn = _read_recent_synoptic_bundle(
+                station_icao=str(getattr(station, "icao", "")),
+                target_date=target_date,
+                model=model,
+                synoptic_provider=synoptic_provider,
+                max_age_hours=int(os.getenv("FORECAST_SYNOPTIC_FALLBACK_HOURS", "12") or "12"),
+            )
+            if fallback_syn:
+                synoptic = fallback_syn
+                actual_synoptic_provider = str(fallback_syn.get("_provider_used") or synoptic_provider or "")
+                strategy = str(fallback_syn.get("_pass_strategy") or strategy)
+                inner_anchor_locals = [str(item) for item in (fallback_syn.get("_anchors_local") or []) if str(item)]
+                outer500_anchors = [str(item) for item in (fallback_syn.get("_outer500_anchors_local") or []) if str(item)]
+                if not inner_anchor_locals:
+                    inner_anchor_locals = [
+                        str(item.get("analysis_time_local") or item.get("analysis_time_utc") or "").strip()
+                        for item in (fallback_syn.get("anchor_slices") or [])
+                        if isinstance(item, dict) and str(item.get("analysis_time_local") or item.get("analysis_time_utc") or "").strip()
+                    ]
+                inner_ok = len(inner_anchor_locals)
+                outer500_ok = len(outer500_anchors)
+                synoptic_from_fallback = True
+                if perf_log:
+                    perf_log("forecast.synoptic_fallback_cache", 0.0)
 
-        outer500_anchors = _select_outer500_anchor_locals(
+    if not synoptic_from_bundle_cache and not synoptic_from_fallback:
+        t = time.perf_counter()
+        syn_payloads: list[dict[str, Any]] = []
+        anchor_locals = _full_day_anchor_locals(target_date, tz_name, model)
+        # Default to full-day anchors; set FORECAST_ANCHOR_LIMIT>0 to cap for performance tests.
+        anchor_limit = int(os.getenv("FORECAST_ANCHOR_LIMIT", "0") or "0")
+        if anchor_limit > 0:
+            anchor_locals = anchor_locals[:anchor_limit]
+        inner_anchor_locals = _select_inner_anchor_locals(
             anchor_locals=anchor_locals,
             primary_window=primary_window,
             now_local=now_local,
             tz_name=tz_name,
         )
-        outer_payloads, outer_tele, outer500_ok = _run_anchor_batch(outer500_anchors, "outer500_only")
-        syn_payloads.extend(outer_payloads)
-        anchor_telemetry.extend(outer_tele)
 
-    if anchor_telemetry:
-        for ev in anchor_telemetry:
-            if str(ev.get("status")) == "failed":
-                synoptic_error = str(ev.get("error") or synoptic_error or "")
+        def _pull_anchor(a_local: str, pass_mode: str) -> tuple[str, dict[str, Any] | None, str | None, list[dict[str, Any]]]:
+            t_anchor = time.perf_counter()
+            try:
+                # Optional jitter to smooth provider burst limits.
+                jitter_ms = int(os.getenv("FORECAST_ANCHOR_JITTER_MS", "0") or "0")
+                if jitter_ms > 0:
+                    time.sleep(random.uniform(0.0, max(0.0, jitter_ms / 1000.0)))
+                p = run_synoptic_fn(station, target_date, a_local, tz_name, model, runtime, pass_mode=pass_mode)
+                tele: list[dict[str, Any]] = []
+                tnode = p.get("_telemetry") if isinstance(p, dict) else None
+                if isinstance(tnode, dict):
+                    for ev in (tnode.get("passes") or []):
+                        if not isinstance(ev, dict):
+                            continue
+                        row = dict(ev)
+                        row.setdefault("anchor_local", a_local)
+                        row.setdefault("pass_mode", pass_mode)
+                        tele.append(row)
+                if perf_log:
+                    perf_log(f"forecast.anchor.{a_local}.{pass_mode}", time.perf_counter() - t_anchor)
+                return a_local, p, None, tele
+            except Exception as exc:
+                if perf_log:
+                    perf_log(f"forecast.anchor.{a_local}.{pass_mode}.failed", time.perf_counter() - t_anchor)
+                return a_local, None, str(exc), []
 
-    if syn_payloads:
-        synoptic = _merge_synoptic_payloads(syn_payloads)
-        actual_synoptic_provider = str(synoptic.get("_provider_used") or synoptic_provider or "")
-        try:
-            _write_3d_bundle(
-                {
-                    "schema_version": FORECAST_3D_BUNDLE_SCHEMA_VERSION,
-                    "station": str(getattr(station, "icao", "")),
-                    "date": target_date,
-                    "model": model,
-                    "synoptic_provider": synoptic_provider,
-                    "synoptic_provider_used": actual_synoptic_provider,
-                    "synoptic_pass_strategy": strategy,
-                    "runtime": runtime,
-                    "anchors_local": inner_anchor_locals,
-                    "outer500_anchors_local": outer500_anchors,
-                    "slices": syn_payloads,
-                },
-                str(getattr(station, "icao", "")), target_date, model.lower(), str(synoptic_provider or ""), runtime,
+        def _run_anchor_batch(anchors: list[str], pass_mode: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+            out_payloads: list[dict[str, Any]] = []
+            out_telemetry: list[dict[str, Any]] = []
+            ok = 0
+            if not anchors:
+                return out_payloads, out_telemetry, ok
+            max_workers = max(1, int(os.getenv("FORECAST_MAX_WORKERS", "3") or "3"))
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futs = [ex.submit(_pull_anchor, a, pass_mode) for a in anchors]
+                for fut in as_completed(futs):
+                    _a, payload, err, tele = fut.result()
+                    if tele:
+                        out_telemetry.extend(tele)
+                    if payload is not None:
+                        out_payloads.append(payload)
+                        ok += 1
+                    elif err:
+                        out_telemetry.append({
+                            "anchor_local": _a,
+                            "pass_mode": pass_mode,
+                            "status": "failed",
+                            "stage": "runner",
+                            "error_type": _classify_anchor_error(err),
+                            "error": str(err)[:300],
+                        })
+            return out_payloads, out_telemetry, ok
+
+        if strategy in {"full", "legacy"}:
+            batch_payloads, batch_tele, batch_ok = _run_anchor_batch(inner_anchor_locals, "full")
+            syn_payloads.extend(batch_payloads)
+            anchor_telemetry.extend(batch_tele)
+            inner_ok = batch_ok
+        else:
+            inner_payloads, inner_tele, inner_ok = _run_anchor_batch(inner_anchor_locals, "inner_only")
+            syn_payloads.extend(inner_payloads)
+            anchor_telemetry.extend(inner_tele)
+
+            outer500_anchors = _select_outer500_anchor_locals(
+                anchor_locals=anchor_locals,
+                primary_window=primary_window,
+                now_local=now_local,
+                tz_name=tz_name,
             )
-        except Exception:
-            pass
-    else:
-        fallback_syn = _read_recent_synoptic_bundle(
-            station_icao=str(getattr(station, "icao", "")),
-            target_date=target_date,
-            model=model,
-            synoptic_provider=synoptic_provider,
-            max_age_hours=int(os.getenv("FORECAST_SYNOPTIC_FALLBACK_HOURS", "12") or "12"),
-        )
-        if fallback_syn:
-            synoptic = fallback_syn
-            actual_synoptic_provider = str(fallback_syn.get("_provider_used") or synoptic_provider or "")
-            synoptic_from_fallback = True
-            if perf_log:
-                perf_log("forecast.synoptic_fallback_cache", 0.0)
-    _log("forecast.synoptic_build", t)
+            outer_payloads, outer_tele, outer500_ok = _run_anchor_batch(outer500_anchors, "outer500_only")
+            syn_payloads.extend(outer_payloads)
+            anchor_telemetry.extend(outer_tele)
+
+        if anchor_telemetry:
+            for ev in anchor_telemetry:
+                if str(ev.get("status")) == "failed":
+                    synoptic_error = str(ev.get("error") or synoptic_error or "")
+
+        if syn_payloads:
+            synoptic = _merge_synoptic_payloads(syn_payloads)
+            actual_synoptic_provider = str(synoptic.get("_provider_used") or synoptic_provider or "")
+            actual_bundle_runtime = str(synoptic.get("analysis_runtime_used") or runtime)
+            try:
+                _write_3d_bundle(
+                    {
+                        "schema_version": FORECAST_3D_BUNDLE_SCHEMA_VERSION,
+                        "station": str(getattr(station, "icao", "")),
+                        "date": target_date,
+                        "model": model,
+                        "synoptic_provider": synoptic_provider,
+                        "synoptic_provider_used": actual_synoptic_provider,
+                        "synoptic_pass_strategy": strategy,
+                        "runtime": actual_bundle_runtime,
+                        "requested_runtime": runtime,
+                        "anchors_local": inner_anchor_locals,
+                        "outer500_anchors_local": outer500_anchors,
+                        "slices": syn_payloads,
+                    },
+                    str(getattr(station, "icao", "")), target_date, model.lower(), str(synoptic_provider or ""), actual_bundle_runtime,
+                )
+            except Exception:
+                pass
+        else:
+            fallback_syn = _read_recent_synoptic_bundle(
+                station_icao=str(getattr(station, "icao", "")),
+                target_date=target_date,
+                model=model,
+                synoptic_provider=synoptic_provider,
+                max_age_hours=int(os.getenv("FORECAST_SYNOPTIC_FALLBACK_HOURS", "12") or "12"),
+            )
+            if fallback_syn:
+                synoptic = fallback_syn
+                actual_synoptic_provider = str(fallback_syn.get("_provider_used") or synoptic_provider or "")
+                strategy = str(fallback_syn.get("_pass_strategy") or strategy)
+                inner_anchor_locals = [str(item) for item in (fallback_syn.get("_anchors_local") or []) if str(item)]
+                outer500_anchors = [str(item) for item in (fallback_syn.get("_outer500_anchors_local") or []) if str(item)]
+                if not inner_anchor_locals:
+                    inner_anchor_locals = [
+                        str(item.get("analysis_time_local") or item.get("analysis_time_utc") or "").strip()
+                        for item in (fallback_syn.get("anchor_slices") or [])
+                        if isinstance(item, dict) and str(item.get("analysis_time_local") or item.get("analysis_time_utc") or "").strip()
+                    ]
+                inner_ok = len(inner_anchor_locals)
+                outer500_ok = len(outer500_anchors)
+                synoptic_from_fallback = True
+                if perf_log:
+                    perf_log("forecast.synoptic_fallback_cache", 0.0)
+        _log("forecast.synoptic_build", t)
 
     t = time.perf_counter()
     decision = build_forecast_decision(
@@ -936,6 +1096,11 @@ def load_or_build_forecast_decision(
         value = synoptic.get(key)
         if value not in (None, "", [], {}):
             q[f"synoptic_{key}"] = value
+        extra_values = synoptic.get(f"{key}_values")
+        if extra_values not in (None, "", [], {}):
+            q[f"synoptic_{key}_values"] = extra_values
+        if synoptic.get(f"{key}_mixed"):
+            q[f"synoptic_{key}_mixed"] = True
     if q["synoptic_provider_requested"] != q["synoptic_provider_used"]:
         q["synoptic_provider_fallback"] = True
 
@@ -979,6 +1144,8 @@ def load_or_build_forecast_decision(
     if synoptic_error and not synoptic_from_fallback:
         q["source_state"] = "degraded"
         q.setdefault("missing_layers", []).append("synoptic")
+    elif synoptic_from_bundle_cache:
+        q["source_state"] = "bundle-cache-hit"
     elif synoptic_from_fallback:
         q["source_state"] = "fallback-cache"
 
@@ -1001,6 +1168,11 @@ def load_or_build_forecast_decision(
 
     if isinstance(q.get("missing_layers"), list):
         q["missing_layers"] = sorted(set(str(x) for x in q.get("missing_layers") if x))
+    meta = decision.setdefault("meta", {})
+    actual_runtime_used = str(q.get("synoptic_analysis_runtime_used") or "").strip()
+    if actual_runtime_used:
+        meta["runtime_requested"] = str(meta.get("runtime") or runtime)
+        meta["runtime"] = actual_runtime_used
 
     t = time.perf_counter()
     _write_cache(decision, *key_parts)

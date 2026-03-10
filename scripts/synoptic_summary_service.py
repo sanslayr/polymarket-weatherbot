@@ -312,6 +312,20 @@ def build_synoptic_summary(
     def _clean_line_text(text: str) -> str:
         return str(text or "").strip().rstrip("。；，")
 
+    def _normalize_regime_headline(text: str) -> str:
+        cleaned = _clean_line_text(text)
+        generic_prefix = "今天没有特别单一的主导因素，"
+        if cleaned.startswith(generic_prefix):
+            cleaned = cleaned[len(generic_prefix):]
+            if cleaned.startswith("先看"):
+                cleaned = "后段更要看" + cleaned[2:]
+        if cleaned.startswith("先看"):
+            cleaned = "后段更要看" + cleaned[2:]
+        cleaned = cleaned.replace("，再看", "，以及", 1)
+        cleaned = cleaned.replace("；这会一起决定午后还能不能继续升温", "；这会一起决定后段升温还能不能延续")
+        cleaned = cleaned.replace("；这会决定午后还能不能继续升温", "；这会决定后段升温还能不能延续")
+        return cleaned
+
     def _line_priority(label: str, text: str) -> float:
         txt = str(text or "")
         if not txt:
@@ -354,7 +368,7 @@ def build_synoptic_summary(
         regime_headline = _fallback_regime_headline(regime_key)
 
     if regime_headline:
-        syn_lines.append(f"- **主导机制**：{_clean_line_text(regime_headline)}。")
+        syn_lines.append(f"- **主导机制**：{_normalize_regime_headline(regime_headline)}。")
 
     detail_candidates.sort(key=lambda item: item[0], reverse=True)
     selected_details: list[tuple[str, str]] = []

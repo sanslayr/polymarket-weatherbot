@@ -225,7 +225,7 @@ class BoundaryLayerRegimeTest(unittest.TestCase):
         )
 
         self.assertEqual(regime["regime_key"], "synoptic")
-        self.assertIn("今天没有特别单一的主导因素", regime["headline"])
+        self.assertIn("后段更要看", regime["headline"])
         self.assertIn("午后升温效率能否继续维持", regime["headline"])
         self.assertIn("低层风场能否继续带动升温", regime["headline"])
         self.assertEqual(regime["thermo"]["vertical_regime"], "dry_clear_mixed")

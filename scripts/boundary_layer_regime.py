@@ -532,17 +532,17 @@ def build_boundary_layer_regime(
 
         if len(background_bits) >= 2:
             headline = (
-                "今天没有特别单一的主导因素，先看"
+                "后段更要看"
                 + background_bits[0]
-                + "，再看"
+                + "，以及"
                 + background_bits[1]
-                + "；这会一起决定午后还能不能继续升温。"
+                + "；这会一起决定后段升温还能不能延续。"
             )
         else:
             headline = (
-                "今天没有特别单一的主导因素，先看"
+                "后段更要看"
                 + background_bits[0]
-                + "；这会决定午后还能不能继续升温。"
+                + "；这会决定后段升温还能不能延续。"
             )
         tracking_line = "优先看云量、近地风场和温度斜率能否继续配合；若三者同步走强，再考虑上修后段上沿。"
 

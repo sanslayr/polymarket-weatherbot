@@ -8,6 +8,13 @@ from market_stream_service import monitor_market_state, stream_market_state
 from market_subscription_policy import build_market_subscription_plan
 
 
+def _load_catalog(polymarket_event_url: str) -> dict[str, Any]:
+    catalog = build_market_catalog_snapshot(polymarket_event_url, force_refresh=False)
+    if catalog.get("event_found") and (catalog.get("markets") or []):
+        return catalog
+    return build_market_catalog_snapshot(polymarket_event_url, force_refresh=True)
+
+
 def build_bucket_snapshots(
     *,
     market_catalog_snapshot: dict[str, Any],
@@ -52,7 +59,7 @@ def run_market_monitor_cycle(
     stream_seconds: float = 4.0,
     core_only: bool = False,
 ) -> dict[str, Any]:
-    catalog = build_market_catalog_snapshot(polymarket_event_url, force_refresh=True)
+    catalog = _load_catalog(polymarket_event_url)
     plan = build_market_subscription_plan(
         market_catalog_snapshot=catalog,
         observed_max_temp_c=observed_max_temp_c,
@@ -91,7 +98,7 @@ def run_market_monitor_event_window(
     baseline_seconds: float = 2.0,
     core_only: bool = True,
 ) -> dict[str, Any]:
-    catalog = build_market_catalog_snapshot(polymarket_event_url, force_refresh=True)
+    catalog = _load_catalog(polymarket_event_url)
     plan = build_market_subscription_plan(
         market_catalog_snapshot=catalog,
         observed_max_temp_c=observed_max_temp_c,

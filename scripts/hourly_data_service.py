@@ -18,8 +18,16 @@ from temperature_shape_analysis import analyze_temperature_shape
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT / "cache" / "runtime"
 CACHE_TTL_HOURS = int(os.getenv("WEATHERBOT_HOURLY_CACHE_TTL_HOURS", "24") or "24")
+OPENMETEO_TIMEOUT_SECONDS = float(os.getenv("WEATHERBOT_OPENMETEO_TIMEOUT_SECONDS", "3") or "3")
 OPENMETEO_BREAKER_SECONDS = int(os.getenv("OPENMETEO_BREAKER_SECONDS", "900") or "900")
 OPENMETEO_BREAKER_FILE = CACHE_DIR / "openmeteo_breaker.json"
+HOURLY_REUSE_CACHE_FIRST = str(os.getenv("WEATHERBOT_HOURLY_REUSE_CACHE_FIRST", "1") or "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+HOURLY_PREVIOUS_CYCLE_REUSE_HOURS = int(os.getenv("WEATHERBOT_HOURLY_PREVIOUS_CYCLE_REUSE_HOURS", "12") or "12")
 
 
 def _openmeteo_breaker_info() -> tuple[bool, datetime | None, str | None]:
@@ -80,7 +88,13 @@ def _cache_path(kind: str, *parts: str) -> Path:
     return CACHE_DIR / f"{kind}_{_cache_key(*parts)}.json"
 
 
-def _read_cache(kind: str, *parts: str, ttl_hours: int = CACHE_TTL_HOURS, allow_stale: bool = False) -> dict[str, Any] | None:
+def _read_cache(
+    kind: str,
+    *parts: str,
+    ttl_hours: int = CACHE_TTL_HOURS,
+    allow_stale: bool = False,
+    max_age_hours: int | None = None,
+) -> dict[str, Any] | None:
     if not runtime_cache_enabled():
         return None
     p = _cache_path(kind, *parts)
@@ -91,8 +105,12 @@ def _read_cache(kind: str, *parts: str, ttl_hours: int = CACHE_TTL_HOURS, allow_
         payload, updated_at, _env = extract_payload(doc)
         if payload is None:
             return None
-        if (not allow_stale) and updated_at:
+        if updated_at:
             ts = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+            if max_age_hours is not None and (datetime.now(timezone.utc) - ts) > timedelta(hours=max_age_hours):
+                return None
+            if allow_stale:
+                return payload
             if datetime.now(timezone.utc) - ts > timedelta(hours=ttl_hours):
                 return None
         return payload
@@ -155,15 +173,57 @@ def _get_cached_hourly_cycle(kind: str, st: Station, target_date: str, model: st
     return _read_cache(kind, st.icao, target_date, model.lower(), cycle_tag, allow_stale=True)
 
 
-def _get_cached_hourly_previous_cycles(kind: str, st: Station, target_date: str, model: str, now_utc: datetime, max_back: int = 3) -> dict[str, Any] | None:
+def _get_cached_hourly_previous_cycles(
+    kind: str,
+    st: Station,
+    target_date: str,
+    model: str,
+    now_utc: datetime,
+    *,
+    max_back: int = 3,
+    max_age_hours: int | None = None,
+) -> dict[str, Any] | None:
     cfg = BSL.MODEL_CONFIGS.get((model or "").lower())
     cycle_h = int(getattr(cfg, "cycle_hours", 6) or 6)
     for back in range(1, max_back + 1):
         prev_tag = model_cycle_tag(model, now_utc - timedelta(hours=cycle_h * back))
-        c = _read_cache(kind, st.icao, target_date, model.lower(), prev_tag, allow_stale=True)
+        c = _read_cache(
+            kind,
+            st.icao,
+            target_date,
+            model.lower(),
+            prev_tag,
+            allow_stale=True,
+            max_age_hours=max_age_hours,
+        )
         if c:
             return c
     return None
+
+
+def _best_cached_hourly_payload(
+    kind: str,
+    st: Station,
+    target_date: str,
+    model: str,
+    now_utc: datetime,
+) -> tuple[dict[str, Any] | None, str | None]:
+    cycle_tag = model_cycle_tag(model, now_utc)
+    cached_cur = _get_cached_hourly_cycle(kind, st, target_date, model, cycle_tag)
+    if cached_cur:
+        return cached_cur, "current"
+    cached_prev = _get_cached_hourly_previous_cycles(
+        kind,
+        st,
+        target_date,
+        model,
+        now_utc,
+        max_back=3,
+        max_age_hours=HOURLY_PREVIOUS_CYCLE_REUSE_HOURS,
+    )
+    if cached_prev:
+        return cached_prev, "previous"
+    return None, None
 
 
 def fetch_hourly_openmeteo(st: Station, target_date: str, model: str) -> dict[str, Any]:
@@ -196,7 +256,7 @@ def fetch_hourly_openmeteo(st: Station, target_date: str, model: str) -> dict[st
     last_err: Exception | None = None
     for _ in range(1, 4):
         try:
-            r = requests.get(url, params=params, timeout=45)
+            r = requests.get(url, params=params, timeout=OPENMETEO_TIMEOUT_SECONDS)
             r.raise_for_status()
             data = r.json()
             _write_cache("hourly", data, st.icao, target_date, model.lower(), cycle_tag)
@@ -233,14 +293,37 @@ def fetch_hourly_gfs_grib2(st: Station, target_date: str, model: str) -> dict[st
         raise
 
 
-def fetch_hourly_router(st: Station, target_date: str, model: str, provider: str = "auto") -> tuple[dict[str, Any], str]:
+def fetch_hourly_router(
+    st: Station,
+    target_date: str,
+    model: str,
+    provider: str = "auto",
+    *,
+    prefer_cached_sources: bool = HOURLY_REUSE_CACHE_FIRST,
+) -> tuple[dict[str, Any], str]:
     p = (provider or "auto").strip().lower()
     now_utc = datetime.now(timezone.utc)
 
     if p in {"openmeteo", "open-meteo"}:
+        if prefer_cached_sources:
+            cached_om, cache_src = _best_cached_hourly_payload("hourly", st, target_date, model, now_utc)
+            if cached_om:
+                return cached_om, "openmeteo" if cache_src == "current" else "openmeteo-prev-cache"
         return fetch_hourly_openmeteo(st, target_date, model), "openmeteo"
     if p in {"gfs", "gfs-grib2", "grib2"}:
+        if prefer_cached_sources:
+            cached_gfs, cache_src = _best_cached_hourly_payload("hourly_gfs", st, target_date, model, now_utc)
+            if cached_gfs:
+                return cached_gfs, "gfs-grib2" if cache_src == "current" else "gfs-grib2-prev-cache"
         return fetch_hourly_gfs_grib2(st, target_date, model), "gfs-grib2"
+
+    if prefer_cached_sources:
+        cached_om, om_cache_src = _best_cached_hourly_payload("hourly", st, target_date, model, now_utc)
+        if cached_om:
+            return cached_om, "openmeteo" if om_cache_src == "current" else "openmeteo-prev-cache"
+        cached_gfs, gfs_cache_src = _best_cached_hourly_payload("hourly_gfs", st, target_date, model, now_utc)
+        if cached_gfs:
+            return cached_gfs, "gfs-grib2" if gfs_cache_src == "current" else "gfs-grib2-prev-cache"
 
     om_err = None
     gfs_err = None

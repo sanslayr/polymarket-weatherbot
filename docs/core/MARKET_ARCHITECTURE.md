@@ -31,6 +31,24 @@ This is enough for `/look`, but not enough for:
 - multi-strategy execution
 - portfolio/risk management
 
+At the same time, a first proactive alert branch now exists inside the weatherbot workspace:
+
+- `scripts/market_metadata_service.py`
+- `scripts/market_stream_service.py`
+- `scripts/market_monitor_service.py`
+- `scripts/market_implied_weather_signal.py`
+- `scripts/market_signal_alert_service.py`
+- `scripts/telegram_notifier.py`
+- `scripts/market_alert_worker.py`
+
+That branch is intentionally alert-only for now:
+
+- monitor report-window repricing
+- infer market-implied observation hints
+- push short Telegram notifications
+
+It should remain separate from `/look` rendering and from any future execution layer.
+
 ## Target Market Mainline
 
 The market branch should evolve into:
