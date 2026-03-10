@@ -18,14 +18,18 @@ class MarketStateStoreTest(unittest.TestCase):
             {
                 "event_type": "book",
                 "asset_id": "abc",
-                "bids": [{"price": "0.03", "size": "120"}],
-                "asks": [{"price": "0.05", "size": "90"}],
+                "bids": [{"price": "0.03", "size": "120"}, {"price": "0.02", "size": "80"}],
+                "asks": [{"price": "0.05", "size": "90"}, {"price": "0.06", "size": "70"}],
                 "timestamp": "2026-03-09T09:30:00Z",
             }
         )
         snap = store.snapshot()["abc"]
         self.assertEqual(snap["best_bid"], 0.03)
         self.assertEqual(snap["best_ask"], 0.05)
+        self.assertEqual(snap["bid_depth_3"], 200.0)
+        self.assertEqual(snap["ask_depth_3"], 160.0)
+        self.assertEqual(snap["mid_price"], 0.04)
+        self.assertEqual(snap["spread"], 0.02)
 
     def test_apply_price_change_can_clear_best_bid(self) -> None:
         store = MarketStateStore()
@@ -70,6 +74,33 @@ class MarketStateStoreTest(unittest.TestCase):
         snap = store.snapshot()["abc"]
         self.assertIsNone(snap["best_bid"])
         self.assertEqual(snap["best_ask"], 0.001)
+
+    def test_last_trade_price_tracks_trade_counts_and_volume(self) -> None:
+        store = MarketStateStore()
+        store.apply_message(
+            {
+                "event_type": "last_trade_price",
+                "asset_id": "abc",
+                "price": "0.04",
+                "size": "15",
+                "side": "buy",
+                "timestamp": "2026-03-09T09:30:00Z",
+            }
+        )
+        store.apply_message(
+            {
+                "event_type": "last_trade_price",
+                "asset_id": "abc",
+                "price": "0.03",
+                "size": "5",
+                "side": "sell",
+                "timestamp": "2026-03-09T09:31:00Z",
+            }
+        )
+        snap = store.snapshot()["abc"]
+        self.assertEqual(snap["trade_count_3m"], 2)
+        self.assertEqual(snap["trade_volume_3m"], 20.0)
+        self.assertEqual(snap["last_trade_price"], 0.03)
 
 
 if __name__ == "__main__":

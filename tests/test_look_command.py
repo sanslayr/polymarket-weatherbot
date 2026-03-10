@@ -19,6 +19,13 @@ class LookCommandTests(unittest.TestCase):
         self.assertEqual(parsed["station"], "seoul")
         self.assertEqual(parsed["date"], "20260310")
 
+    def test_supports_multiword_city_names_in_private_look(self) -> None:
+        parsed = parse_telegram_command("/look Tel Aviv 20260310")
+
+        self.assertEqual(parsed["cmd"], "look")
+        self.assertEqual(parsed["station"], "Tel Aviv")
+        self.assertEqual(parsed["date"], "20260310")
+
 
 if __name__ == "__main__":
     unittest.main()

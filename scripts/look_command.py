@@ -9,7 +9,7 @@ def render_look_help() -> str:
     return (
         "📘 /look 用法\n"
         "- /look <城市或机场代码> [YYYY-MM-DD 或 YYYYMMDD]\n"
-        "- 示例：/look ank | /look London | /look par 20260307\n"
+        "- 示例：/look ank | /look tlv | /look tok | /look Tel Aviv 20260307\n"
         f"- 常用别名：{alias_text}\n"
         f"- 支持站点：{station_text}"
     )
@@ -46,6 +46,7 @@ def parse_telegram_command(text: str) -> dict[str, str]:
             return y.isdigit() and m.isdigit() and d.isdigit()
         return False
 
+    station_tokens: list[str] = []
     i = 1
     while i < len(parts):
         tok = parts[i].strip()
@@ -83,9 +84,11 @@ def parse_telegram_command(text: str) -> dict[str, str]:
             i += 1
             continue
 
-        params.setdefault("station", tok)
+        station_tokens.append(tok)
         i += 1
 
+    if station_tokens and "station" not in params:
+        params["station"] = " ".join(station_tokens).strip()
     if "city" in params and "station" not in params:
         params["station"] = params["city"]
     if "icao" in params and "station" not in params:

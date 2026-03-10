@@ -85,6 +85,51 @@ def _build_metar_block(
     return "📡 **最新实况分析（METAR）**\n" + ("\n".join(metar_prefix + [metar_text]) if metar_prefix else metar_text)
 
 
+def _build_far_metar_block(
+    metar_diag: dict[str, Any],
+    unit: str,
+    fmt_temp,
+) -> str:
+    lines = ["📡 **当前实况参考（降级）**"]
+    latest_local = str(metar_diag.get("latest_report_local") or "").strip()
+    latest_time = ""
+    if latest_local:
+        try:
+            latest_time = datetime.fromisoformat(latest_local).strftime("%H:%M Local")
+        except Exception:
+            latest_time = ""
+    if latest_time:
+        lines.append(f"• 最新报：{latest_time}")
+
+    compact_bits: list[str] = []
+    try:
+        latest_temp = metar_diag.get("latest_temp")
+        if latest_temp is not None:
+            compact_bits.append(f"气温 {fmt_temp(float(latest_temp))}")
+    except Exception:
+        pass
+
+    try:
+        latest_wdir = metar_diag.get("latest_wdir")
+        latest_wspd = metar_diag.get("latest_wspd")
+        if latest_wdir not in (None, "") and latest_wspd not in (None, ""):
+            compact_bits.append(f"风 {float(latest_wdir):.0f}° {float(latest_wspd):.0f}kt")
+        elif latest_wspd not in (None, ""):
+            compact_bits.append(f"风速 {float(latest_wspd):.0f}kt")
+    except Exception:
+        pass
+
+    cloud_layers = str(metar_diag.get("latest_cloud_layers") or "").strip()
+    if cloud_layers:
+        compact_bits.append(f"云层 {cloud_layers}")
+
+    if compact_bits:
+        lines.append(f"• {' | '.join(compact_bits)}")
+
+    lines.append("• 目标峰值窗仍远，当前实况只作背景参考；主判断以预报环流和后续演变为主。")
+    return "\n".join(lines)
+
+
 def choose_section_text(
     primary_window: dict[str, Any],
     metar_text: str,
@@ -137,13 +182,6 @@ def choose_section_text(
 
     syn_lines = syn_lines[:5]
 
-    metar_block = _build_metar_block(
-        metar_diag=metar_diag,
-        metar_text=metar_text,
-        unit=unit,
-        fmt_temp=_fmt_temp,
-    )
-
     temp_phase_decision = dict(snapshot.get("temp_phase_decision") or {})
     peak_data = dict(snapshot.get("peak_data") or {})
     weather_posterior = dict(snapshot.get("weather_posterior") or {})
@@ -157,6 +195,18 @@ def choose_section_text(
     disp_hi = float(peak_display_range.get("hi"))
     core_lo = float(peak_core_range.get("lo"))
     core_hi = float(peak_core_range.get("hi"))
+    far_from_window = phase_now == "far"
+
+    metar_block = _build_far_metar_block(
+        metar_diag=metar_diag,
+        unit=unit,
+        fmt_temp=_fmt_temp,
+    ) if far_from_window else _build_metar_block(
+        metar_diag=metar_diag,
+        metar_text=metar_text,
+        unit=unit,
+        fmt_temp=_fmt_temp,
+    )
 
     report_focus = build_report_focus_bundle(
         primary_window=primary_window,
@@ -168,7 +218,7 @@ def choose_section_text(
         vars_block = [f"⚠️ **关注变量**（{PHASE_LABELS.get(phase_now, PHASE_LABELS['unknown'])}）", DEFAULT_TRACK_LINE]
 
     metar_analysis_lines = [str(item) for item in (report_focus.get("metar_analysis_lines") or []) if str(item).strip()]
-    if metar_analysis_lines:
+    if metar_analysis_lines and not far_from_window:
         metar_block = metar_block + "\n\n**实况分析**\n" + "\n".join(metar_analysis_lines)
 
     label_policy = dict(report_focus.get("market_label_policy") or {})
@@ -207,12 +257,20 @@ def choose_section_text(
 
     synoptic_block = _compact_synoptic_block(syn_lines) if compact_synoptic else "\n".join(syn_lines)
 
-    parts = [
-        synoptic_block,
-        metar_block,
-        "\n".join(peak_range_block),
-        "\n".join(vars_block),
-    ]
+    if far_from_window:
+        parts = [
+            synoptic_block,
+            "\n".join(peak_range_block),
+            "\n".join(vars_block),
+            metar_block,
+        ]
+    else:
+        parts = [
+            synoptic_block,
+            metar_block,
+            "\n".join(peak_range_block),
+            "\n".join(vars_block),
+        ]
     if poly_block:
         parts.append(poly_block)
     return "\n\n".join(parts)

@@ -45,6 +45,61 @@ class MarketSubscriptionPolicyTest(unittest.TestCase):
         self.assertEqual(plan["monitor_mode"], "idle")
         self.assertIn("top_or_higher_already_reached", plan["reason_codes"])
 
+    def test_selects_range_bucket_when_observed_falls_inside_fahrenheit_market(self) -> None:
+        plan = build_market_subscription_plan(
+            market_catalog_snapshot={
+                "markets": [
+                    {
+                        "bucket_kind": "at_or_below",
+                        "bucket_label": "55°F or below",
+                        "temperature_unit": "F",
+                        "threshold_native": 55,
+                        "threshold_c": 12.7778,
+                        "upper_bound_c": 13.05,
+                        "yes_token_id": "a",
+                        "active": True,
+                        "closed": False,
+                    },
+                    {
+                        "bucket_kind": "range",
+                        "bucket_label": "60–61°F",
+                        "temperature_unit": "F",
+                        "lower_bound_c": 15.2778,
+                        "upper_bound_c": 16.3833,
+                        "yes_token_id": "b",
+                        "active": True,
+                        "closed": False,
+                    },
+                    {
+                        "bucket_kind": "range",
+                        "bucket_label": "62–63°F",
+                        "temperature_unit": "F",
+                        "lower_bound_c": 16.3889,
+                        "upper_bound_c": 17.5,
+                        "yes_token_id": "c",
+                        "active": True,
+                        "closed": False,
+                    },
+                    {
+                        "bucket_kind": "at_or_above",
+                        "bucket_label": "70°F or higher",
+                        "temperature_unit": "F",
+                        "threshold_native": 70,
+                        "threshold_c": 21.1111,
+                        "lower_bound_c": 20.8333,
+                        "yes_token_id": "d",
+                        "active": True,
+                        "closed": False,
+                    },
+                ]
+            },
+            observed_max_temp_c=16.1,
+            report_window_active=False,
+        )
+
+        self.assertEqual(plan["core_watch_asset_ids"], ["b"])
+        self.assertEqual(plan["upside_scan_asset_ids"], ["c", "d"])
+
 
 if __name__ == "__main__":
     unittest.main()

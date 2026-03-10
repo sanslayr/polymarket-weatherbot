@@ -100,6 +100,41 @@ def send_telegram_messages(
     return results
 
 
+def send_telegram_messages_report(
+    text: str,
+    *,
+    chat_ids: list[str] | None = None,
+    account: str = "weatherbot",
+    parse_mode: str = "Markdown",
+    disable_web_page_preview: bool = True,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    targets = resolve_telegram_alert_targets(chat_ids)
+    successes: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for chat in targets:
+        try:
+            response = send_telegram_message(
+                text,
+                chat_id=chat,
+                account=account,
+                parse_mode=parse_mode,
+                disable_web_page_preview=disable_web_page_preview,
+                timeout=timeout,
+            )
+            successes.append({"chat_id": chat, "response": response})
+        except Exception as exc:
+            errors.append({"chat_id": chat, "error": str(exc)})
+    if not successes and errors:
+        raise RuntimeError("All Telegram deliveries failed: " + "; ".join(f"{item['chat_id']}: {item['error']}" for item in errors))
+    return {
+        "account": account,
+        "targets": targets,
+        "successes": successes,
+        "errors": errors,
+    }
+
+
 def send_telegram_message_openclaw(
     text: str,
     *,

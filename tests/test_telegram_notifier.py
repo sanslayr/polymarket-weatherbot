@@ -11,7 +11,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from telegram_notifier import send_telegram_messages  # noqa: E402
+from telegram_notifier import send_telegram_messages, send_telegram_messages_report  # noqa: E402
 
 
 class TelegramNotifierTests(unittest.TestCase):
@@ -32,6 +32,17 @@ class TelegramNotifierTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "All Telegram deliveries failed"):
                 send_telegram_messages("test")
+
+    def test_send_messages_report_keeps_partial_failures_visible(self) -> None:
+        with patch("telegram_notifier.resolve_telegram_alert_targets", return_value=["7419505165", "-1003586303099"]), patch(
+            "telegram_notifier.send_telegram_message",
+            side_effect=[RuntimeError("direct failed"), {"ok": True, "result": {"chat": {"id": -1003586303099}}}],
+        ):
+            report = send_telegram_messages_report("test")
+
+        self.assertEqual(report["targets"], ["7419505165", "-1003586303099"])
+        self.assertEqual(len(report["successes"]), 1)
+        self.assertEqual(len(report["errors"]), 1)
 
 
 if __name__ == "__main__":

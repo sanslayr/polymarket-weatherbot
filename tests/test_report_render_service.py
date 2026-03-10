@@ -89,6 +89,38 @@ class ReportRenderServiceTest(unittest.TestCase):
         self.assertIn("🧭 **环流形势对最高温影响**", synoptic_block)
         self.assertIn("**主导机制**", synoptic_block)
 
+    def test_far_window_downgrades_metar_and_moves_it_after_forecast(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["temp_phase_decision"] = {"display_phase": "far"}
+        snapshot["peak_data"]["summary"]["phase_now"] = "far"
+
+        text = choose_section_text(
+            primary_window={
+                "peak_local": "2026-03-11T14:00",
+                "start_local": "2026-03-11T13:00",
+                "end_local": "2026-03-11T15:00",
+                "peak_temp_c": 30.0,
+            },
+            metar_text="- 这里是完整 METAR 逐项分析。",
+            metar_diag={
+                "latest_report_local": "2026-03-09T09:30:00+00:00",
+                "latest_temp": 21.0,
+                "latest_wdir": 180,
+                "latest_wspd": 9,
+                "latest_cloud_layers": "SCT025(疏云2500ft/762m)",
+            },
+            polymarket_event_url="",
+            compact_synoptic=False,
+            analysis_snapshot=snapshot,
+        )
+
+        self.assertIn("📡 **当前实况参考（降级）**", text)
+        self.assertNotIn("📡 **最新实况分析（METAR）**", text)
+        self.assertNotIn("**实况分析**", text)
+        self.assertNotIn("下一报", text)
+        self.assertNotIn("未来20-40分钟", text)
+        self.assertLess(text.index("📈 **峰值窗口判断**"), text.index("📡 **当前实况参考（降级）**"))
+
 
 if __name__ == "__main__":
     unittest.main()

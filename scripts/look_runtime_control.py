@@ -343,8 +343,11 @@ class LookRuntimeController:
         scope_key = self._delivery_scope_key()
         if not scope_key:
             return False
-        if self.context.is_group and not self._has_confirmed_group_delivery(payload):
-            return False
+        if self.context.is_group:
+            if self._has_pending_group_delivery(payload):
+                return False
+            if not self._has_confirmed_group_delivery(payload):
+                return False
         marker = _read_json(_delivery_marker_path(scope_key, self.compute_key))
         if not marker:
             return False
@@ -353,6 +356,21 @@ class LookRuntimeController:
         if marker_updated_at is None or payload_updated_at is None:
             return False
         return abs(marker_updated_at - payload_updated_at) < 1e-6
+
+    def _has_pending_group_delivery(self, payload: dict[str, Any]) -> bool:
+        peer_id = str(self.context.peer_id or "").strip()
+        if str(self.context.channel or "").strip().lower() != "telegram" or not peer_id:
+            return False
+        if self._has_confirmed_group_delivery(payload):
+            return False
+        pending = _read_json(_pending_delivery_path(peer_id, self.compute_key))
+        if not pending:
+            return False
+        payload_updated_at = _safe_float(payload.get("updated_at"))
+        pending_updated_at = _safe_float(pending.get("updated_at"))
+        if payload_updated_at is None or pending_updated_at is None:
+            return False
+        return abs(pending_updated_at - payload_updated_at) < 1e-6
 
     def _has_confirmed_group_delivery(self, payload: dict[str, Any]) -> bool:
         peer_id = str(self.context.peer_id or "").strip()

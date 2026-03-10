@@ -42,6 +42,27 @@ def _format_signal_time(
     return f"{utc_text} | {local_text} {local_label}"
 
 
+def _format_temp_value(value: Any) -> str | None:
+    try:
+        if value in (None, ""):
+            return None
+        numeric = float(value)
+    except Exception:
+        return None
+    rounded = round(numeric)
+    if abs(numeric - rounded) < 0.02:
+        return str(int(rounded))
+    return f"{numeric:.1f}".rstrip("0").rstrip(".")
+
+
+def _format_temp_label(value: Any, unit: str | None, *, prefix: str = "") -> str | None:
+    temp_text = _format_temp_value(value)
+    normalized_unit = str(unit or "").strip().upper() or "C"
+    if temp_text is None:
+        return None
+    return f"{prefix}{temp_text}°{normalized_unit}"
+
+
 def format_market_signal_alert(
     *,
     city: str,
@@ -55,7 +76,12 @@ def format_market_signal_alert(
     confidence = str(signal.get("confidence") or "").strip()
     message = str(signal.get("message") or "").strip()
     lower_bound = signal.get("implied_report_temp_lower_bound_c")
+    lower_bound_native = signal.get("implied_report_temp_lower_bound_native")
     target_bucket = signal.get("target_bucket_threshold_c")
+    target_bucket_native = signal.get("target_bucket_threshold_native")
+    temperature_unit = str(signal.get("temperature_unit") or "").strip().upper() or str(
+        (signal.get("evidence") or {}).get("temperature_unit") or "C"
+    ).strip().upper()
     evidence = dict(signal.get("evidence") or {})
     first_live_label = str(evidence.get("first_live_bucket_label") or "").strip()
     observed_at = _format_signal_time(
@@ -126,12 +152,16 @@ def format_market_signal_alert(
     elif signal_type == "report_temp_scan_floor_stop":
         if first_live_label:
             lines.append(f"🌡️ 推测最新报最高温：{first_live_label}")
+        elif _format_temp_label(target_bucket_native, temperature_unit):
+            lines.append(f"🌡️ 推测最新报最高温：{_format_temp_label(target_bucket_native, temperature_unit)}")
         elif target_bucket is not None:
-            lines.append(f"🌡️ 推测最新报最高温：{int(float(target_bucket))}°C")
+            lines.append(f"🌡️ 推测最新报最高温：{_format_temp_label(target_bucket, 'C')}")
         elif lower_bound is not None:
-            lines.append(f"🌡️ 推测最新报最高温：{int(float(lower_bound))}°C")
+            lines.append(f"🌡️ 推测最新报最高温：{_format_temp_label(lower_bound_native or lower_bound, temperature_unit if lower_bound_native is not None else 'C')}")
+    elif lower_bound_native is not None:
+        lines.append(f"📈 市场隐含最新报下界：{_format_temp_label(lower_bound_native, temperature_unit, prefix='>= ')}")
     elif lower_bound is not None:
-        lines.append(f"📈 市场隐含最新报下界：>= {int(float(lower_bound))}°C")
+        lines.append(f"📈 市场隐含最新报下界：{_format_temp_label(lower_bound, 'C', prefix='>= ')}")
     elif message:
         lines.append(f"📈 {message}")
     if collapse_line:

@@ -78,6 +78,33 @@ class LookRuntimeControlTests(unittest.TestCase):
 
         self.assertEqual(result, "NOTICE ONLY")
 
+    def test_group_pending_delivery_replays_full_cached_report(self) -> None:
+        with TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            pending_dir = state_dir / "pending-deliveries"
+            report_dir = state_dir / "report-refs"
+            with patch.object(look_runtime_control, "STATE_DIR", state_dir), \
+                patch.object(look_runtime_control, "PENDING_DELIVERY_DIR", pending_dir), \
+                patch.object(look_runtime_control, "REPORT_REF_DIR", report_dir):
+                controller = look_runtime_control.LookRuntimeController(
+                    context=look_runtime_control.LookRuntimeContext(
+                        channel="telegram",
+                        peer_kind="group",
+                        peer_id="-1003586303099",
+                        sender_id="264157510",
+                        session_key="agent:weathernerd:telegram:group:-1003586303099",
+                    ),
+                    compute_key="ankara-20260310",
+                    query_label="Ankara(LTAC)-20260310",
+                )
+                controller.success("FULL REPORT")
+                payload = controller.peek_cached_result_payload()
+                self.assertIsNotNone(payload)
+                controller._mark_delivery_for_current_chat(payload)
+                result = controller.deliver_unchanged_notice(payload, notice="NOTICE ONLY")
+
+        self.assertEqual(result, "FULL REPORT")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,15 @@
+[Unit]
+Description=Polymarket Weather Forecast Cache Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot
+ExecStart=/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/.venv_gfs/bin/python /home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/scripts/forecast_cache_worker.py
+Restart=always
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

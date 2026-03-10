@@ -1,0 +1,16 @@
+[Unit]
+Description=Polymarket Weather Market Alert Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot
+ExecStart=/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/.venv_gfs/bin/python /home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/scripts/market_alert_worker.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+Environment=TELEGRAM_ALERT_TARGETS=7419505165,-1003586303099
+
+[Install]
+WantedBy=default.target

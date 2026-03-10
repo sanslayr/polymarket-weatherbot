@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 from polymarket_client import fetch_polymarket_event_markets, poly_slug_from_url
-from polymarket_range_match import parse_slug_interval, pretty_label_from_slug
+from polymarket_range_match import f_to_c, parse_slug_interval, pretty_label_from_slug
 
 
 def _parse_json_list(value: Any) -> list[Any]:
@@ -21,116 +21,204 @@ def _parse_json_list(value: Any) -> list[Any]:
         return []
 
 
+def _bound_to_c(value: float | None, unit: str | None) -> float | None:
+    if value is None:
+        return None
+    normalized = str(unit or "").strip().upper()
+    if normalized == "F":
+        return f_to_c(float(value))
+    return float(value)
+
+
+def _bucket_meta(
+    *,
+    bucket_label: str,
+    bucket_kind: str,
+    temperature_unit: str | None,
+    threshold_native: float | None,
+    lower_bound_native: float | None,
+    upper_bound_native: float | None,
+) -> dict[str, Any]:
+    unit = str(temperature_unit or "").strip().upper() or None
+    threshold_c = _bound_to_c(threshold_native, unit)
+    lower_bound_c = _bound_to_c(lower_bound_native, unit)
+    upper_bound_c = _bound_to_c(upper_bound_native, unit)
+    return {
+        "bucket_label": bucket_label,
+        "bucket_kind": bucket_kind,
+        "temperature_unit": unit,
+        "threshold_native": threshold_native,
+        "threshold_c": threshold_c,
+        "lower_bound_native": lower_bound_native,
+        "upper_bound_native": upper_bound_native,
+        "lower_bound_c": lower_bound_c,
+        "upper_bound_c": upper_bound_c,
+    }
+
+
 def _bucket_meta_from_slug(slug: str, question: str = "") -> dict[str, Any]:
     q = str(question or "")
     s = str(slug or "").lower()
 
-    m = re.search(r"be\s+(\d+)[°º]c\s+or\s+below", q, flags=re.IGNORECASE)
+    m = re.search(r"be\s+(\d+)[°º]([cf])\s+or\s+below", q, flags=re.IGNORECASE)
     if m:
         n = int(m.group(1))
-        return {
-            "bucket_label": f"{n}°C or below",
-            "bucket_kind": "at_or_below",
-            "threshold_c": n,
-            "lower_bound_c": None,
-            "upper_bound_c": n + 0.49,
-        }
+        unit = str(m.group(2) or "").upper()
+        return _bucket_meta(
+            bucket_label=f"{n}°{unit} or below",
+            bucket_kind="at_or_below",
+            temperature_unit=unit,
+            threshold_native=float(n),
+            lower_bound_native=None,
+            upper_bound_native=n + 0.49,
+        )
 
-    m = re.search(r"be\s+(\d+)[°º]c\s+or\s+higher", q, flags=re.IGNORECASE)
+    m = re.search(r"be\s+(\d+)[°º]([cf])\s+or\s+higher", q, flags=re.IGNORECASE)
     if m:
         n = int(m.group(1))
-        return {
-            "bucket_label": f"{n}°C or higher",
-            "bucket_kind": "at_or_above",
-            "threshold_c": n,
-            "lower_bound_c": n - 0.5,
-            "upper_bound_c": None,
-        }
+        unit = str(m.group(2) or "").upper()
+        return _bucket_meta(
+            bucket_label=f"{n}°{unit} or higher",
+            bucket_kind="at_or_above",
+            temperature_unit=unit,
+            threshold_native=float(n),
+            lower_bound_native=n - 0.5,
+            upper_bound_native=None,
+        )
 
-    m = re.search(r"be\s+(\d+)[°º]c\b", q, flags=re.IGNORECASE)
+    m = re.search(r"be\s+(\d+)[°º]([cf])\b", q, flags=re.IGNORECASE)
     if m:
         n = int(m.group(1))
-        return {
-            "bucket_label": f"{n}°C",
-            "bucket_kind": "exact",
-            "threshold_c": n,
-            "lower_bound_c": n - 0.5,
-            "upper_bound_c": n + 0.49,
-        }
+        unit = str(m.group(2) or "").upper()
+        return _bucket_meta(
+            bucket_label=f"{n}°{unit}",
+            bucket_kind="exact",
+            temperature_unit=unit,
+            threshold_native=float(n),
+            lower_bound_native=n - 0.5,
+            upper_bound_native=n + 0.49,
+        )
+
+    tail = re.search(r"-(\d+)forbelow$", s)
+    if tail:
+        n = int(tail.group(1))
+        return _bucket_meta(
+            bucket_label=f"{n}°F or below",
+            bucket_kind="at_or_below",
+            temperature_unit="F",
+            threshold_native=float(n),
+            lower_bound_native=None,
+            upper_bound_native=n + 0.49,
+        )
+
+    tail = re.search(r"-(\d+)forhigher$", s)
+    if tail:
+        n = int(tail.group(1))
+        return _bucket_meta(
+            bucket_label=f"{n}°F or higher",
+            bucket_kind="at_or_above",
+            temperature_unit="F",
+            threshold_native=float(n),
+            lower_bound_native=n - 0.5,
+            upper_bound_native=None,
+        )
+
+    tail = re.search(r"-(\d+)f$", s)
+    if tail:
+        n = int(tail.group(1))
+        return _bucket_meta(
+            bucket_label=f"{n}°F",
+            bucket_kind="exact",
+            temperature_unit="F",
+            threshold_native=float(n),
+            lower_bound_native=n - 0.5,
+            upper_bound_native=n + 0.49,
+        )
 
     tail = re.search(r"-(\d+)corbelow$", s)
     if tail:
         n = int(tail.group(1))
-        return {
-            "bucket_label": f"{n}°C or below",
-            "bucket_kind": "at_or_below",
-            "threshold_c": n,
-            "lower_bound_c": None,
-            "upper_bound_c": n + 0.49,
-        }
+        return _bucket_meta(
+            bucket_label=f"{n}°C or below",
+            bucket_kind="at_or_below",
+            temperature_unit="C",
+            threshold_native=float(n),
+            lower_bound_native=None,
+            upper_bound_native=n + 0.49,
+        )
 
     tail = re.search(r"-(\d+)corhigher$", s)
     if tail:
         n = int(tail.group(1))
-        return {
-            "bucket_label": f"{n}°C or higher",
-            "bucket_kind": "at_or_above",
-            "threshold_c": n,
-            "lower_bound_c": n - 0.5,
-            "upper_bound_c": None,
-        }
+        return _bucket_meta(
+            bucket_label=f"{n}°C or higher",
+            bucket_kind="at_or_above",
+            temperature_unit="C",
+            threshold_native=float(n),
+            lower_bound_native=n - 0.5,
+            upper_bound_native=None,
+        )
 
     tail = re.search(r"-(\d+)c$", s)
     if tail:
         n = int(tail.group(1))
-        return {
-            "bucket_label": f"{n}°C",
-            "bucket_kind": "exact",
-            "threshold_c": n,
-            "lower_bound_c": n - 0.5,
-            "upper_bound_c": n + 0.49,
-        }
+        return _bucket_meta(
+            bucket_label=f"{n}°C",
+            bucket_kind="exact",
+            temperature_unit="C",
+            threshold_native=float(n),
+            lower_bound_native=n - 0.5,
+            upper_bound_native=n + 0.49,
+        )
 
     interval = parse_slug_interval(slug)
     if interval is None:
-        return {
-            "bucket_label": pretty_label_from_slug(slug),
-            "bucket_kind": "unknown",
-            "threshold_c": None,
-            "lower_bound_c": None,
-            "upper_bound_c": None,
-        }
+        return _bucket_meta(
+            bucket_label=pretty_label_from_slug(slug),
+            bucket_kind="unknown",
+            temperature_unit=None,
+            threshold_native=None,
+            lower_bound_native=None,
+            upper_bound_native=None,
+        )
     if interval.lo == float("-inf"):
-        return {
-            "bucket_label": pretty_label_from_slug(slug),
-            "bucket_kind": "at_or_below",
-            "threshold_c": int(interval.hi + 0.01),
-            "lower_bound_c": None,
-            "upper_bound_c": interval.hi,
-        }
+        threshold_native = float(int(interval.hi + 0.01))
+        return _bucket_meta(
+            bucket_label=pretty_label_from_slug(slug),
+            bucket_kind="at_or_below",
+            temperature_unit=interval.unit,
+            threshold_native=threshold_native,
+            lower_bound_native=None,
+            upper_bound_native=interval.hi,
+        )
     if interval.hi == float("inf"):
-        return {
-            "bucket_label": pretty_label_from_slug(slug),
-            "bucket_kind": "at_or_above",
-            "threshold_c": int(interval.lo + 0.5),
-            "lower_bound_c": interval.lo,
-            "upper_bound_c": None,
-        }
+        threshold_native = float(int(interval.lo + 0.5))
+        return _bucket_meta(
+            bucket_label=pretty_label_from_slug(slug),
+            bucket_kind="at_or_above",
+            temperature_unit=interval.unit,
+            threshold_native=threshold_native,
+            lower_bound_native=interval.lo,
+            upper_bound_native=None,
+        )
     if abs(interval.hi - interval.lo - 0.99) < 0.02:
-        return {
-            "bucket_label": pretty_label_from_slug(slug),
-            "bucket_kind": "exact",
-            "threshold_c": int(interval.lo + 0.5),
-            "lower_bound_c": interval.lo,
-            "upper_bound_c": interval.hi,
-        }
-    return {
-        "bucket_label": pretty_label_from_slug(slug),
-        "bucket_kind": "range",
-        "threshold_c": None,
-        "lower_bound_c": interval.lo,
-        "upper_bound_c": interval.hi,
-    }
+        threshold_native = float(int(interval.lo + 0.5))
+        return _bucket_meta(
+            bucket_label=pretty_label_from_slug(slug),
+            bucket_kind="exact",
+            temperature_unit=interval.unit,
+            threshold_native=threshold_native,
+            lower_bound_native=interval.lo,
+            upper_bound_native=interval.hi,
+        )
+    return _bucket_meta(
+        bucket_label=pretty_label_from_slug(slug),
+        bucket_kind="range",
+        temperature_unit=interval.unit,
+        threshold_native=None,
+        lower_bound_native=interval.lo,
+        upper_bound_native=interval.hi,
+    )
 
 
 def build_market_catalog_snapshot(polymarket_event_url: str, *, force_refresh: bool = False) -> dict[str, Any]:

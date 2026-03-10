@@ -20,6 +20,7 @@ PHASE_LABELS = {
     "unknown": "窗口状态未知",
 }
 DEFAULT_TRACK_LINE = "• 临窗前继续跟踪温度斜率与风向节奏，必要时再改判。"
+FAR_TRACK_LINE = "• 当前先看环流、云量和低层风场配置是否继续维持；更细的实况校正留到临近目标窗再做。"
 
 
 def _safe_float(value: Any) -> float | None:
@@ -72,11 +73,11 @@ def _cadence_line(metar_diag: dict[str, Any], phase: str) -> str:
         cadence = None
     if cadence is not None and 15.0 <= cadence <= 90.0 and phase == "far":
         cadence_round = int(round(cadence / 5.0) * 5)
-        return f"• 该站常规约每{cadence_round}分钟一报，若形势仍不清晰，再结合下一报确认方向。"
+        return f"• 该站常规约每{cadence_round}分钟一报；但离目标峰值窗仍远，当前更适合看后续预报是否继续维持这套形势。"
     return ""
 
 
-def _quality_uncertainty_line(quality_snapshot: dict[str, Any]) -> str:
+def _quality_uncertainty_line(quality_snapshot: dict[str, Any], phase: str) -> str:
     q = dict(quality_snapshot or {})
     scores = dict(q.get("scores") or {})
     adjustments = dict(q.get("posterior_adjustments") or {})
@@ -90,8 +91,12 @@ def _quality_uncertainty_line(quality_snapshot: dict[str, Any]) -> str:
         if provider_fallback:
             return "• 当前 3D 场已回退且整体不确定性偏高，区间与事件概率宜按保守口径理解。"
         if sounding_density in {"sparse", ""}:
+            if phase == "far":
+                return "• 探空/层结覆盖偏稀疏，当前更应把它理解为方向性情景，等临近目标窗再结合实况细化。"
             return "• 探空/层结覆盖偏稀疏，后验不确定性偏高，临窗需更依赖下一报实况。"
     if spread_multiplier >= 1.25:
+        if phase == "far":
+            return "• 当前后验不确定性仍偏大，更适合把区间理解成情景范围，待后续预报收敛后再细化。"
         return "• 当前后验不确定性仍偏大，重点看下一报是否继续支持当前方向。"
     return ""
 
@@ -145,7 +150,19 @@ def build_report_focus_bundle(
         score = 0.95 if regime_key in {"boundary_layer_clearing", "static_stable", "mixing_depth", "advection"} else 0.65
         _push_focus_candidate(focus_candidates, score, tracking_line)
 
-    if before_typical_peak and overnight_carryover_high and future_candidate_role == "primary_remaining_peak":
+    if display_phase == "far":
+        _push_focus_candidate(
+            focus_candidates,
+            0.82,
+            "当前更该看环流、云量和低层风场配置会不会延续，而不是把眼前单报实况当成目标日结论。",
+        )
+        if before_typical_peak and future_candidate_role == "primary_remaining_peak":
+            _push_focus_candidate(
+                focus_candidates,
+                0.74,
+                "若后续预报仍维持日照/混合改善，目标日上沿才有继续抬升空间；若云量或风向配置转弱，则需回收区间。",
+            )
+    elif before_typical_peak and overnight_carryover_high and future_candidate_role == "primary_remaining_peak":
         early_peak_line = "白天主峰仍未到来，先看后段升温何时真正展开，再判断还能不能继续上冲。"
         if regime_key == "boundary_layer_clearing" or vertical_regime == "low_cloud_clearing":
             early_peak_line = "白天主峰仍未到来，先看低云/雾层何时真正松动，再判断后段升温能否顺利展开。"
@@ -153,12 +170,6 @@ def build_report_focus_bundle(
             focus_candidates,
             0.9,
             early_peak_line,
-        )
-    elif display_phase == "far" and before_typical_peak and future_candidate_role == "primary_remaining_peak":
-        _push_focus_candidate(
-            focus_candidates,
-            0.78,
-            "当前仍在主峰到来前阶段，优先看升温斜率是否逐步恢复，而不是把清晨高点当作全天参照。",
         )
     elif new_high_prob >= 0.68 and display_phase not in {"far", "early_peak_watch"}:
         _push_focus_candidate(
@@ -182,10 +193,10 @@ def build_report_focus_bundle(
         _push_focus_candidate(
             focus_candidates,
             0.45,
-            "优先看下一报温度斜率、风向节奏和云量是否继续支持当前路径。",
+            FAR_TRACK_LINE if display_phase == "far" else "优先看下一报温度斜率、风向节奏和云量是否继续支持当前路径。",
         )
 
-    quality_line = _quality_uncertainty_line(quality_snapshot)
+    quality_line = _quality_uncertainty_line(quality_snapshot, display_phase)
     if quality_line:
         _push_focus_candidate(focus_candidates, 0.35, quality_line)
 
@@ -209,9 +220,9 @@ def build_report_focus_bundle(
     if not focus_lines and cadence_line:
         focus_lines.append(cadence_line if cadence_line.startswith("•") else f"• {cadence_line}")
 
-    vars_block.extend(focus_lines[:2] if focus_lines else [DEFAULT_TRACK_LINE])
+    vars_block.extend(focus_lines[:2] if focus_lines else [FAR_TRACK_LINE if display_phase == "far" else DEFAULT_TRACK_LINE])
     if len(vars_block) == 1:
-        vars_block.append(DEFAULT_TRACK_LINE)
+        vars_block.append(FAR_TRACK_LINE if display_phase == "far" else DEFAULT_TRACK_LINE)
 
     obs_analysis_lines: list[str] = []
     if bool(temp_phase.get("should_use_early_peak_wording")) and lock_prob < 0.70:

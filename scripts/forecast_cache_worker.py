@@ -532,18 +532,23 @@ def main() -> None:
                         requested_runtime_tag = _normalize_cycle_tag(payload.get("requested_runtime_tag"))
                         payload["target_cycle"] = active_cycle
                         payload["runtime_match"] = actual_runtime_tag == active_cycle
-                        payload["success"] = _target_cycle_satisfied(payload, active_cycle)
-                        if not payload["success"]:
+                        payload["task_success"] = True
+                        payload["target_cycle_ready"] = _target_cycle_satisfied(payload, active_cycle)
+                        payload["success"] = bool(payload["task_success"])
+                        if not payload["target_cycle_ready"]:
                             cycle_success = False
                         purged = _purge_old_forecast_cache(
                             station_icao=station.icao,
                             target_date=target_date,
                             keep_runtime_tag=actual_runtime_tag,
-                        ) if payload["success"] and actual_runtime_tag else {"forecast_decision": 0, "forecast_3d_bundle": 0}
+                        ) if payload["target_cycle_ready"] and actual_runtime_tag else {"forecast_decision": 0, "forecast_3d_bundle": 0}
                         payload["purged_cache"] = purged
                         state.setdefault("last_runs", {})[run_key] = {
                             "started_at_utc": started_at,
-                            "success": bool(payload["success"]),
+                            "completed_at_utc": _utc_now().isoformat().replace("+00:00", "Z"),
+                            "success": True,
+                            "task_success": True,
+                            "target_cycle_ready": bool(payload["target_cycle_ready"]),
                             "cycle_tag": active_cycle,
                             "requested_runtime_tag": requested_runtime_tag,
                             "runtime_tag": actual_runtime_tag,
@@ -564,12 +569,16 @@ def main() -> None:
                             "station": station,
                             "target_date": target_date,
                             "cycle_tag": active_cycle,
+                            "task_success": False,
                             "success": False,
                             "error": str(exc),
                         }
                         state.setdefault("last_runs", {})[run_key] = {
                             "started_at_utc": started_at,
+                            "completed_at_utc": _utc_now().isoformat().replace("+00:00", "Z"),
                             "success": False,
+                            "task_success": False,
+                            "target_cycle_ready": False,
                             "cycle_tag": active_cycle,
                             "error": str(exc),
                         }

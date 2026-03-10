@@ -22,6 +22,13 @@ class MarketMetadataServiceTest(unittest.TestCase):
         self.assertEqual(meta["bucket_kind"], "exact")
         self.assertEqual(meta["threshold_c"], 7)
 
+    def test_bucket_meta_converts_fahrenheit_thresholds_to_celsius(self) -> None:
+        meta = _bucket_meta_from_slug("highest-temperature-in-chicago-on-march-10-2026-55forbelow")
+        self.assertEqual(meta["bucket_kind"], "at_or_below")
+        self.assertEqual(meta["temperature_unit"], "F")
+        self.assertEqual(meta["threshold_native"], 55.0)
+        self.assertAlmostEqual(meta["threshold_c"], 12.7777777778, places=4)
+
 
 if __name__ == "__main__":
     unittest.main()

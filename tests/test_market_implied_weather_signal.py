@@ -239,6 +239,31 @@ class MarketImpliedWeatherSignalTest(unittest.TestCase):
         self.assertEqual(signal["signal_type"], "report_temp_top_bucket_lock_in")
         self.assertEqual(signal["implied_report_temp_lower_bound_c"], 12.0)
 
+    def test_lower_bound_jump_preserves_native_fahrenheit_display(self) -> None:
+        signal = infer_market_implied_report_signal(
+            bucket_snapshots=[
+                {
+                    "bucket_label": "60°F or below",
+                    "bucket_kind": "at_or_below",
+                    "temperature_unit": "F",
+                    "threshold_native": 60,
+                    "threshold_c": 15.5556,
+                    "prev_best_bid": 0.05,
+                    "best_bid": 0.0,
+                    "best_ask": 0.01,
+                }
+            ],
+            scheduled_report_utc="2026-03-09T09:30:00Z",
+            now_utc="2026-03-09T09:31:20Z",
+            latest_observed_temp_c=15.0,
+        )
+
+        self.assertTrue(signal["triggered"])
+        self.assertEqual(signal["temperature_unit"], "F")
+        self.assertEqual(signal["target_bucket_threshold_native"], 60.0)
+        self.assertEqual(signal["implied_report_temp_lower_bound_native"], 61.0)
+        self.assertIn(">= 61°F", signal["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

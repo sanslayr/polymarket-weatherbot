@@ -94,6 +94,23 @@ class MarketSignalAlertServiceTest(unittest.TestCase):
         )
         self.assertIn("📉 观察盘口：6°C Yes 由 2.1¢ 跌至接近归零，7°C Yes 仍有 0.9¢ bid报价。", text)
 
+    def test_lower_bound_jump_uses_native_fahrenheit_display_when_available(self) -> None:
+        text = format_market_signal_alert(
+            city="Chicago",
+            signal={
+                "signal_type": "report_temp_lower_bound_jump",
+                "implied_report_temp_lower_bound_c": 16.1,
+                "implied_report_temp_lower_bound_native": 61,
+                "target_bucket_threshold_c": 15.5,
+                "target_bucket_threshold_native": 60,
+                "temperature_unit": "F",
+                "observed_at_utc": "2026-03-09T08:31:15Z",
+                "evidence": {"bucket_label": "60°F or below", "best_bid": 0.0, "best_ask": 0.009},
+            },
+        )
+        self.assertIn("📈 市场隐含最新报下界：>= 61°F", text)
+        self.assertIn("📉 观察盘口：60°F or below 买盘接近归零，卖盘压到 1¢ 或更低。", text)
+
 
 if __name__ == "__main__":
     unittest.main()

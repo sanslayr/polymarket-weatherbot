@@ -31,6 +31,49 @@ def _to_dt(value: Any) -> datetime | None:
         return None
 
 
+def _format_temp_value(value: float | None) -> str | None:
+    if value is None:
+        return None
+    rounded = round(float(value))
+    if abs(float(value) - rounded) < 0.02:
+        return str(int(rounded))
+    return f"{float(value):.1f}".rstrip("0").rstrip(".")
+
+
+def _bucket_temperature_unit(bucket: dict[str, Any]) -> str:
+    unit = str(bucket.get("temperature_unit") or "").strip().upper()
+    return unit if unit in {"C", "F"} else "C"
+
+
+def _bucket_upper_bound_c(bucket: dict[str, Any]) -> float | None:
+    upper = _to_float(bucket.get("upper_bound_c"))
+    if upper is not None:
+        return upper
+    return _to_float(bucket.get("threshold_c"))
+
+
+def _bucket_lower_bound_c(bucket: dict[str, Any]) -> float | None:
+    lower = _to_float(bucket.get("lower_bound_c"))
+    if lower is not None:
+        return lower
+    return _to_float(bucket.get("threshold_c"))
+
+
+def _bucket_display_threshold(bucket: dict[str, Any]) -> tuple[float | None, str]:
+    unit = _bucket_temperature_unit(bucket)
+    native = _to_float(bucket.get("threshold_native"))
+    if native is not None:
+        return native, unit
+    threshold_c = _to_float(bucket.get("threshold_c"))
+    return threshold_c, "C"
+
+
+def _increment_display_threshold(value: float | None, unit: str) -> float | None:
+    if value is None:
+        return None
+    return float(value) + 1.0
+
+
 def _window_seconds(now_utc: datetime | None, scheduled_report_utc: datetime | None) -> float | None:
     if now_utc is None or scheduled_report_utc is None:
         return None
@@ -107,14 +150,16 @@ def infer_market_implied_report_signal(
     scan_candidates = [
         bucket
         for bucket in normalized_buckets
-        if str(bucket.get("bucket_kind") or "").strip().lower() in {"exact", "at_or_above", "or_higher"}
-        and _to_float(bucket.get("threshold_c")) is not None
+        if str(bucket.get("bucket_kind") or "").strip().lower() in {"exact", "range", "at_or_above", "or_higher"}
+        and _bucket_lower_bound_c(bucket) is not None
     ]
     if within_trigger_window and scan_candidates:
-        scan_candidates.sort(key=lambda item: float(item.get("threshold_c")))
+        scan_candidates.sort(key=lambda item: float(_bucket_lower_bound_c(item) or 0.0))
         if latest_observed_temp_c is not None:
             scan_candidates = [
-                bucket for bucket in scan_candidates if float(bucket.get("threshold_c")) >= float(latest_observed_temp_c)
+                bucket
+                for bucket in scan_candidates
+                if (_bucket_upper_bound_c(bucket) is None or float(_bucket_upper_bound_c(bucket)) >= float(latest_observed_temp_c))
             ]
         triggered_prefix: list[dict[str, Any]] = []
         first_live_bucket: dict[str, Any] | None = None
@@ -128,6 +173,7 @@ def infer_market_implied_report_signal(
             first_live_threshold = _to_float(first_live_bucket.get("threshold_c"))
             first_live_label = str(first_live_bucket.get("bucket_label") or "")
             first_live_kind = str(first_live_bucket.get("bucket_kind") or "")
+            first_live_display_value, display_unit = _bucket_display_threshold(first_live_bucket)
             collapsed_prefix_labels = [str(bucket.get("bucket_label") or "") for bucket in triggered_prefix]
             collapsed_prefix_prev_bids = {
                 str(bucket.get("bucket_label") or ""): _to_float(bucket.get("prev_best_bid"))
@@ -140,8 +186,11 @@ def infer_market_implied_report_signal(
                 "signal_type": signal_type,
                 "triggered": True,
                 "implied_report_temp_lower_bound_c": first_live_threshold,
+                "implied_report_temp_lower_bound_native": first_live_display_value,
                 "bound_operator": ">=" if first_live_kind == "at_or_above" else "~=",
                 "target_bucket_threshold_c": first_live_threshold,
+                "target_bucket_threshold_native": first_live_display_value,
+                "temperature_unit": display_unit,
                 "confidence": "high" if len(triggered_prefix) >= 2 else "medium",
                 "scheduled_report_utc": scheduled_dt.isoformat().replace("+00:00", "Z") if scheduled_dt else None,
                 "observed_at_utc": now_dt.isoformat().replace("+00:00", "Z"),
@@ -151,6 +200,8 @@ def infer_market_implied_report_signal(
                 "evidence": {
                     "first_live_bucket_label": first_live_label,
                     "first_live_bucket_threshold_c": first_live_threshold,
+                    "first_live_bucket_threshold_native": first_live_display_value,
+                    "temperature_unit": display_unit,
                     "first_live_bucket_kind": first_live_kind,
                     "first_live_bucket_bid": _to_float(first_live_bucket.get("best_bid")),
                     "collapsed_prefix_count": len(triggered_prefix),
@@ -192,8 +243,11 @@ def infer_market_implied_report_signal(
                         "signal_type": "report_temp_top_bucket_lock_in",
                         "triggered": True,
                         "implied_report_temp_lower_bound_c": top_threshold,
+                        "implied_report_temp_lower_bound_native": _bucket_display_threshold(top_higher)[0],
                         "bound_operator": ">=",
                         "target_bucket_threshold_c": top_threshold,
+                        "target_bucket_threshold_native": _bucket_display_threshold(top_higher)[0],
+                        "temperature_unit": _bucket_display_threshold(top_higher)[1],
                         "confidence": "high" if len(lower_dead) >= 2 else "medium",
                         "scheduled_report_utc": scheduled_dt.isoformat().replace("+00:00", "Z") if scheduled_dt else None,
                         "observed_at_utc": now_dt.isoformat().replace("+00:00", "Z"),
@@ -203,6 +257,8 @@ def infer_market_implied_report_signal(
                         "evidence": {
                             "top_bucket_label": str(top_higher.get("bucket_label") or ""),
                             "top_bucket_threshold_c": top_threshold,
+                            "top_bucket_threshold_native": _bucket_display_threshold(top_higher)[0],
+                            "temperature_unit": _bucket_display_threshold(top_higher)[1],
                             "collapsed_lower_bucket_count": len(lower_dead),
                             "collapsed_lower_bucket_labels": [str(bucket.get("bucket_label") or "") for bucket in lower_dead],
                             "price_floor": float(price_floor),
@@ -240,6 +296,8 @@ def infer_market_implied_report_signal(
         else:
             consistency = "market_leads_observed_or_missing"
 
+        display_threshold, display_unit = _bucket_display_threshold(bucket)
+        implied_display_lower_bound = _increment_display_threshold(display_threshold, display_unit)
         confidence = _signal_confidence(
             within_trigger_window=within_trigger_window,
             prev_bid=prev_bid,
@@ -261,8 +319,11 @@ def infer_market_implied_report_signal(
             "signal_type": "report_temp_lower_bound_jump",
             "triggered": True,
             "implied_report_temp_lower_bound_c": threshold_c + 1.0,
+            "implied_report_temp_lower_bound_native": implied_display_lower_bound,
             "bound_operator": ">=",
             "target_bucket_threshold_c": threshold_c,
+            "target_bucket_threshold_native": display_threshold,
+            "temperature_unit": display_unit,
             "confidence": confidence,
             "scheduled_report_utc": scheduled_dt.isoformat().replace("+00:00", "Z") if scheduled_dt else None,
             "observed_at_utc": now_dt.isoformat().replace("+00:00", "Z"),
@@ -276,11 +337,16 @@ def infer_market_implied_report_signal(
                 "best_ask": ask_now,
                 "last_trade_price": trade_price_now,
                 "trade_count_3m": trade_count_3m,
+                "trade_volume_3m": _to_float(bucket.get("trade_volume_3m")),
                 "price_floor": float(price_floor),
                 "ask_collapse_threshold": float(ask_collapse_threshold),
+                "temperature_unit": display_unit,
                 "trigger_mode": "bid_swept_or_ask_collapsed",
             },
-            "message": f"盘口异常提示：市场大概率已按“最新报 > {int(threshold_c)}°C”交易，隐含最新报下界可先看 >= {int(threshold_c + 1.0)}°C。",
+            "message": (
+                f"盘口异常提示：市场大概率已按“最新报 > {_format_temp_value(display_threshold)}°{display_unit}”交易，"
+                f"隐含最新报下界可先看 >= {_format_temp_value(implied_display_lower_bound)}°{display_unit}。"
+            ),
         }
         if score > best_score:
             best_score = score
@@ -294,8 +360,11 @@ def infer_market_implied_report_signal(
         "signal_type": "report_temp_lower_bound_jump",
         "triggered": False,
         "implied_report_temp_lower_bound_c": None,
+        "implied_report_temp_lower_bound_native": None,
         "bound_operator": None,
         "target_bucket_threshold_c": None,
+        "target_bucket_threshold_native": None,
+        "temperature_unit": None,
         "confidence": "none",
         "scheduled_report_utc": scheduled_dt.isoformat().replace("+00:00", "Z") if scheduled_dt else None,
         "observed_at_utc": now_dt.isoformat().replace("+00:00", "Z"),

@@ -42,7 +42,7 @@ from build_station_links import format_polymarket_date_slug
 from market_signal_alert_service import format_market_signal_alert
 from metar_utils import fetch_metar_24h, is_routine_metar_report, metar_obs_time_utc
 from station_catalog import DEFAULT_STATION_CSV, Station, station_timezone_name
-from telegram_notifier import send_telegram_messages
+from telegram_notifier import send_telegram_messages_report
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -158,11 +158,11 @@ def _polymarket_event_url(
 
 def _load_state() -> dict[str, Any]:
     if not STATE_PATH.exists():
-        return {"last_alerts": {}, "last_window_runs": {}}
+        return {"last_alerts": {}, "last_window_runs": {}, "last_window_results": {}, "last_errors": {}}
     try:
         return json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except Exception:
-        return {"last_alerts": {}, "last_window_runs": {}}
+        return {"last_alerts": {}, "last_window_runs": {}, "last_window_results": {}, "last_errors": {}}
 
 
 def _save_state(state: dict[str, Any]) -> None:
@@ -493,6 +493,7 @@ def main() -> None:
     PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
     max_workers = int(os.getenv("MARKET_ALERT_MAX_WORKERS", "6") or "6")
     cooldown_seconds = int(os.getenv("MARKET_ALERT_COOLDOWN_SECONDS", "900") or "900")
+    alert_account = str(os.getenv("TELEGRAM_ALERT_ACCOUNT") or "weatherbot").strip() or "weatherbot"
     active_tasks: dict[str, Future] = {}
     state = _load_state()
 
@@ -508,20 +509,59 @@ def main() -> None:
                 try:
                     payload = future.result()
                     signal = dict(payload.get("signal") or {})
+                    window_result = {
+                        "completed_at_utc": _utc_now().isoformat().replace("+00:00", "Z"),
+                        "task_success": True,
+                        "triggered": bool(signal.get("triggered")),
+                        "signal_type": str(signal.get("signal_type") or ""),
+                        "observed_at_utc": str(signal.get("observed_at_utc") or ""),
+                        "scheduled_report_utc": str(signal.get("scheduled_report_utc") or ""),
+                        "within_report_window": bool(signal.get("within_report_window")),
+                        "event_url": str(payload.get("event_url") or ""),
+                        "sent": False,
+                    }
                     if signal.get("triggered"):
                         alert_key = _alert_key(payload["station"].icao, signal)
                         if _should_send_alert(state, alert_key, cooldown_seconds):
-                            send_telegram_messages(payload["text"])
+                            delivery_report = send_telegram_messages_report(payload["text"], account=alert_account)
                             state.setdefault("last_alerts", {})[alert_key] = {
-                                "sent_at_utc": _utc_now().isoformat().replace("+00:00", "Z")
+                                "sent_at_utc": _utc_now().isoformat().replace("+00:00", "Z"),
+                                "account": alert_account,
+                                "targets": list(delivery_report.get("targets") or []),
+                                "delivered_target_count": len(delivery_report.get("successes") or []),
+                            }
+                            window_result["delivery"] = {
+                                "account": alert_account,
+                                "targets": list(delivery_report.get("targets") or []),
+                                "success_count": len(delivery_report.get("successes") or []),
+                                "error_count": len(delivery_report.get("errors") or []),
                             }
                             payload["sent"] = True
+                            window_result["sent"] = True
+                        else:
+                            window_result["delivery"] = {
+                                "account": alert_account,
+                                "targets": [],
+                                "success_count": 0,
+                                "error_count": 0,
+                                "cooldown_skipped": True,
+                            }
                     state.setdefault("last_window_runs", {})[task_key] = _utc_now().isoformat().replace("+00:00", "Z")
+                    state.setdefault("last_window_results", {})[task_key] = window_result
                     log.write(
                         f"{_utc_now().isoformat().replace('+00:00', 'Z')} WINDOW "
                         f"{json.dumps(_json_safe(payload), ensure_ascii=False)}\n"
                     )
                 except Exception as exc:
+                    state.setdefault("last_errors", {})[task_key] = {
+                        "failed_at_utc": _utc_now().isoformat().replace("+00:00", "Z"),
+                        "error": str(exc),
+                    }
+                    state.setdefault("last_window_results", {})[task_key] = {
+                        "completed_at_utc": _utc_now().isoformat().replace("+00:00", "Z"),
+                        "task_success": False,
+                        "error": str(exc),
+                    }
                     log.write(f"{_utc_now().isoformat().replace('+00:00', 'Z')} ERROR {str(exc)}\n")
                 finally:
                     active_tasks.pop(task_key, None)
