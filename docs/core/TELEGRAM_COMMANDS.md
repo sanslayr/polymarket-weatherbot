@@ -1,6 +1,6 @@
 # Telegram Commands
 
-Last updated: 2026-03-09
+Last updated: 2026-03-10
 
 ## 1) OpenClaw native
 
@@ -46,6 +46,8 @@ Last updated: 2026-03-09
 - Sao Paulo (SBGR)
 - Seattle (KSEA)
 - Seoul (RKSI)
+- Tel Aviv (LLBG)
+- Tokyo (RJTT)
 - Toronto (CYYZ)
 - Wellington (NZWN)
 
@@ -56,6 +58,8 @@ Last updated: 2026-03-09
 - `par` -> Paris
 - `nyc` -> New York
 - `sea` -> Seattle
+- `tlv` -> Tel Aviv
+- `tok` / `tyo` -> Tokyo
 - `tor` -> Toronto
 - `seo` / `sel` -> Seoul
 - `ba` / `bue` -> Buenos Aires

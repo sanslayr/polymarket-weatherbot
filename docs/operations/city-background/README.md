@@ -27,6 +27,8 @@
 ## 既有人工研究
 
 - `docs/operations/city-background/EDDM_Munich_Recent_METAR_Study.md`
+- `docs/operations/city-background/LLBG_Tel_Aviv.md`
+- `docs/operations/city-background/RJTT_Tokyo.md`
 - `docs/operations/city-background/VILK_Lucknow.md`
 
 ## 更新方式

@@ -20,17 +20,26 @@ class LookCommandHelpTest(unittest.TestCase):
         self.assertIn("支持站点", help_text)
         self.assertIn("Ankara(LTAC)", help_text)
         self.assertIn("Munich(EDDM)", help_text)
+        self.assertIn("Tel Aviv(LLBG)", help_text)
+        self.assertIn("Tokyo(RJTT)", help_text)
         self.assertIn("seo", help_text)
+        self.assertIn("tlv", help_text)
+        self.assertIn("tok", help_text)
 
     def test_station_alias_helpers_match_supported_catalog(self) -> None:
         labels = supported_station_labels()
         aliases = common_alias_examples()
 
-        self.assertGreaterEqual(len(labels), 16)
+        self.assertGreaterEqual(len(labels), 18)
         self.assertIn("seo", aliases)
         self.assertIn("lko", aliases)
+        self.assertIn("tlv", aliases)
+        self.assertIn("tok", aliases)
         self.assertEqual(resolve_station("seo").icao, "RKSI")
         self.assertEqual(resolve_station("sel").icao, "RKSI")
+        self.assertEqual(resolve_station("tlv").icao, "LLBG")
+        self.assertEqual(resolve_station("hnd").icao, "RJTT")
+        self.assertEqual(resolve_station("tok").icao, "RJTT")
         self.assertEqual(resolve_station("mun").icao, "EDDM")
         self.assertEqual(resolve_station("lko").icao, "VILK")
 
