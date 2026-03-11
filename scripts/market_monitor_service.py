@@ -89,6 +89,26 @@ def _monitor_diagnostics(
     return diagnostics
 
 
+def _subscription_inputs(
+    *,
+    polymarket_event_url: str,
+    observed_max_temp_c: float | None,
+    report_window_active: bool,
+    daily_peak_state: str,
+    core_only: bool,
+) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    catalog = _load_catalog(polymarket_event_url)
+    plan = build_market_subscription_plan(
+        market_catalog_snapshot=catalog,
+        observed_max_temp_c=observed_max_temp_c,
+        report_window_active=report_window_active,
+        daily_peak_state=daily_peak_state,
+        core_only=core_only,
+    )
+    subscribed = list(dict.fromkeys((plan.get("core_watch_asset_ids") or []) + (plan.get("upside_scan_asset_ids") or [])))
+    return catalog, plan, subscribed
+
+
 def build_bucket_snapshots(
     *,
     market_catalog_snapshot: dict[str, Any],
@@ -139,6 +159,30 @@ def build_bucket_snapshots(
     return out
 
 
+def _infer_signal_payload(
+    *,
+    market_catalog_snapshot: dict[str, Any],
+    current_state: dict[str, dict[str, Any]],
+    previous_state: dict[str, dict[str, Any]] | None,
+    scheduled_report_utc: str,
+    observed_max_temp_c: float | None,
+    observed_at_utc: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    bucket_snapshots = build_bucket_snapshots(
+        market_catalog_snapshot=market_catalog_snapshot,
+        current_state=current_state,
+        previous_state=previous_state,
+    )
+    signal = infer_market_implied_report_signal(
+        bucket_snapshots=bucket_snapshots,
+        scheduled_report_utc=scheduled_report_utc,
+        now_utc=observed_at_utc,
+        latest_observed_temp_c=observed_max_temp_c,
+        price_floor=_signal_price_floor(),
+    )
+    return bucket_snapshots, signal
+
+
 def run_market_monitor_cycle(
     *,
     polymarket_event_url: str,
@@ -150,27 +194,21 @@ def run_market_monitor_cycle(
     stream_seconds: float = 4.0,
     core_only: bool = False,
 ) -> dict[str, Any]:
-    catalog = _load_catalog(polymarket_event_url)
-    plan = build_market_subscription_plan(
-        market_catalog_snapshot=catalog,
+    catalog, plan, subscribed = _subscription_inputs(
+        polymarket_event_url=polymarket_event_url,
         observed_max_temp_c=observed_max_temp_c,
         report_window_active=report_window_active,
         daily_peak_state=daily_peak_state,
         core_only=core_only,
     )
-    subscribed = list(dict.fromkeys((plan.get("core_watch_asset_ids") or []) + (plan.get("upside_scan_asset_ids") or [])))
     stream_result = stream_market_state(asset_ids=subscribed, duration_seconds=stream_seconds) if subscribed else {"messages": [], "state": {}}
     monitor_diagnostics = _monitor_diagnostics(subscribed_asset_ids=subscribed, stream_result=stream_result)
-    bucket_snapshots = build_bucket_snapshots(
+    bucket_snapshots, signal = _infer_signal_payload(
         market_catalog_snapshot=catalog,
         current_state=stream_result.get("state") or {},
         previous_state=previous_state,
-    )
-    signal = infer_market_implied_report_signal(
-        bucket_snapshots=bucket_snapshots,
         scheduled_report_utc=scheduled_report_utc,
-        latest_observed_temp_c=observed_max_temp_c,
-        price_floor=_signal_price_floor(),
+        observed_max_temp_c=observed_max_temp_c,
     )
     return {
         "catalog": catalog,
@@ -194,15 +232,13 @@ def run_market_monitor_event_window(
     baseline_seconds: float = 2.0,
     core_only: bool = False,
 ) -> dict[str, Any]:
-    catalog = _load_catalog(polymarket_event_url)
-    plan = build_market_subscription_plan(
-        market_catalog_snapshot=catalog,
+    catalog, plan, subscribed = _subscription_inputs(
+        polymarket_event_url=polymarket_event_url,
         observed_max_temp_c=observed_max_temp_c,
         report_window_active=True,
         daily_peak_state=daily_peak_state,
         core_only=core_only,
     )
-    subscribed = list(dict.fromkeys((plan.get("core_watch_asset_ids") or []) + (plan.get("upside_scan_asset_ids") or [])))
     scheduled_dt = _to_dt(scheduled_report_utc)
     trigger_window_starts_at = scheduled_dt + timedelta(seconds=30) if scheduled_dt is not None else None
     reference_state: dict[str, dict[str, Any]] | None = None
@@ -221,17 +257,13 @@ def run_market_monitor_event_window(
             reference_state = current_state
             return None
         previous_state = reference_state or _clone_state_snapshot(payload.get("baseline_state") or {})
-        bucket_snapshots = build_bucket_snapshots(
+        bucket_snapshots, signal = _infer_signal_payload(
             market_catalog_snapshot=catalog,
             current_state=current_state,
             previous_state=previous_state,
-        )
-        signal = infer_market_implied_report_signal(
-            bucket_snapshots=bucket_snapshots,
             scheduled_report_utc=scheduled_report_utc,
-            now_utc=payload.get("observed_at_utc"),
-            latest_observed_temp_c=observed_max_temp_c,
-            price_floor=_signal_price_floor(),
+            observed_max_temp_c=observed_max_temp_c,
+            observed_at_utc=payload.get("observed_at_utc"),
         )
         if signal.get("triggered"):
             return {
@@ -253,17 +285,17 @@ def run_market_monitor_event_window(
     monitor_diagnostics = _monitor_diagnostics(subscribed_asset_ids=subscribed, stream_result=stream_result)
     triggered_payload = dict(stream_result.get("triggered_payload") or {})
     effective_previous_state = reference_state or _clone_state_snapshot(stream_result.get("baseline_state") or {})
-    bucket_snapshots = triggered_payload.get("bucket_snapshots") or build_bucket_snapshots(
-        market_catalog_snapshot=catalog,
-        current_state=stream_result.get("state") or {},
-        previous_state=effective_previous_state,
-    )
-    signal = triggered_payload.get("signal") or infer_market_implied_report_signal(
-        bucket_snapshots=bucket_snapshots,
-        scheduled_report_utc=scheduled_report_utc,
-        latest_observed_temp_c=observed_max_temp_c,
-        price_floor=_signal_price_floor(),
-    )
+    if triggered_payload.get("bucket_snapshots") and triggered_payload.get("signal"):
+        bucket_snapshots = triggered_payload.get("bucket_snapshots")
+        signal = triggered_payload.get("signal")
+    else:
+        bucket_snapshots, signal = _infer_signal_payload(
+            market_catalog_snapshot=catalog,
+            current_state=stream_result.get("state") or {},
+            previous_state=effective_previous_state,
+            scheduled_report_utc=scheduled_report_utc,
+            observed_max_temp_c=observed_max_temp_c,
+        )
     return {
         "catalog": catalog,
         "subscription_plan": plan,

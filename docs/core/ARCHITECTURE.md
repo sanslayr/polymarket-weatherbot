@@ -102,8 +102,11 @@ Last updated: 2026-03-11
 - `scripts/report_focus_service.py`
   - 负责“关注变量 / 实况分析附注 / market label policy”这类报告支持块
   - `report_render_service.py` 只消费其结构化结果，不再承担主推理
+- `scripts/report_synoptic_service.py`
+  - 负责背景句 / 环流句的压缩、去模板化与句式收口
+  - 保持这类机制短句留在 render-local helper 层，而不是回流到 `/look` orchestrator
 - `scripts/report_render_service.py`
-  - 只负责把 snapshot 和 report evidence 转成正文
+  - 只负责把 snapshot、focus bundle 和 synoptic render helper 结果编排成正文
   - 已清除旧的变量/市场 fallback 推理函数
 - `scripts/metar_analysis_service.py`
   - 实况诊断与 METAR block
@@ -120,16 +123,25 @@ Last updated: 2026-03-11
   - websocket 行情订阅、基线窗口与事件窗口监控
 - `scripts/market_monitor_service.py`
   - 串联市场元信息、订阅计划、实时状态和 signal 推理
+  - `run_market_monitor_cycle()` 与 `run_market_monitor_event_window()` 共用同一套 subscription/signal pipeline helper
 - `scripts/market_implied_weather_signal.py`
   - 从盘口异动推断 `market-implied observation hint`
 - `scripts/market_signal_alert_service.py`
   - 将 signal 渲染成简短 Telegram 告警文本
+  - 当前标题口径：`盘口归零异动`
 - `scripts/alert_delivery_policy.py`
   - Telegram 告警目标解析与 direct/group 优先级策略
 - `scripts/telegram_notifier.py`
   - weatherbot workspace 内的 Telegram 主动发送适配层
+- `scripts/market_alert_scheduler.py`
+  - 负责 station row 装载、routine cadence 推断、窗口计算和 event URL 生成
+- `scripts/market_alert_runtime_state.py`
+  - 负责 singleton lock、runtime state、pid/log/state 文件落盘
+- `scripts/market_alert_delivery_service.py`
+  - 负责 alert dedupe key、worker cooldown 和 Telegram 投递回执
 - `scripts/market_alert_worker.py`
-  - 基于 METAR 常规报窗口调度主动监控和去重推送
+  - 薄 orchestrator
+  - 只负责任务并发、窗口日志、调度模块调用与 delivery handoff
 
 ## 2) 当前数据策略
 
@@ -171,20 +183,22 @@ Last updated: 2026-03-11
 3. `analysis_snapshot_service.py` 已显式产出 `canonical_raw_state`、`posterior_feature_vector`、`quality_snapshot` 与 `weather_posterior`，天气后验层已有 `core + calibration hook` 结构。
 4. `peak_range_service.py`、`peak_range_history_service.py`、`peak_range_signal_service.py` 和 `synoptic_summary_service.py` 已把一部分“边渲染边推理”逻辑收回分析层。
 5. `vertical_3d.py` 已具备基础 tracking 能力，不再只是静态单帧 object 摘要。
-6. 市场异动通知链路已经从 `/look` 主链路中剥离出来，形成独立的 monitor -> signal -> notifier -> worker 层，适合放在 weatherbot workspace 内长期运行。
+6. 市场异动通知链路已经从 `/look` 主链路中剥离出来，并进一步拆成 `scheduler -> monitor -> signal -> formatter -> delivery -> worker`，适合在 weatherbot workspace 内长期运行。
 
 ## 5) 当前仍需继续收口的问题
 
 1. `canonical_raw_state` 和 `posterior_feature_vector` 已开始落地
    - provider 原始状态与 feature 轴已初步收口，后续仍需继续扩字段并压缩零散兼容输入
-2. `report_render_service.py` 的主路径已退出变量/后验推理
-   - 关注变量与市场标签策略已迁到 `report_focus_service.py`
-   - 当前已基本收成纯 render；后续重点应转向删减零散 presentation fallback
+2. `/look` 报告层已收成 `report_focus_service.py + report_synoptic_service.py + report_render_service.py`
+   - 当前主路径已退出变量/后验推理
+   - 后续重点不再是继续拆 render，而是控制 presentation helper 不重新回流到 orchestrator
 3. `peak_range_service.py` 已成为新的复杂度热点
    - 后续建议拆成：
      - peak posterior / range computation
      - historical/calibration helper
-4. 3D tracking 仍是轻量 heuristic
+4. 盘口异动 worker 主循环已拆薄
+   - 当前剩余关注点转为 alert policy / schedule override 的继续结构化，而不是再把状态/投递塞回 worker
+5. 3D tracking 仍是轻量 heuristic
    - 目前能区分 `approaching / receding / passing / steady`
    - 还不等于完整的 split/merge/trajectory solver
 

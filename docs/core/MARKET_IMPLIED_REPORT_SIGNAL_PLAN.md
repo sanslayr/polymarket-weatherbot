@@ -1,6 +1,6 @@
 # Market-Implied Report Signal Plan
 
-Last updated: 2026-03-09
+Last updated: 2026-03-11
 
 ## Goal
 
@@ -59,7 +59,7 @@ Cannot prove:
 
 Therefore the system should phrase the result as:
 
-- `盘口异常提示`
+- `盘口归零异动`
 - `市场隐含最新报下界`
 - `market-implied observation hint`
 
@@ -200,13 +200,16 @@ Recommended env:
 Current repo status:
 
 - there is runtime Telegram context for `/look`
-- there was no dedicated proactive notifier
-- a lightweight notifier helper can use Telegram Bot API `sendMessage`
+- there is now a dedicated proactive notifier path:
+  - `market_monitor_service.py`
+  - `market_signal_alert_service.py`
+  - `market_alert_delivery_service.py`
+  - `market_alert_worker.py`
 
 Push format should be short:
 
 ```text
-盘口异常提示
+盘口归零异动
 London | 常规报后 0.5-5 分钟
 `6°C or below` 买盘被扫空 / ask 下压到 0.01
 市场隐含最新报下界：>= 7°C
@@ -284,21 +287,23 @@ Need to manage:
 ## Guardrails
 
 - never overwrite observed weather data with market-implied data
-- phrase output as `market-implied` / `盘口异常提示`
+- phrase output as `market-implied` / `盘口归零异动`
 - require report-window timing for strongest alerts
 - suppress alerts in very thin markets unless evidence is unusually strong
 - keep strategy/execution downstream of this signal
 
 ## Current First-Step Implementation
 
-The repo can start with:
+The repo currently uses:
 
 - `scripts/market_implied_weather_signal.py`
   - pure structured detector
-- `scripts/telegram_notifier.py`
-  - proactive group push helper
-
-This keeps the first version lightweight and easy to integrate with the future websocket market branch.
+- `scripts/market_signal_alert_service.py`
+  - Telegram formatter
+- `scripts/market_alert_delivery_service.py`
+  - cooldown / dedupe / delivery wrapper
+- `scripts/market_alert_worker.py`
+  - proactive runtime entrypoint
 
 ## References
 

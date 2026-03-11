@@ -1,6 +1,6 @@
 # /look 修复总表（2026-03）
 
-Last updated: 2026-03-03
+Last updated: 2026-03-11
 
 > 本表聚合近期高频修正（含群聊中提到的修正），按主题分组，便于回溯。
 
@@ -192,6 +192,31 @@ Last updated: 2026-03-03
 - 目的：
   - 避免站点特例继续污染主 `/look` orchestrator
   - 避免 market alert 推送逻辑继续分散在 plan / worker / formatter / 修复日志中
+
+## 16) 2026-03-11 market alert / render 结构再收口
+
+- 主动监控 worker 拆薄：
+  - 新增 `scripts/market_alert_scheduler.py`
+  - 新增 `scripts/market_alert_runtime_state.py`
+  - 新增 `scripts/market_alert_delivery_service.py`
+  - `scripts/market_alert_worker.py` 保留为 thin orchestrator
+- market monitor 重复流水线收口：
+  - `run_market_monitor_cycle()` 与 `run_market_monitor_event_window()` 改为共用 subscription / signal helper
+- `/look` 背景句与环流句 helper 抽离：
+  - 新增 `scripts/report_synoptic_service.py`
+  - `report_render_service.py` 继续只负责最终段落编排
+- 异动推送标题统一：
+  - `盘口异常提示` → `盘口归零异动`
+- 同步维护文档：
+  - `docs/core/ARCHITECTURE.md`
+  - `docs/core/MARKET_ALERT_NOTIFICATION_FLOW.md`
+  - `docs/operations/MARKET_ALERT_WORKER.md`
+  - `docs/core/MARKET_IMPLIED_REPORT_SIGNAL_PLAN.md`
+  - `docs/core/PROJECT_OVERVIEW.md`
+  - `README.zh-CN.md`
+- 目的：
+  - 避免继续堆叠“新逻辑挂在旧主循环里”的补丁式结构
+  - 把主动告警和 `/look` 报告层都收回清晰的模块边界
 
 ---
 

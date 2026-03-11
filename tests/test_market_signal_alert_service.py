@@ -36,13 +36,13 @@ class MarketSignalAlertServiceTest(unittest.TestCase):
             local_tz_label="Local",
             polymarket_event_url="https://polymarket.com/event/highest-temperature-in-ankara-on-march-9-2026",
         )
-        self.assertIn("⚠️ *盘口异常提示 | Ankara @ 2026/03/09*", text)
+        self.assertIn("⚠️ *盘口归零异动 | Ankara @ 2026/03/09*", text)
         self.assertIn("• *推测最新报最高温：7°C*", text)
         self.assertIn("• 已记录METAR最高温：6.7°C @ 14:20 Local", text)
         self.assertIn("• 盘口观察：6°C Yes 由 6¢ 短时间跌至接近归零。", text)
-        self.assertIn("\n*当前市场盘口价格：*", text)
+        self.assertIn("2026/03/09 08:31:15 UTC | 11:31:15 Local", text)
+        self.assertIn("\n\n*当前市场盘口价格：*", text)
         self.assertIn("• 7°C：Bid 14¢ | Ask N/A", text)
-        self.assertIn("• 异动时间：2026/03/09 08:31:15 UTC | 11:31:15 Local", text)
         self.assertIn("（基于盘口异动推测，不代表官方实况）", text)
         self.assertIn("🔗 [Polymarket 市场](https://polymarket.com/event/highest-temperature-in-ankara-on-march-9-2026)", text)
 
@@ -82,8 +82,8 @@ class MarketSignalAlertServiceTest(unittest.TestCase):
             observed_at_local="2026-03-09T09:22:00+00:00",
             local_tz_label="Local",
         )
-        self.assertIn("• 异动时间：2026/03/09 09:22:00 UTC", text)
-        self.assertNotIn("异动时间：2026/03/09 09:22:00 UTC | ", text)
+        self.assertIn("2026/03/09 09:22:00 UTC", text)
+        self.assertNotIn("2026/03/09 09:22:00 UTC | ", text)
 
     def test_formats_thousandth_precision_as_tenth_cent(self) -> None:
         text = format_market_signal_alert(
@@ -152,7 +152,7 @@ class MarketSignalAlertServiceTest(unittest.TestCase):
             observed_max_time_local="2026-03-11T14:20:00+02:00",
             polymarket_event_url="https://polymarket.com/event/highest-temperature-in-tel-aviv-on-march-11-2026",
         )
-        self.assertIn("⚠️ *盘口异常提示 | Tel Aviv @ 2026/03/11*", text)
+        self.assertIn("⚠️ *盘口归零异动 | Tel Aviv @ 2026/03/11*", text)
         self.assertIn("• *推测最新报最高温：20°C*", text)
         self.assertIn("• 已记录METAR最高温：10°C @ 14:20 Local", text)
         self.assertIn(

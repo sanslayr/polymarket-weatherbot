@@ -241,7 +241,7 @@ def _build_ascending_scan_signal(
             "trigger_mode": trigger_mode,
         },
         "message": (
-            f"盘口异常提示：向上正序扫描后，最低仍未被打死的档位是 {first_live_label}，"
+            f"盘口归零异动：向上正序扫描后，最低仍未被打死的档位是 {first_live_label}，"
             f"市场当前更像先按这一档附近交易。"
         ),
     }
@@ -405,7 +405,7 @@ def infer_market_implied_report_signal(
                             "ask_collapse_threshold": float(ask_collapse_threshold),
                             "trigger_mode": "all_lower_buckets_dead_except_top_or_higher",
                         },
-                        "message": f"盘口异常提示：除“{str(top_higher.get('bucket_label') or '')}”外，其余关键低档基本被打死，市场大概率已按最新报进入 {str(top_higher.get('bucket_label') or '')} 交易。",
+                        "message": f"盘口归零异动：除“{str(top_higher.get('bucket_label') or '')}”外，其余关键低档基本被打死，市场大概率已按最新报进入 {str(top_higher.get('bucket_label') or '')} 交易。",
                     }
 
     for bucket in normalized_buckets:
@@ -485,7 +485,7 @@ def infer_market_implied_report_signal(
                 "trigger_mode": "bid_swept_or_ask_collapsed",
             },
             "message": (
-                f"盘口异常提示：市场大概率已按“最新报 > {_format_temp_value(display_threshold)}°{display_unit}”交易，"
+                f"盘口归零异动：市场大概率已按“最新报 > {_format_temp_value(display_threshold)}°{display_unit}”交易，"
                 f"隐含最新报下界可先看 >= {_format_temp_value(implied_display_lower_bound)}°{display_unit}。"
             ),
         }

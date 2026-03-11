@@ -1,6 +1,6 @@
 # PROJECT OVERVIEW
 
-Last updated: 2026-03-09
+Last updated: 2026-03-11
 
 ## Goal
 
@@ -69,18 +69,34 @@ This means human report output is now a consumer of the analysis layer, not the 
 
 - `scripts/analysis_snapshot_service.py`
 - `scripts/report_focus_service.py`
+- `scripts/report_synoptic_service.py`
 - `scripts/report_render_service.py`
 - `scripts/metar_analysis_service.py`
 - `scripts/polymarket_render_service.py`
 - `scripts/market_label_policy.py`
 
+### 5) Proactive Alert / Notification
+
+- `scripts/market_metadata_service.py`
+- `scripts/market_stream_service.py`
+- `scripts/market_monitor_service.py`
+- `scripts/market_implied_weather_signal.py`
+- `scripts/market_signal_alert_service.py`
+- `scripts/market_alert_scheduler.py`
+- `scripts/market_alert_runtime_state.py`
+- `scripts/market_alert_delivery_service.py`
+- `scripts/telegram_notifier.py`
+- `scripts/market_alert_worker.py`
+
 ## Current Maintenance Review
 
-The architecture is materially cleaner than the pre-snapshot stage, but three issues still matter:
+The architecture is materially cleaner than the pre-snapshot stage, and the latest cleanup pass removed three mixed-boundary hotspots:
 
 1. `analysis_snapshot` 现在已显式带 `canonical_raw_state`、`posterior_feature_vector`、`quality_snapshot` 和 `weather_posterior`，天气主链 contract 已立起来，但字段覆盖仍需继续扩展。
-2. `report_render_service.py` 已退出主关注项推理，当前主路径只消费 snapshot 与 `report_focus_service.py` 的结果。
-3. `peak_range_service.py` has become the new hotspot; render/history/signal helpers have already been split out, but the core range computation remains large. Long-term it should continue splitting into:
+2. `/look` 报告层已拆成 `report_focus_service.py + report_synoptic_service.py + report_render_service.py`，背景句/环流句不再和主体编排继续混写在同一文件里。
+3. `market_alert_worker.py` 已拆成 `scheduler + runtime_state + delivery + thin worker orchestrator`，避免继续把调度、状态和投递揉在一个循环里。
+
+The clearest remaining hotspot is now `peak_range_service.py`; render/history/signal helpers have already been split out, but the core range computation remains large. Long-term it should continue splitting into:
    - posterior/range computation
    - historical/calibration helpers
 

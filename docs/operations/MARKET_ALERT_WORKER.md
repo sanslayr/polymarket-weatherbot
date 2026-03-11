@@ -1,6 +1,6 @@
 # Market Alert Worker
 
-Last updated: 2026-03-10
+Last updated: 2026-03-11
 
 ## Purpose
 
@@ -27,21 +27,33 @@ The alert stack currently lives in:
 - `scripts/market_signal_alert_service.py`
 - `scripts/alert_delivery_policy.py`
 - `scripts/telegram_notifier.py`
+- `scripts/market_alert_scheduler.py`
+- `scripts/market_alert_runtime_state.py`
+- `scripts/market_alert_delivery_service.py`
 - `scripts/market_alert_worker.py`
 
 This is the correct place for the abnormal-move notification module when using the weatherbot workspace.
 
 ## Runtime Behavior
 
-`market_alert_worker.py` loops over stations from `station_links.csv` and:
+`market_alert_worker.py` is now a thin orchestrator. The runtime path is:
 
-1. fetches recent METAR observations
-2. estimates each station's routine reporting cadence
-3. identifies the current or next report-time monitoring window
-4. subscribes to the relevant Polymarket buckets during that window
-5. detects market-implied report signals
-6. formats a short alert message
-7. sends Telegram notifications with duplicate suppression
+1. `market_alert_runtime_state.py`
+   - acquires singleton lock
+   - owns `state.json` / `worker.pid` / `worker.log`
+2. `market_alert_scheduler.py`
+   - loads `station_links.csv`
+   - fetches recent METAR observations
+   - estimates routine reporting cadence
+   - identifies the current or next report-time monitoring window
+3. `market_monitor_service.py`
+   - subscribes to the relevant Polymarket buckets during that window
+   - keeps the pre-report baseline and evaluates report-window repricing
+4. `market_signal_alert_service.py`
+   - formats the Telegram text with the `盘口归零异动` title
+5. `market_alert_delivery_service.py`
+   - applies cooldown / duplicate suppression
+   - sends Telegram notifications and records delivery summary
 
 State files:
 
@@ -108,6 +120,8 @@ python3 -m unittest \
 
 - The worker is designed for proactive alerts, not for rendering `/look` output.
 - The monitoring window starts at the routine report timestamp and ends 4 minutes later.
+- Formal signal evaluation begins after the post-report `+30s` gate; pre-report snapshots are only used as baseline.
 - Duplicate suppression is keyed by station + signal type + scheduled report timestamp + bucket.
 - By default, notifications prefer direct chat targets before group targets.
 - Alert wording must remain probabilistic. Do not phrase alerts as confirmed official observations.
+- Telegram market links are sent with preview enabled.

@@ -40,6 +40,9 @@ At the same time, a first proactive alert branch now exists inside the weatherbo
 - `scripts/market_monitor_service.py`
 - `scripts/market_implied_weather_signal.py`
 - `scripts/market_signal_alert_service.py`
+- `scripts/market_alert_scheduler.py`
+- `scripts/market_alert_runtime_state.py`
+- `scripts/market_alert_delivery_service.py`
 - `scripts/telegram_notifier.py`
 - `scripts/market_alert_worker.py`
 
@@ -48,6 +51,7 @@ That branch is intentionally alert-only for now:
 - monitor report-window repricing
 - infer market-implied observation hints
 - push short Telegram notifications
+- keep scheduler / state / delivery concerns out of the detector and formatter
 
 It should remain separate from `/look` rendering and from any future execution layer.
 

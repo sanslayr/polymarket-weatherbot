@@ -124,7 +124,7 @@ def _title_with_date(
         if scheduled_dt is not None:
             date_text = scheduled_dt.astimezone(timezone.utc).strftime("%Y/%m/%d")
     suffix = f" @ {date_text}" if date_text else ""
-    return f"⚠️ *盘口异常提示 | {city}{suffix}*"
+    return f"⚠️ *盘口归零异动 | {city}{suffix}*"
 
 
 def _format_observed_max_note(
@@ -303,6 +303,8 @@ def format_market_signal_alert(
             collapse_clauses.append(collapse_text.removeprefix("盘口观察：").removesuffix("。"))
 
     lines = [_title_with_date(city, station_icao, scheduled_report_label, observed_at_local, signal)]
+    if observed_at:
+        lines.append(observed_at)
     metar_peak_note = _format_observed_max_note(
         observed_max_temp_c,
         observed_max_temp_quantized=bool(observed_max_temp_quantized),
@@ -341,8 +343,6 @@ def format_market_signal_alert(
         lines.append("*当前市场盘口价格：*")
     for ladder_line in ladder_lines:
         lines.append(ladder_line)
-    if observed_at:
-        lines.append(f"• 异动时间：{observed_at}")
     lines.append("（基于盘口异动推测，不代表官方实况）")
     if polymarket_event_url:
         lines.append(f"🔗 [Polymarket 市场]({polymarket_event_url})")

@@ -90,7 +90,9 @@ flowchart LR
 
     Snapshot --> Peak["peak_range_service.py"]
     Snapshot --> PeakHelpers["peak_range_history/signal/render"]
+    Snapshot --> SynRender["report_synoptic_service.py"]
     Snapshot --> Render["report_render_service.py"]
+    SynRender --> Render
     Render --> Market["polymarket_render_service.py<br/>market_label_policy.py"]
     Peak --> Render
 
@@ -103,7 +105,8 @@ flowchart LR
 - `ECMWF Open Data` 已成为默认 3D 背景源，`GFS` 作为 fallback
 - `analysis_snapshot` 已成为分析层到报告层的主要 handoff
 - `canonical_raw_state.v1`、`posterior_feature_vector.v1`、`quality_snapshot.v1` 以及首版已校准的 `weather_posterior.v1` 已接入 snapshot
-- `report_render_service.py` 已收成 render-only 主路径，旧的变量/市场 fallback 推理已移除
+- `/look` 报告层已收成 `report_focus_service.py + report_synoptic_service.py + report_render_service.py`
+- 市场异动推送链路已拆成 `scheduler + runtime_state + delivery + thin worker orchestrator`
 
 ---
 
@@ -267,6 +270,7 @@ flowchart LR
 ### 市场与展示层
 
 - `scripts/report_render_service.py`
+- `scripts/report_synoptic_service.py`
 - `scripts/polymarket_render_service.py`
 - `scripts/market_label_policy.py`
 - `scripts/polymarket_client.py`
@@ -276,6 +280,9 @@ flowchart LR
 - `scripts/market_implied_weather_signal.py`
 - `scripts/market_signal_alert_service.py`
 - `scripts/alert_delivery_policy.py`
+- `scripts/market_alert_scheduler.py`
+- `scripts/market_alert_runtime_state.py`
+- `scripts/market_alert_delivery_service.py`
 - `scripts/telegram_notifier.py`
 - `scripts/market_alert_worker.py`
 

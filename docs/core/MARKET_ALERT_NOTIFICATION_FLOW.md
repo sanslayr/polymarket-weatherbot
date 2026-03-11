@@ -9,34 +9,44 @@ Last updated: 2026-03-11
 - 这条链路独立于 `/look`
 - `/look` 负责 request/response 报告
 - `market_alert_worker.py` 负责 routine METAR 报时附近的主动监控和推送
-- 告警文本必须保持 `market-implied` / `盘口异常提示` 语气，不能表述成官方实况已确认
+- 告警文本必须保持 `market-implied` / `盘口归零异动` 语气，不能表述成官方实况已确认
 
 ## 2) 运行链路
 
 运行顺序：
 
 1. `market_alert_worker.py`
-2. `market_monitor_service.py`
-3. `market_stream_service.py`
-4. `market_implied_weather_signal.py`
-5. `market_signal_alert_service.py`
-6. `telegram_notifier.py`
+2. `market_alert_scheduler.py`
+3. `market_monitor_service.py`
+4. `market_stream_service.py`
+5. `market_implied_weather_signal.py`
+6. `market_signal_alert_service.py`
+7. `market_alert_delivery_service.py`
+8. `telegram_notifier.py`
 
 职责拆分：
 
 - `market_alert_worker.py`
+  - 薄 orchestrator
+  - 管理线程池、窗口执行日志和 scheduler/delivery handoff
+- `market_alert_scheduler.py`
   - 选择站点
   - 估算 routine METAR cadence
   - 打开 report-time monitoring window
-  - 处理 cooldown / duplicate suppression / delivery
+  - 生成 event URL / schedule drift 上下文
+- `market_alert_runtime_state.py`
+  - 管理 singleton lock、state 文件、pid 文件、worker log 路径
 - `market_monitor_service.py`
   - 组装 catalog + subscription plan + state snapshot
   - 在事件窗口内保留 pre-report baseline
   - 调用 signal inference
+  - `cycle` / `event_window` 共用同一套 subscription/signal helper
 - `market_implied_weather_signal.py`
   - 从 bucket repricing 推断 `signal_type`
 - `market_signal_alert_service.py`
   - 只负责 Telegram 文本渲染
+- `market_alert_delivery_service.py`
+  - 负责 dedupe key、worker cooldown 和 Telegram delivery report
 
 ## 3) 触发窗口
 
@@ -74,7 +84,7 @@ Last updated: 2026-03-11
 
 当前告警文本包含：
 
-- 标题：`盘口异常提示 | City @ date`
+- 标题：`盘口归零异动 | City @ date`
 - 推测最新报最高温
 - 已记录 METAR 最高温
 - 盘口观察
@@ -86,8 +96,12 @@ Last updated: 2026-03-11
 版式约束：
 
 - 多个 collapsed buckets 合并成一句
+- 除标题和 ladder heading 外，正文信息行统一使用圆点 bullet
 - ladder heading 使用 `*当前市场盘口价格：*`
+- ladder heading 前保留一个空行
 - disclaimer 放在市场链接前
+- disclaimer 不带 bullet
+- 市场链接不带 bullet
 - 链接开启 preview
 
 ## 7) 反耦合规则
