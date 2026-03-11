@@ -343,7 +343,7 @@ def format_market_signal_alert(
         lines.append("*当前市场盘口价格：*")
     for ladder_line in ladder_lines:
         lines.append(ladder_line)
-    lines.append("（基于盘口异动推测，不代表官方实况）")
     if polymarket_event_url:
         lines.append(f"🔗 [Polymarket 市场]({polymarket_event_url})")
+    lines.append("（基于盘口异动推测，不代表官方实况）")
     return "\n".join(lines)
