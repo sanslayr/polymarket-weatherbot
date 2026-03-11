@@ -760,15 +760,14 @@ def _build_far_obs_reference(
 def _build_far_synoptic_block(snapshot: dict[str, Any], syn_lines: list[str], metar_diag: dict[str, Any]) -> str:
     synoptic_summary = dict(snapshot.get("synoptic_summary") or {})
     summary = dict(synoptic_summary.get("summary") or {})
-    city = _station_label(snapshot, metar_diag=metar_diag)
     basis_text = _pick_far_basis_text(snapshot, syn_lines)
     mechanism = _rephrase_far_basis_text(basis_text) or _far_mechanism_focus(summary.get("pathway"))
     if _is_generic_far_text(mechanism):
         mechanism = _far_profile_lead_phrase(metar_diag)
     impact_text = _summarize_impact_text(summary.get("impact"))
     future_line = _far_future_setup_line(mechanism, impact_text, metar_diag)
-
-    lead = _natural_flow_chain_line(city, mechanism, impact_text)
+    lead_clause = _background_compact_clause(mechanism, _far_directional_take(mechanism, impact_text))
+    lead = f"• {lead_clause}。" if lead_clause else ""
 
     if lead and future_line and _far_line_overlap(lead, future_line):
         future_line = ""
@@ -1008,10 +1007,21 @@ def _should_emit_background_line(
     return False
 
 
+def _background_compact_clause(mechanism: str, directional: str) -> str:
+    mechanism_txt = str(mechanism or "").strip().rstrip("。；，")
+    directional_txt = str(directional or "").strip().rstrip("。；，")
+    if mechanism_txt and directional_txt:
+        if directional_txt in mechanism_txt:
+            return mechanism_txt
+        if mechanism_txt in directional_txt:
+            return directional_txt
+        return f"{mechanism_txt}；{directional_txt}"
+    return mechanism_txt or directional_txt
+
+
 def _build_background_synoptic_line(snapshot: dict[str, Any], metar_diag: dict[str, Any]) -> str:
     synoptic_summary = dict(snapshot.get("synoptic_summary") or {})
     summary = dict(synoptic_summary.get("summary") or {})
-    place = _station_label(snapshot, metar_diag=metar_diag)
 
     impact = _summarize_impact_text(summary.get("impact"))
     basis = _pick_background_basis(snapshot, include_lines=False)
@@ -1030,18 +1040,8 @@ def _build_background_synoptic_line(snapshot: dict[str, Any], metar_diag: dict[s
     if not _should_emit_background_line(basis, mechanism, directional, impact, coastal_mechanism):
         return ""
 
-    natural_line = _natural_flow_chain_line(place, mechanism, impact).lstrip("• ").strip()
-    if natural_line:
-        return f"🧭 背景：{natural_line}"
-    if mechanism and directional:
-        place_prefix = f"{place}" if place else ""
-        lead = f"{place_prefix}{mechanism}" if place_prefix else mechanism
-        return f"🧭 背景：{lead}，{directional}。"
-    if mechanism:
-        place_prefix = f"{place}" if place else ""
-        lead = f"{place_prefix}{mechanism}" if place_prefix else mechanism
-        return f"🧭 背景：{lead}。"
-    return f"🧭 背景：{directional}。"
+    compact_clause = _background_compact_clause(mechanism, directional)
+    return f"🧭 背景：{compact_clause}。"
 
 
 def _range_target_text(

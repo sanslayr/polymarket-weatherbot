@@ -9,7 +9,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from report_render_service import _natural_flow_chain_line, choose_section_text  # noqa: E402
+from report_render_service import _background_compact_clause, _natural_flow_chain_line, choose_section_text  # noqa: E402
 
 
 def _snapshot_template() -> dict:
@@ -81,7 +81,8 @@ class ReportRenderServiceTest(unittest.TestCase):
 
         first_block = text.split("\n\n", 1)[0]
         self.assertTrue(first_block.startswith("🧭 背景："))
-        self.assertIn("Wellington", first_block)
+        self.assertNotIn("Wellington", first_block)
+        self.assertNotIn("当前主要关注", first_block)
         self.assertIn("📡 **最新实况分析（METAR）**", text)
         self.assertIn("较上一报 +0.6°C", text)
         self.assertNotIn("⚠️ 关注", text)
@@ -125,9 +126,11 @@ class ReportRenderServiceTest(unittest.TestCase):
 
         first_block = text.split("\n\n", 1)[0]
         self.assertTrue(first_block.startswith("🧭 环流："))
+        self.assertNotIn("Tokyo当前", first_block)
+        self.assertNotIn("当前主看", first_block)
         self.assertTrue(
-            "Tokyo当前更接近混合尚未充分建立的结构" in first_block
-            or "Tokyo当前主要矛盾在于低层风向切换时点" in first_block
+            "低层混合仍在加深" in first_block
+            or "风向切换时点" in first_block
         )
         self.assertIn("站点历史上更常见的是偏早见顶", first_block)
         self.assertNotIn("暂未识别到单独可追踪的近站系统", first_block)
@@ -203,6 +206,10 @@ class ReportRenderServiceTest(unittest.TestCase):
         line = _natural_flow_chain_line("Munich", "云量演变仍是关键变量", "午后上沿更容易被压住")
         self.assertEqual(line, "• Munich当前云量演变仍是关键变量。")
         self.assertNotIn("Munich当前主要关注云量演变仍是关键变量", line)
+
+    def test_background_compact_clause_keeps_only_mechanism_and_direction(self) -> None:
+        clause = _background_compact_clause("暖空气输送仍在建立", "若云量继续放开，上沿仍有小幅上修空间")
+        self.assertEqual(clause, "暖空气输送仍在建立；若云量继续放开，上沿仍有小幅上修空间")
 
     def test_range_rationale_is_inserted_before_polymarket_block(self) -> None:
         snapshot = _snapshot_template()
