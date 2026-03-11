@@ -17,8 +17,11 @@ from market_alert_worker import (  # noqa: E402
     _infer_routine_minute_slots,
     _json_safe,
     _latest_metar_context,
+    _loop_sleep_seconds,
     _next_scheduled_report_utc_from_slots,
     _polymarket_event_url,
+    _scheduler_metar_context,
+    _window_stream_seconds_remaining,
 )
 from station_catalog import Station  # noqa: E402
 
@@ -41,8 +44,8 @@ class MarketAlertWorkerScheduleTest(unittest.TestCase):
             "routine_minute_slots": [20, 50],
         }
         start, end, scheduled = _current_or_next_window(ctx, datetime(2026, 3, 9, 9, 21, 30, tzinfo=timezone.utc))
-        self.assertEqual(start, datetime(2026, 3, 9, 9, 20, 30, tzinfo=timezone.utc))
-        self.assertEqual(end, datetime(2026, 3, 9, 9, 25, tzinfo=timezone.utc))
+        self.assertEqual(start, datetime(2026, 3, 9, 9, 20, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2026, 3, 9, 9, 24, tzinfo=timezone.utc))
         self.assertEqual(scheduled, "2026-03-09T09:20:00Z")
 
     def test_current_or_next_window_keeps_current_report_when_inside_pre_window_gap(self) -> None:
@@ -52,8 +55,8 @@ class MarketAlertWorkerScheduleTest(unittest.TestCase):
             "routine_minute_slots": [20, 50],
         }
         start, end, scheduled = _current_or_next_window(ctx, datetime(2026, 3, 9, 9, 20, 10, tzinfo=timezone.utc))
-        self.assertEqual(start, datetime(2026, 3, 9, 9, 20, 30, tzinfo=timezone.utc))
-        self.assertEqual(end, datetime(2026, 3, 9, 9, 25, tzinfo=timezone.utc))
+        self.assertEqual(start, datetime(2026, 3, 9, 9, 20, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2026, 3, 9, 9, 24, tzinfo=timezone.utc))
         self.assertEqual(scheduled, "2026-03-09T09:20:00Z")
 
     def test_current_or_next_window_rolls_forward_to_next_report(self) -> None:
@@ -63,9 +66,34 @@ class MarketAlertWorkerScheduleTest(unittest.TestCase):
             "routine_minute_slots": [20, 50],
         }
         start, end, scheduled = _current_or_next_window(ctx, datetime(2026, 3, 9, 9, 40, tzinfo=timezone.utc))
-        self.assertEqual(start, datetime(2026, 3, 9, 9, 50, 30, tzinfo=timezone.utc))
-        self.assertEqual(end, datetime(2026, 3, 9, 9, 55, tzinfo=timezone.utc))
+        self.assertEqual(start, datetime(2026, 3, 9, 9, 50, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2026, 3, 9, 9, 54, tzinfo=timezone.utc))
         self.assertEqual(scheduled, "2026-03-09T09:50:00Z")
+
+    def test_window_stream_seconds_remaining_clips_to_window_end(self) -> None:
+        self.assertEqual(
+            _window_stream_seconds_remaining(
+                datetime(2026, 3, 9, 9, 24, tzinfo=timezone.utc),
+                datetime(2026, 3, 9, 9, 23, tzinfo=timezone.utc),
+            ),
+            60.0,
+        )
+        self.assertIsNone(
+            _window_stream_seconds_remaining(
+                datetime(2026, 3, 9, 9, 24, tzinfo=timezone.utc),
+                datetime(2026, 3, 9, 9, 24, tzinfo=timezone.utc),
+            )
+        )
+
+    def test_loop_sleep_seconds_wakes_early_for_pending_window_even_with_active_tasks(self) -> None:
+        self.assertEqual(
+            _loop_sleep_seconds(
+                next_wake=datetime(2026, 3, 9, 9, 20, 2, tzinfo=timezone.utc),
+                now_utc=datetime(2026, 3, 9, 9, 20, 0, tzinfo=timezone.utc),
+                has_active_tasks=True,
+            ),
+            2.0,
+        )
 
     def test_json_safe_serializes_station_and_datetime(self) -> None:
         payload = {
@@ -118,6 +146,23 @@ class MarketAlertWorkerScheduleTest(unittest.TestCase):
         self.assertEqual(ctx["routine_minute_slots"], [20, 50])
         self.assertEqual(ctx["latest_report_utc"], datetime(2026, 3, 10, 13, 20, tzinfo=timezone.utc))
         self.assertEqual(ctx["schedule_source"], "config")
+
+    def test_scheduler_metar_context_uses_schedule_slots_even_when_cached_metar_lags(self) -> None:
+        station = Station(city="Wellington", icao="NZWN", lat=-41.32, lon=174.80)
+        stale_rows = [
+            {"reportTime": "2026-03-11T00:30:00Z", "rawOb": "METAR TEST 110030Z", "temp": "17"},
+        ]
+        from unittest.mock import patch
+
+        with patch("market_alert_worker._stale_cached_metar_rows", return_value=stale_rows), patch(
+            "market_alert_worker._utc_now",
+            return_value=datetime(2026, 3, 11, 1, 0, 30, tzinfo=timezone.utc),
+        ):
+            ctx = _scheduler_metar_context(station)
+
+        self.assertIsNotNone(ctx)
+        self.assertEqual(ctx["latest_report_utc"], datetime(2026, 3, 11, 1, 0, tzinfo=timezone.utc))
+        self.assertEqual(ctx["observed_max_temp_c"], 17.0)
 
 
     def test_infer_routine_minute_slots_extracts_fixed_half_hour_pattern(self) -> None:

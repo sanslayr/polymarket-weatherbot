@@ -30,7 +30,7 @@ class MarketSubscriptionPolicyTest(unittest.TestCase):
         self.assertEqual(plan["core_watch_asset_ids"], ["a"])
         self.assertEqual(plan["upside_scan_asset_ids"], ["b", "c", "d"])
 
-    def test_idles_when_top_or_higher_already_reached(self) -> None:
+    def test_selects_top_or_higher_bucket_when_observed_has_already_reached_it(self) -> None:
         plan = build_market_subscription_plan(
             market_catalog_snapshot={
                 "markets": [
@@ -42,8 +42,27 @@ class MarketSubscriptionPolicyTest(unittest.TestCase):
             report_window_active=False,
         )
 
-        self.assertEqual(plan["monitor_mode"], "idle")
-        self.assertIn("top_or_higher_already_reached", plan["reason_codes"])
+        self.assertEqual(plan["monitor_mode"], "core")
+        self.assertEqual(plan["core_watch_asset_ids"], ["b"])
+        self.assertIn("top_or_higher_reference_selected", plan["reason_codes"])
+
+    def test_falls_back_to_full_market_when_observed_reference_missing(self) -> None:
+        plan = build_market_subscription_plan(
+            market_catalog_snapshot={
+                "markets": [
+                    {"bucket_kind": "exact", "threshold_c": 10, "yes_token_id": "a", "active": True, "closed": False},
+                    {"bucket_kind": "exact", "threshold_c": 11, "yes_token_id": "b", "active": True, "closed": False},
+                    {"bucket_kind": "at_or_above", "threshold_c": 12, "yes_token_id": "c", "active": True, "closed": False},
+                ]
+            },
+            observed_max_temp_c=None,
+            report_window_active=True,
+        )
+
+        self.assertEqual(plan["monitor_mode"], "full_market")
+        self.assertEqual(plan["core_watch_asset_ids"], ["a", "b", "c"])
+        self.assertEqual(plan["upside_scan_asset_ids"], [])
+        self.assertIn("observed_reference_missing_all_live", plan["reason_codes"])
 
     def test_selects_range_bucket_when_observed_falls_inside_fahrenheit_market(self) -> None:
         plan = build_market_subscription_plan(

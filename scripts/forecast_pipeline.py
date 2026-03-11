@@ -92,7 +92,7 @@ def _iter_synoptic_bundle_docs(
     *,
     station_icao: str,
     target_date: str,
-    model: str,
+    model: str | None,
     synoptic_provider: str,
 ) -> list[tuple[datetime, dict[str, Any]]]:
     if not runtime_cache_enabled():
@@ -110,7 +110,7 @@ def _iter_synoptic_bundle_docs(
             continue
         if str(doc.get("date") or "") != target_date:
             continue
-        if str(doc.get("model") or "").lower() != model.lower():
+        if model is not None and str(doc.get("model") or "").lower() != model.lower():
             continue
         pdoc = str(doc.get("synoptic_provider") or "").lower()
         if pdoc and pdoc != str(synoptic_provider or "").lower():
@@ -133,6 +133,8 @@ def _synoptic_from_bundle_doc(doc: dict[str, Any], *, synoptic_provider: str) ->
         merged["_provider_requested"] = str(doc.get("synoptic_provider") or synoptic_provider or "")
         merged["_provider_used"] = str(doc.get("synoptic_provider_used") or doc.get("synoptic_provider") or synoptic_provider or "")
         merged["_pass_strategy"] = str(doc.get("synoptic_pass_strategy") or "")
+        merged["_bundle_model"] = str(doc.get("model") or "")
+        merged["_bundle_requested_runtime"] = str(doc.get("requested_runtime") or "")
         merged["_anchors_local"] = [str(item).strip() for item in (doc.get("anchors_local") or []) if str(item).strip()]
         merged["_outer500_anchors_local"] = [
             str(item).strip() for item in (doc.get("outer500_anchors_local") or []) if str(item).strip()
@@ -141,6 +143,29 @@ def _synoptic_from_bundle_doc(doc: dict[str, Any], *, synoptic_provider: str) ->
         return merged
     except Exception:
         return None
+
+
+def _pick_synoptic_bundle_doc(
+    docs: list[tuple[datetime, dict[str, Any]]],
+    *,
+    synoptic_provider: str,
+    runtime: str | None = None,
+    max_age_hours: int,
+    exclude_model: str | None = None,
+) -> dict[str, Any] | None:
+    exclude_model_norm = str(exclude_model or "").strip().lower()
+    for ts, doc in docs:
+        bundle_model = str(doc.get("model") or "").strip().lower()
+        if exclude_model_norm and bundle_model == exclude_model_norm:
+            continue
+        if runtime is not None and str(doc.get("runtime") or "") != runtime:
+            continue
+        if (datetime.now(timezone.utc) - ts) > timedelta(hours=max_age_hours):
+            return None
+        merged = _synoptic_from_bundle_doc(doc, synoptic_provider=synoptic_provider)
+        if merged:
+            return merged
+    return None
 
 
 def _read_runtime_synoptic_bundle(
@@ -152,38 +177,60 @@ def _read_runtime_synoptic_bundle(
     runtime: str,
     max_age_hours: int = 12,
 ) -> dict[str, Any] | None:
-    for ts, doc in _iter_synoptic_bundle_docs(
-        station_icao=station_icao,
-        target_date=target_date,
-        model=model,
+    exact = _pick_synoptic_bundle_doc(
+        _iter_synoptic_bundle_docs(
+            station_icao=station_icao,
+            target_date=target_date,
+            model=model,
+            synoptic_provider=synoptic_provider,
+        ),
         synoptic_provider=synoptic_provider,
-    ):
-        if str(doc.get("runtime") or "") != runtime:
-            continue
-        if (datetime.now(timezone.utc) - ts) > timedelta(hours=max_age_hours):
-            return None
-        return _synoptic_from_bundle_doc(doc, synoptic_provider=synoptic_provider)
-    return None
+        runtime=runtime,
+        max_age_hours=max_age_hours,
+    )
+    if exact:
+        return exact
+    return _pick_synoptic_bundle_doc(
+        _iter_synoptic_bundle_docs(
+            station_icao=station_icao,
+            target_date=target_date,
+            model=None,
+            synoptic_provider=synoptic_provider,
+        ),
+        synoptic_provider=synoptic_provider,
+        runtime=runtime,
+        max_age_hours=max_age_hours,
+        exclude_model=model,
+    )
 
 
 def _read_recent_synoptic_bundle(*, station_icao: str, target_date: str, model: str, synoptic_provider: str, max_age_hours: int = 12) -> dict[str, Any] | None:
     """Fallback: read most recent 3D bundle for same station/date/model/provider across runtime tags."""
-    cands = _iter_synoptic_bundle_docs(
-        station_icao=station_icao,
-        target_date=target_date,
-        model=model,
+    exact = _pick_synoptic_bundle_doc(
+        _iter_synoptic_bundle_docs(
+            station_icao=station_icao,
+            target_date=target_date,
+            model=model,
+            synoptic_provider=synoptic_provider,
+        ),
         synoptic_provider=synoptic_provider,
+        max_age_hours=max_age_hours,
     )
 
-    if not cands:
-        return None
-    for ts, best in cands:
-        if (datetime.now(timezone.utc) - ts) > timedelta(hours=max_age_hours):
-            return None
-        merged = _synoptic_from_bundle_doc(best, synoptic_provider=synoptic_provider)
-        if merged:
-            return merged
-    return None
+    if exact:
+        return exact
+
+    return _pick_synoptic_bundle_doc(
+        _iter_synoptic_bundle_docs(
+            station_icao=station_icao,
+            target_date=target_date,
+            model=None,
+            synoptic_provider=synoptic_provider,
+        ),
+        synoptic_provider=synoptic_provider,
+        max_age_hours=max_age_hours,
+        exclude_model=model,
+    )
 
 
 def _runtime_tag(model: str, now_utc: datetime) -> str:
@@ -1029,7 +1076,11 @@ def load_or_build_forecast_decision(
                         "outer500_anchors_local": outer500_anchors,
                         "slices": syn_payloads,
                     },
-                    str(getattr(station, "icao", "")), target_date, model.lower(), str(synoptic_provider or ""), actual_bundle_runtime,
+                    # Share 3D bundles by actual source/runtime rather than hourly model label.
+                    str(getattr(station, "icao", "")),
+                    target_date,
+                    str(actual_synoptic_provider or synoptic_provider or ""),
+                    actual_bundle_runtime,
                 )
             except Exception:
                 pass
@@ -1085,6 +1136,11 @@ def load_or_build_forecast_decision(
     q["synoptic_pass_strategy"] = strategy
     q["synoptic_provider_requested"] = str(synoptic_provider or "")
     q["synoptic_provider_used"] = str(actual_synoptic_provider or synoptic_provider or "")
+    bundle_source_model = str(synoptic.get("_bundle_model") or "").strip().lower()
+    if bundle_source_model:
+        q["synoptic_bundle_source_model"] = bundle_source_model
+        if bundle_source_model != str(model or "").strip().lower():
+            q["synoptic_bundle_cross_model_reuse"] = True
     for key in (
         "analysis_runtime_used",
         "analysis_fh_used",

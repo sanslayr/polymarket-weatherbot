@@ -40,7 +40,7 @@ _reexec_into_skill_venv()
 
 from build_station_links import format_polymarket_date_slug
 from market_signal_alert_service import format_market_signal_alert
-from metar_utils import fetch_metar_24h, is_routine_metar_report, metar_obs_time_utc
+from metar_utils import extract_observed_max_for_local_day, fetch_metar_24h, is_intish_value, is_routine_metar_report, metar_obs_time_utc
 from station_catalog import DEFAULT_STATION_CSV, Station, station_timezone_name
 from telegram_notifier import send_telegram_messages_report
 
@@ -60,6 +60,38 @@ _LOCK_FD: int | None = None
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _event_window_warmup_seconds() -> float:
+    return 0.0
+
+
+def _event_window_stream_seconds() -> float:
+    configured = str(os.getenv("MARKET_EVENT_WINDOW_STREAM_SECONDS") or "").strip()
+    if configured:
+        try:
+            return max(1.0, float(configured))
+        except Exception:
+            pass
+    return 245.0
+
+
+def _window_stream_seconds_remaining(window_end: datetime, now_utc: datetime) -> float | None:
+    remaining_seconds = (window_end - now_utc).total_seconds()
+    if remaining_seconds < 1.0:
+        return None
+    return max(1.0, min(_event_window_stream_seconds(), remaining_seconds))
+
+
+def _loop_sleep_seconds(*, next_wake: datetime | None, now_utc: datetime, has_active_tasks: bool) -> float:
+    if next_wake is None and not has_active_tasks:
+        return 60.0
+    if next_wake is None:
+        return 1.0 if has_active_tasks else 60.0
+    delay_seconds = (next_wake - now_utc).total_seconds()
+    if has_active_tasks:
+        return max(0.5, min(5.0, delay_seconds))
+    return max(1.0, min(600.0, delay_seconds))
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -117,6 +149,20 @@ def _load_station_rows() -> list[dict[str, str]]:
         return list(csv.DictReader(f))
 
 
+def _stale_cached_metar_rows(icao: str) -> list[dict[str, Any]]:
+    cache_path = ROOT / "cache" / "runtime" / f"metar24_{str(icao).upper()}.json"
+    if not cache_path.exists():
+        return []
+    try:
+        doc = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    payload = doc.get("payload")
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
 def _station_from_row(row: dict[str, str]) -> Station:
     return Station(
         city=str(row.get("city") or "").strip(),
@@ -135,6 +181,19 @@ def _parse_utcish(value: Any) -> datetime | None:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _parse_iso_dt_preserve_tz(value: Any) -> datetime | None:
+    try:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
         return None
 
@@ -351,13 +410,9 @@ def _latest_metar_context(station: Station) -> dict[str, Any] | None:
             valid_rows.append(row)
     routine_rows = [row for row in valid_rows if is_routine_metar_report(row)]
     latest = max(routine_rows, key=metar_obs_time_utc) if routine_rows else None
-    obs_max = None
-    for row in valid_rows:
-        try:
-            temp = float(row.get("temp"))
-        except Exception:
-            continue
-        obs_max = temp if obs_max is None else max(obs_max, temp)
+    observed = extract_observed_max_for_local_day(valid_rows, station_timezone_name(station), now_utc=_utc_now())
+    obs_max = observed.get("observed_max_temp_c")
+    obs_max_time_local = _parse_iso_dt_preserve_tz(observed.get("observed_max_time_local"))
     inferred_cadence_min = _estimate_routine_cadence_minutes(routine_rows) if routine_rows else None
     minute_counts = _routine_minute_counts(routine_rows) if routine_rows else Counter()
     inferred_minute_slots = _infer_routine_minute_slots(routine_rows, inferred_cadence_min) if routine_rows else []
@@ -379,6 +434,64 @@ def _latest_metar_context(station: Station) -> dict[str, Any] | None:
     return {
         "latest_report_utc": latest_report_utc,
         "observed_max_temp_c": obs_max,
+        "observed_max_temp_quantized": bool(observed.get("observed_max_temp_quantized")),
+        "observed_max_time_local": obs_max_time_local.isoformat() if obs_max_time_local is not None else None,
+        "routine_cadence_min": cadence_min,
+        "routine_minute_slots": minute_slots,
+        "inferred_routine_cadence_min": inferred_cadence_min,
+        "inferred_routine_minute_slots": inferred_minute_slots,
+        "schedule_source": "config" if configured_schedule.get("minute_slots") else "inferred",
+        "schedule_drift": schedule_drift,
+    }
+
+
+def _scheduler_metar_context(station: Station) -> dict[str, Any] | None:
+    tz = ZoneInfo(station_timezone_name(station))
+    now_utc = _utc_now()
+    rows = _stale_cached_metar_rows(station.icao)
+    today_local = now_utc.astimezone(tz).date()
+    valid_rows: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            report_utc = metar_obs_time_utc(row)
+        except Exception:
+            continue
+        if report_utc.astimezone(tz).date() == today_local:
+            valid_rows.append(row)
+    routine_rows = [row for row in valid_rows if is_routine_metar_report(row)]
+    latest_observed_report_utc = None
+    if routine_rows:
+        try:
+            latest_observed_report_utc = max(metar_obs_time_utc(row) for row in routine_rows)
+        except Exception:
+            latest_observed_report_utc = None
+    observed = extract_observed_max_for_local_day(valid_rows, station_timezone_name(station), now_utc=now_utc)
+    obs_max = observed.get("observed_max_temp_c")
+    obs_max_time_local = _parse_iso_dt_preserve_tz(observed.get("observed_max_time_local"))
+    inferred_cadence_min = _estimate_routine_cadence_minutes(routine_rows) if routine_rows else None
+    minute_counts = _routine_minute_counts(routine_rows) if routine_rows else Counter()
+    inferred_minute_slots = _infer_routine_minute_slots(routine_rows, inferred_cadence_min) if routine_rows else []
+    configured_schedule = _configured_schedule_for_station(station.icao)
+    cadence_min = configured_schedule.get("cadence_min") or inferred_cadence_min
+    minute_slots = configured_schedule.get("minute_slots") or inferred_minute_slots
+    schedule_drift = _detect_schedule_drift(
+        configured_cadence_min=configured_schedule.get("cadence_min"),
+        configured_minute_slots=configured_schedule.get("minute_slots") or [],
+        inferred_cadence_min=inferred_cadence_min,
+        inferred_minute_slots=inferred_minute_slots,
+        minute_counts=minute_counts,
+    )
+    latest_scheduled_report_utc = _latest_scheduled_report_from_slots(now_utc, tz, minute_slots) if minute_slots else None
+    latest_report_utc = latest_observed_report_utc
+    if latest_scheduled_report_utc is not None and (latest_report_utc is None or latest_scheduled_report_utc > latest_report_utc):
+        latest_report_utc = latest_scheduled_report_utc
+    if latest_report_utc is None or cadence_min is None:
+        return None
+    return {
+        "latest_report_utc": latest_report_utc,
+        "observed_max_temp_c": obs_max,
+        "observed_max_temp_quantized": bool(observed.get("observed_max_temp_quantized")),
+        "observed_max_time_local": obs_max_time_local.isoformat() if obs_max_time_local is not None else None,
         "routine_cadence_min": cadence_min,
         "routine_minute_slots": minute_slots,
         "inferred_routine_cadence_min": inferred_cadence_min,
@@ -393,7 +506,7 @@ def _next_report_window_start(latest_report_utc: datetime, cadence_min: float, n
     next_report = latest_report_utc
     while next_report <= now_utc:
         next_report = next_report + timedelta(minutes=cadence)
-    return next_report + timedelta(seconds=30)
+    return next_report
 
 
 def _next_scheduled_report_utc_from_slots(now_utc: datetime, minute_slots: list[int]) -> datetime | None:
@@ -414,19 +527,19 @@ def _current_or_next_window(ctx: dict[str, Any], now_utc: datetime) -> tuple[dat
     latest_report_utc = ctx["latest_report_utc"]
     cadence_min = float(ctx["routine_cadence_min"])
     minute_slots = [int(x) for x in (ctx.get("routine_minute_slots") or []) if str(x).strip() != ""]
-    current_start = latest_report_utc + timedelta(seconds=30)
-    current_end = latest_report_utc + timedelta(seconds=300)
+    current_start = latest_report_utc
+    current_end = latest_report_utc + timedelta(seconds=240)
     if latest_report_utc <= now_utc <= current_end:
         return current_start, current_end, latest_report_utc.isoformat().replace("+00:00", "Z")
 
     scheduled_report_dt = _next_scheduled_report_utc_from_slots(now_utc, minute_slots)
     if scheduled_report_dt is None:
         next_start = _next_report_window_start(latest_report_utc, cadence_min, now_utc)
-        scheduled_report = next_start - timedelta(seconds=30)
+        scheduled_report = next_start
     else:
         scheduled_report = scheduled_report_dt
-        next_start = scheduled_report + timedelta(seconds=30)
-    next_end = scheduled_report + timedelta(seconds=300)
+        next_start = scheduled_report
+    next_end = scheduled_report + timedelta(seconds=240)
     return next_start, next_end, scheduled_report.isoformat().replace("+00:00", "Z")
 
 
@@ -457,6 +570,30 @@ def _window_run_key(station_icao: str, scheduled_report_utc: str) -> str:
     return f"{station_icao}|{scheduled_report_utc}"
 
 
+def _log_window_decision(
+    *,
+    state: dict[str, Any],
+    log: Any,
+    run_key: str,
+    station: Station,
+    scheduled_report_utc: str,
+    window_start: datetime,
+    reason: str,
+) -> None:
+    decisions = state.setdefault("last_window_decisions", {})
+    if decisions.get(run_key) == reason:
+        return
+    decisions[run_key] = reason
+    payload = {
+        "station_icao": station.icao,
+        "scheduled_report_utc": scheduled_report_utc,
+        "window_start_utc": window_start.isoformat().replace("+00:00", "Z"),
+        "reason": reason,
+    }
+    log.write(f"{_utc_now().isoformat().replace('+00:00', 'Z')} DECISION {json.dumps(payload, ensure_ascii=False)}\n")
+    log.flush()
+
+
 def _schedule_drift_key(station_icao: str, drift: dict[str, Any]) -> str:
     return "|".join(
         [
@@ -469,7 +606,13 @@ def _schedule_drift_key(station_icao: str, drift: dict[str, Any]) -> str:
     )
 
 
-def _station_task(row: dict[str, str], metar_ctx: dict[str, Any], scheduled_report_utc: str) -> dict[str, Any]:
+def _station_task(
+    row: dict[str, str],
+    metar_ctx: dict[str, Any],
+    scheduled_report_utc: str,
+    *,
+    stream_seconds: float,
+) -> dict[str, Any]:
     from market_monitor_service import run_market_monitor_event_window
 
     station = _station_from_row(row)
@@ -479,13 +622,24 @@ def _station_task(row: dict[str, str], metar_ctx: dict[str, Any], scheduled_repo
         observed_max_temp_c=metar_ctx.get("observed_max_temp_c"),
         scheduled_report_utc=scheduled_report_utc,
         daily_peak_state="open",
-        stream_seconds=float(os.getenv("MARKET_EVENT_WINDOW_STREAM_SECONDS", "275") or "275"),
+        stream_seconds=stream_seconds,
         baseline_seconds=float(os.getenv("MARKET_EVENT_WINDOW_BASELINE_SECONDS", "2") or "2"),
-        core_only=True,
+        core_only=False,
     )
     signal = dict(result.get("signal") or {})
+    monitor_ok = bool(result.get("monitor_ok", True))
+    monitor_status = str(result.get("monitor_status") or ("ok" if monitor_ok else "unknown"))
+    monitor_diagnostics = dict(result.get("monitor_diagnostics") or {})
     if not signal.get("triggered"):
-        return {"station": station, "event_url": event_url, "signal": signal, "sent": False}
+        return {
+            "station": station,
+            "event_url": event_url,
+            "signal": signal,
+            "monitor_ok": monitor_ok,
+            "monitor_status": monitor_status,
+            "monitor_diagnostics": monitor_diagnostics,
+            "sent": False,
+        }
     observed_utc = str(signal.get("observed_at_utc") or "")
     observed_local = None
     try:
@@ -493,20 +647,42 @@ def _station_task(row: dict[str, str], metar_ctx: dict[str, Any], scheduled_repo
         observed_local = dt.isoformat()
     except Exception:
         observed_local = None
+    scheduled_report_label = None
+    try:
+        scheduled_dt = datetime.fromisoformat(str(scheduled_report_utc).replace("Z", "+00:00")).astimezone(
+            ZoneInfo(station_timezone_name(station))
+        )
+        scheduled_report_label = scheduled_dt.strftime("%Y/%m/%d")
+    except Exception:
+        scheduled_report_label = None
     text = format_market_signal_alert(
         city=station.city,
+        station_icao=station.icao,
         signal=signal,
+        observed_max_temp_c=metar_ctx.get("observed_max_temp_c"),
+        observed_max_temp_quantized=bool(metar_ctx.get("observed_max_temp_quantized")),
+        observed_max_time_local=metar_ctx.get("observed_max_time_local"),
+        scheduled_report_label=scheduled_report_label,
         polymarket_event_url=event_url,
         observed_at_local=observed_local,
         local_tz_label="Local",
     )
-    return {"station": station, "event_url": event_url, "signal": signal, "text": text, "sent": False}
+    return {
+        "station": station,
+        "event_url": event_url,
+        "signal": signal,
+        "text": text,
+        "monitor_ok": monitor_ok,
+        "monitor_status": monitor_status,
+        "monitor_diagnostics": monitor_diagnostics,
+        "sent": False,
+    }
 
 
 def main() -> None:
     _acquire_singleton_lock()
     PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
-    max_workers = int(os.getenv("MARKET_ALERT_MAX_WORKERS", "6") or "6")
+    max_workers = int(os.getenv("MARKET_ALERT_MAX_WORKERS", "12") or "12")
     cooldown_seconds = int(os.getenv("MARKET_ALERT_COOLDOWN_SECONDS", "900") or "900")
     alert_account = str(os.getenv("TELEGRAM_ALERT_ACCOUNT") or "weatherbot").strip() or "weatherbot"
     active_tasks: dict[str, Future] = {}
@@ -524,9 +700,14 @@ def main() -> None:
                 try:
                     payload = future.result()
                     signal = dict(payload.get("signal") or {})
+                    monitor_ok = bool(payload.get("monitor_ok", True))
+                    monitor_status = str(payload.get("monitor_status") or ("ok" if monitor_ok else "unknown"))
+                    monitor_diagnostics = dict(payload.get("monitor_diagnostics") or {})
                     window_result = {
                         "completed_at_utc": _utc_now().isoformat().replace("+00:00", "Z"),
-                        "task_success": True,
+                        "task_success": monitor_ok,
+                        "monitor_status": monitor_status,
+                        "monitor_diagnostics": monitor_diagnostics,
                         "triggered": bool(signal.get("triggered")),
                         "signal_type": str(signal.get("signal_type") or ""),
                         "observed_at_utc": str(signal.get("observed_at_utc") or ""),
@@ -535,10 +716,20 @@ def main() -> None:
                         "event_url": str(payload.get("event_url") or ""),
                         "sent": False,
                     }
-                    if signal.get("triggered"):
+                    if not monitor_ok:
+                        state.setdefault("last_errors", {})[task_key] = {
+                            "failed_at_utc": _utc_now().isoformat().replace("+00:00", "Z"),
+                            "error": monitor_status,
+                            "diagnostics": monitor_diagnostics,
+                        }
+                    if monitor_ok and signal.get("triggered"):
                         alert_key = _alert_key(payload["station"].icao, signal)
                         if _should_send_alert(state, alert_key, cooldown_seconds):
-                            delivery_report = send_telegram_messages_report(payload["text"], account=alert_account)
+                            delivery_report = send_telegram_messages_report(
+                                payload["text"],
+                                account=alert_account,
+                                disable_web_page_preview=False,
+                            )
                             state.setdefault("last_alerts", {})[alert_key] = {
                                 "sent_at_utc": _utc_now().isoformat().replace("+00:00", "Z"),
                                 "account": alert_account,
@@ -584,9 +775,10 @@ def main() -> None:
 
             for row in rows:
                 station = _station_from_row(row)
-                metar_ctx = _latest_metar_context(station)
+                metar_ctx = _scheduler_metar_context(station)
                 if not metar_ctx or metar_ctx.get("routine_cadence_min") is None:
                     continue
+                row_now_utc = _utc_now()
                 drift = metar_ctx.get("schedule_drift")
                 if isinstance(drift, dict):
                     drift_key = _schedule_drift_key(station.icao, drift)
@@ -598,23 +790,71 @@ def main() -> None:
                         )
                         state.setdefault("last_schedule_drifts", {})[station.icao] = drift_key
                         log.flush()
-                window_start, _window_end, scheduled_report_utc = _current_or_next_window(metar_ctx, now_utc)
+                window_start, window_end, scheduled_report_utc = _current_or_next_window(metar_ctx, row_now_utc)
                 run_key = _window_run_key(station.icao, scheduled_report_utc)
-                if run_key in active_tasks or state.get("last_window_runs", {}).get(run_key):
+                if run_key in active_tasks:
+                    if row_now_utc >= window_start:
+                        _log_window_decision(
+                            state=state,
+                            log=log,
+                            run_key=run_key,
+                            station=station,
+                            scheduled_report_utc=scheduled_report_utc,
+                            window_start=window_start,
+                            reason="already_running",
+                        )
                     if next_wake is None or window_start < next_wake:
                         next_wake = window_start
                     continue
-                if now_utc >= window_start:
-                    active_tasks[run_key] = pool.submit(_station_task, row, metar_ctx, scheduled_report_utc)
+                if state.get("last_window_runs", {}).get(run_key):
+                    if row_now_utc >= window_start:
+                        _log_window_decision(
+                            state=state,
+                            log=log,
+                            run_key=run_key,
+                            station=station,
+                            scheduled_report_utc=scheduled_report_utc,
+                            window_start=window_start,
+                            reason="already_completed",
+                        )
+                    if next_wake is None or window_start < next_wake:
+                        next_wake = window_start
+                    continue
+                if row_now_utc >= window_start:
+                    stream_seconds = _window_stream_seconds_remaining(window_end, row_now_utc)
+                    if stream_seconds is None:
+                        _log_window_decision(
+                            state=state,
+                            log=log,
+                            run_key=run_key,
+                            station=station,
+                            scheduled_report_utc=scheduled_report_utc,
+                            window_start=window_start,
+                            reason="window_expired",
+                        )
+                        continue
+                    _log_window_decision(
+                        state=state,
+                        log=log,
+                        run_key=run_key,
+                        station=station,
+                        scheduled_report_utc=scheduled_report_utc,
+                        window_start=window_start,
+                            reason="submitted",
+                        )
+                    active_tasks[run_key] = pool.submit(
+                        _station_task,
+                        row,
+                        metar_ctx,
+                        scheduled_report_utc,
+                        stream_seconds=stream_seconds,
+                    )
                     continue
                 if next_wake is None or window_start < next_wake:
                     next_wake = window_start
 
             _save_state(state)
-            if next_wake is None and not active_tasks:
-                time.sleep(60.0)
-                continue
-            sleep_seconds = 5.0 if active_tasks else max(1.0, min(600.0, (next_wake - _utc_now()).total_seconds()))
+            sleep_seconds = _loop_sleep_seconds(next_wake=next_wake, now_utc=_utc_now(), has_active_tasks=bool(active_tasks))
             time.sleep(sleep_seconds)
 
 

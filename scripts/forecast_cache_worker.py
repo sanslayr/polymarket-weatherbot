@@ -474,7 +474,7 @@ def main() -> None:
     PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
     state = _load_state()
     loop_sleep_seconds = int(os.getenv("FORECAST_CACHE_PREWARM_POLL_SECONDS", "60") or "60")
-    days_ahead = int(os.getenv("FORECAST_CACHE_PREWARM_DAYS_AHEAD", "0") or "0")
+    days_ahead = int(os.getenv("FORECAST_CACHE_PREWARM_DAYS_AHEAD", "1") or "1")
     max_workers = int(os.getenv("FORECAST_CACHE_PREWARM_MAX_WORKERS", "2") or "2")
     cycle_probe_start_hours = int(os.getenv("FORECAST_CACHE_PREWARM_CYCLE_START_HOURS", "3") or "3")
     cycle_poll_minutes = int(os.getenv("FORECAST_CACHE_PREWARM_CYCLE_POLL_MINUTES", "30") or "30")

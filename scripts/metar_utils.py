@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 from runtime_cache_policy import runtime_cache_enabled
@@ -12,9 +14,13 @@ from runtime_cache_policy import runtime_cache_enabled
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT / "cache" / "runtime"
 RAW_OB_TIME_RE = re.compile(r"\b(\d{2})(\d{2})(\d{2})Z\b")
+METAR_FETCH_HOURS = 30
+METAR_TIMEOUT_SECONDS = float(os.getenv("WEATHERBOT_METAR_TIMEOUT_SECONDS", "3") or "3")
+METAR_FETCH_ATTEMPTS = max(1, int(os.getenv("WEATHERBOT_METAR_FETCH_ATTEMPTS", "1") or "1"))
 
 
 def _cache_file(icao: str) -> Path:
+    # Keep the existing filename stable so /look and alert share the same cache key.
     return CACHE_DIR / f"metar24_{str(icao).upper()}.json"
 
 
@@ -150,10 +156,10 @@ def fetch_metar_24h(icao: str, *, force_refresh: bool = False) -> list[dict[str,
         if cached is not None:
             return cached
 
-    url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=json&hours=24"
-    for _ in range(1, 4):
+    url = f"https://aviationweather.gov/api/data/metar?ids={icao}&format=json&hours={METAR_FETCH_HOURS}"
+    for _ in range(METAR_FETCH_ATTEMPTS):
         try:
-            r = requests.get(url, timeout=40)
+            r = requests.get(url, timeout=METAR_TIMEOUT_SECONDS)
             r.raise_for_status()
             data = _normalize_metar_payload(r.json())
             _write_cache(icao, data, now_utc)
@@ -167,6 +173,20 @@ def fetch_metar_24h(icao: str, *, force_refresh: bool = False) -> list[dict[str,
     # Negative-cache short outages to avoid repeated DNS/retry overhead every command.
     _write_cache(icao, [], now_utc, ttl_minutes=5)
     return []
+
+
+def read_cached_metar_24h(
+    icao: str,
+    *,
+    allow_stale: bool = False,
+    stale_max_hours: float = 36.0,
+) -> list[dict[str, Any]] | None:
+    return _read_cache(
+        icao,
+        datetime.now(timezone.utc),
+        allow_stale=allow_stale,
+        stale_max_hours=stale_max_hours,
+    )
 
 
 def metar_obs_time_utc(metar: dict[str, Any]) -> datetime:
@@ -209,3 +229,43 @@ def observed_max_interval_c(
     if q:
         return x - 0.50, x + 0.49
     return x, x
+
+
+def extract_observed_max_for_local_day(
+    rows: list[dict[str, Any]] | None,
+    tz_name: str,
+    *,
+    now_utc: datetime | None = None,
+) -> dict[str, Any]:
+    tz = ZoneInfo(str(tz_name or "UTC"))
+    anchor_utc = now_utc.astimezone(timezone.utc) if isinstance(now_utc, datetime) else datetime.now(timezone.utc)
+    target_local_date = anchor_utc.astimezone(tz).date()
+    observed_max_temp_c = None
+    observed_max_time_local = None
+
+    for row in rows or []:
+        try:
+            report_utc = metar_obs_time_utc(row)
+            local_dt = report_utc.astimezone(tz)
+            temp = float(row.get("temp"))
+        except Exception:
+            continue
+        if local_dt.date() != target_local_date:
+            continue
+        if observed_max_temp_c is None or temp > observed_max_temp_c:
+            observed_max_temp_c = temp
+            observed_max_time_local = local_dt
+        elif (
+            observed_max_temp_c is not None
+            and abs(temp - observed_max_temp_c) < 1e-9
+            and observed_max_time_local is not None
+            and local_dt > observed_max_time_local
+        ):
+            observed_max_time_local = local_dt
+
+    return {
+        "target_local_date": target_local_date.isoformat(),
+        "observed_max_temp_c": observed_max_temp_c,
+        "observed_max_temp_quantized": bool(is_intish_value(observed_max_temp_c)) if observed_max_temp_c is not None else False,
+        "observed_max_time_local": observed_max_time_local.isoformat() if observed_max_time_local is not None else None,
+    }

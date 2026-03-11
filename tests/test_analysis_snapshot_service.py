@@ -133,6 +133,7 @@ class AnalysisSnapshotServiceTest(unittest.TestCase):
         self.assertIn("quantiles", snapshot["weather_posterior"])
 
         snapshot["boundary_layer_regime"]["headline"] = "测试主导机制"
+        snapshot["posterior_feature_vector"]["time_phase"]["hours_to_peak"] = 18.0
         rendered = choose_section_text(
             primary_window,
             "样例 METAR 文本",
@@ -142,7 +143,7 @@ class AnalysisSnapshotServiceTest(unittest.TestCase):
             analysis_snapshot=snapshot,
         )
 
-        self.assertIn("测试主导机制", rendered)
+        self.assertIn("🧭 环流：", rendered)
 
     def test_market_range_hint_uses_peak_block_ranges(self) -> None:
         primary_window, metar_diag, forecast_decision = self._sample_inputs()

@@ -22,20 +22,25 @@ Default active policy:
 
 - group chats only
 - direct messages are not rate-limited
-- per-user cooldown: 60 seconds
-- same-query shared result reuse: 120 seconds
-- same-query shared result scope: `telegram-groups-shared`
-- in-flight wait window: 20 seconds
+- adaptive per-user cooldown, scoped per group
+  - base cooldown: 15 seconds
+  - burst step: +15 seconds per extra recent request
+  - cooldown cap: 90 seconds
+  - look-back window: 180 seconds
+- same-query completed-result reuse is disabled while `/look` forces live METAR/Polymarket refresh
+- same-query runtime scope: `group-only`
+- in-flight wait window: 3 seconds
 - stale in-flight cleanup: 120 seconds
 
 ## Current Behavior
 
 For Telegram group chats:
 
-1. A user who repeats `/look` too quickly is blocked by a 60-second user cooldown.
-2. If the same `/look` query was already completed within 120 seconds, the previous result is reused instead of recomputed.
-3. By default, completed results can be reused across Telegram groups for the same station/date query during the 120-second reuse window.
-4. If the same query is still running, later requests wait briefly and then reuse the completed result when available.
+1. A user who repeats `/look` too quickly is blocked by an adaptive cooldown, not a fixed 60-second wall.
+2. The cooldown is evaluated per sender per group, so one noisy group does not impose a global sender lock across all groups.
+3. The adaptive cooldown starts from 15 seconds and steps upward by burst level within a 180-second window, capped at 90 seconds.
+4. If the same query is still running, later requests wait briefly and then reuse the completed in-flight result when available.
+5. Because `/look` now forces live METAR and live Polymarket refresh, the completed-result reuse window is intentionally disabled for normal follow-up requests.
 
 For direct messages:
 
@@ -64,10 +69,15 @@ Supported rate-limit fields:
 
 - `enabled`
 - `apply_in_direct`
-- `user_cooldown_sec`
-- `user_cooldown_scope`
-- `shared_result_ttl_sec`
-- `shared_result_scope`
+- `user_cooldown.mode`
+- `user_cooldown.scope`
+- `user_cooldown.fixed_sec`
+- `user_cooldown.base_sec`
+- `user_cooldown.step_sec`
+- `user_cooldown.max_sec`
+- `user_cooldown.window_sec`
+- `user_cooldown.burst_soft_limit`
+- `result_scope`
 - `inflight_wait_sec`
 - `inflight_stale_sec`
 
@@ -121,6 +131,6 @@ Recommended conditions before revisiting:
 Current production direction is:
 
 - keep `/look` private chats unrestricted
-- limit repeated group-chat calls
-- reuse the same recent result instead of recomputing
+- limit repeated group-chat calls with adaptive per-group sender cooldown
+- keep same-query in-flight dedupe inside the same group
 - defer message folding until there is a concrete delivery-layer design

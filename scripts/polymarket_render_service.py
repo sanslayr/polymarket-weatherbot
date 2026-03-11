@@ -601,13 +601,13 @@ def _build_polymarket_section(
         ask_only = _px(only[3])
         settled_single = (bid_only >= 0.98 or ask_only >= 0.98)
         if settled_single:
-            range_notes.append("  • ✅ 已定局：当前仅剩单一高置信可交易区间。")
+            range_notes.append("• ✅ 已定局：当前仅剩单一高置信可交易区间。")
             try:
                 settled_center = float(only[0])
             except Exception:
                 settled_center = None
     if mismatch:
-        range_notes.append("  • 注：市场档位与气象主带存在错位，已按最近 below/above 边缘区间回退展示。")
+        range_notes.append("• 注：市场档位与气象主带存在错位，已按最近 below/above 边缘区间回退展示。")
 
     # Market-vs-forecast distribution cues (use full filtered market set, not only displayed bins).
     try:
@@ -621,7 +621,7 @@ def _build_polymarket_section(
 
         if settled_single and settled_center is not None:
             s_u = _to_unit(settled_center)
-            expectation_lines.append(f"    ↳ {s_u:.1f}{sym}｜{s_u:.1f}~{s_u:.1f}{sym}（近似定局）")
+            expectation_lines.append(f"↳ {s_u:.1f}{sym}｜{s_u:.1f}~{s_u:.1f}{sym}（近似定局）")
             market_cov_lo_c = float(settled_center)
             market_cov_hi_c = float(settled_center)
         pts_full: list[tuple[float, str, float, float, float, bool]] = []
@@ -730,7 +730,7 @@ def _build_polymarket_section(
                     mu_u = _to_unit(mu_c)
                     lo_u = _to_unit(lo_c)
                     hi_u = _to_unit(hi_c)
-                    expectation_lines.append(f"    ↳ {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（{cov_pct}%范围）")
+                    expectation_lines.append(f"↳ {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（{cov_pct}%范围）")
                     market_cov_lo_c = float(lo_c)
                     market_cov_hi_c = float(hi_c)
                 else:
@@ -740,7 +740,7 @@ def _build_polymarket_section(
                     mu_u = _to_unit(mu_c)
                     lo_u = _to_unit(lo_c)
                     hi_u = _to_unit(hi_c)
-                    expectation_lines.append(f"    ↳ {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（{cov_pct}%范围）")
+                    expectation_lines.append(f"↳ {mu_u:.1f}{sym}｜{lo_u:.1f}~{hi_u:.1f}{sym}（{cov_pct}%范围）")
                     market_cov_lo_c = float(lo_c)
                     market_cov_hi_c = float(hi_c)
 
@@ -749,15 +749,15 @@ def _build_polymarket_section(
                     edge_bins = [x for x in edge_bins if x[1] >= 0.02]
                     if edge_bins:
                         edge_txt = " / ".join([f"{lbl}({p*100:.0f}%)" for lbl, p in edge_bins[:2]])
-                        expectation_lines.append(f"  • 注：边缘占比较高（约 {edge_share*100:.0f}%，主要在 {edge_txt}），期望仅供参考。")
+                        expectation_lines.append(f"• 注：边缘占比较高（约 {edge_share*100:.0f}%，主要在 {edge_txt}），期望仅供参考。")
                     else:
-                        expectation_lines.append(f"  • 注：边缘占比较高（约 {edge_share*100:.0f}%），期望仅供参考。")
+                        expectation_lines.append(f"• 注：边缘占比较高（约 {edge_share*100:.0f}%），期望仅供参考。")
 
                 # explicit hot-side cue above forecast core upper bound
                 fc_hi = float(core_hi)
                 hot_tail = sum(p for c, _l, p, _lo, _hi, _e in wpts if c >= (fc_hi + 0.5))
                 if hot_tail >= 0.18:
-                    expectation_lines.append(f"  • 提示：市场对更高温档位定价不低（≥{_to_unit(fc_hi + 0.5):.1f}{sym} 合计约 {hot_tail*100:.0f}%）。")
+                    expectation_lines.append(f"• 提示：市场对更高温档位定价不低（≥{_to_unit(fc_hi + 0.5):.1f}{sym} 合计约 {hot_tail*100:.0f}%）。")
     except Exception:
         pass
 
@@ -824,7 +824,7 @@ def _build_polymarket_section(
         pass
 
     if expectation_lines:
-        lines.append("**市场定价期望**")
+        lines.append("**市场定价**")
         lines.extend(expectation_lines)
 
     lines.append("**博弈区间**")
@@ -837,8 +837,8 @@ def _build_polymarket_section(
         tag = _row_tag((_c, label, bid, ask, _lo, _hi))
 
         if tag:
-            lines.append(f"  • **{label}（{tag}）：Bid {bid_txt} | Ask {ask_txt}**")
+            lines.append(f"• **{label}（{tag}）：Bid {bid_txt} | Ask {ask_txt}**")
         else:
-            lines.append(f"  • {label}：Bid {bid_txt} | Ask {ask_txt}")
+            lines.append(f"• {label}：Bid {bid_txt} | Ask {ask_txt}")
 
     return "\n".join(lines)

@@ -32,6 +32,7 @@ Last updated: 2026-03-09
 ### B. Operations（运维与变更）
 - `docs/operations/LOG_ARCHIVE_POLICY.md`
 - `docs/operations/LOOK_FIX_REGISTRY_2026-03.md`
+- `docs/operations/OPENCLAW_RUNTIME_BOUNDARY.md`
 - `docs/operations/SOUNDING_OBS_ANALYSIS_PIPELINE.md`
 - `docs/operations/city-background/README.md`
 
@@ -55,6 +56,7 @@ Last updated: 2026-03-09
 - **项目总览 / 当前能力边界变更** → 改 `docs/core/PROJECT_OVERVIEW.md`
 - **输出口径变更** → 改 `docs/core/LOOK_OUTPUT_CONTRACT.md`
 - **日志与归档治理变更** → 改 `docs/operations/LOG_ARCHIVE_POLICY.md`
+- **OpenClaw 网关运行边界 / 升级路径变更** → 改 `docs/operations/OPENCLAW_RUNTIME_BOUNDARY.md`
 - **探空实测接入/时效/代表性策略变更** → 改 `docs/operations/SOUNDING_OBS_ANALYSIS_PIPELINE.md`
 - 所有重要改动统一记入 `docs/operations/LOOK_FIX_REGISTRY_2026-03.md`
 

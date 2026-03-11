@@ -135,7 +135,7 @@ def monitor_market_state(
         while time.time() < deadline:
             if ws is None:
                 try:
-                    ws = websocket.create_connection(MARKET_WS_URL, timeout=1.0)
+                    ws = websocket.create_connection(MARKET_WS_URL, timeout=5.0)
                     ws.send(json.dumps(subscribe_payload))
                     last_ping = time.time()
                 except Exception:

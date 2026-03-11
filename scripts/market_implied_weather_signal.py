@@ -123,6 +123,130 @@ def _bucket_triggered(
     return prev_bid is not None and prev_bid >= float(price_floor) and (no_bid or ask_collapsed)
 
 
+def _bucket_dead_now(
+    bucket: dict[str, Any],
+    *,
+    price_floor: float,
+    ask_collapse_threshold: float,
+) -> bool:
+    prev_bid = _to_float(bucket.get("prev_best_bid"))
+    bid_now = _to_float(bucket.get("best_bid"))
+    ask_now = _to_float(bucket.get("best_ask"))
+    trade_price_now = _to_float(bucket.get("last_trade_price"))
+    if prev_bid is None or prev_bid < float(price_floor):
+        return False
+    exhausted_bid = bid_now is None or bid_now <= min(0.005, float(price_floor) / 4.0)
+    ask_collapsed = ask_now is not None and ask_now <= float(ask_collapse_threshold)
+    trade_collapsed = trade_price_now is not None and trade_price_now <= float(ask_collapse_threshold)
+    return exhausted_bid and (ask_collapsed or trade_collapsed)
+
+
+def _bucket_live_now(
+    bucket: dict[str, Any],
+    *,
+    price_floor: float,
+    ask_collapse_threshold: float,
+) -> bool:
+    bid_now = _to_float(bucket.get("best_bid"))
+    return bid_now is not None and bid_now >= float(price_floor)
+
+
+def _build_live_ladder_rows(buckets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for bucket in buckets:
+        if not isinstance(bucket, dict):
+            continue
+        label = str(bucket.get("bucket_label") or "").strip()
+        if not label:
+            continue
+        rows.append(
+            {
+                "bucket_label": label,
+                "best_bid": _to_float(bucket.get("best_bid")),
+                "best_ask": _to_float(bucket.get("best_ask")),
+            }
+        )
+    return rows
+
+
+def _build_ascending_scan_signal(
+    *,
+    first_live_bucket: dict[str, Any],
+    triggered_prefix: list[dict[str, Any]],
+    live_ladder_buckets: list[dict[str, Any]],
+    scheduled_dt: datetime | None,
+    now_dt: datetime,
+    delta_seconds: float | None,
+    within_trigger_window: bool,
+    price_floor: float,
+    ask_collapse_threshold: float,
+    confidence: str,
+    consistency_with_observed: str,
+    trigger_mode: str,
+) -> dict[str, Any]:
+    first_live_threshold = _to_float(first_live_bucket.get("threshold_c"))
+    first_live_label = str(first_live_bucket.get("bucket_label") or "")
+    first_live_kind = str(first_live_bucket.get("bucket_kind") or "")
+    first_live_display_value, display_unit = _bucket_display_threshold(first_live_bucket)
+    collapsed_prefix_labels = [str(bucket.get("bucket_label") or "") for bucket in triggered_prefix]
+    collapsed_prefix_prev_bids = {
+        str(bucket.get("bucket_label") or ""): _to_float(bucket.get("prev_best_bid"))
+        for bucket in triggered_prefix
+        if str(bucket.get("bucket_label") or "").strip()
+    }
+    collapsed_prefix_current_bids = {
+        str(bucket.get("bucket_label") or ""): _to_float(bucket.get("best_bid"))
+        for bucket in triggered_prefix
+        if str(bucket.get("bucket_label") or "").strip()
+    }
+    collapsed_prefix_current_asks = {
+        str(bucket.get("bucket_label") or ""): _to_float(bucket.get("best_ask"))
+        for bucket in triggered_prefix
+        if str(bucket.get("bucket_label") or "").strip()
+    }
+    signal_type = "report_temp_top_bucket_lock_in" if first_live_kind == "at_or_above" else "report_temp_scan_floor_stop"
+    return {
+        "schema_version": MARKET_IMPLIED_WEATHER_SIGNAL_SCHEMA_VERSION,
+        "signal_type": signal_type,
+        "triggered": True,
+        "implied_report_temp_lower_bound_c": first_live_threshold,
+        "implied_report_temp_lower_bound_native": first_live_display_value,
+        "bound_operator": ">=" if first_live_kind == "at_or_above" else "~=",
+        "target_bucket_label": first_live_label,
+        "target_bucket_threshold_c": first_live_threshold,
+        "target_bucket_threshold_native": first_live_display_value,
+        "temperature_unit": display_unit,
+        "confidence": confidence,
+        "scheduled_report_utc": scheduled_dt.isoformat().replace("+00:00", "Z") if scheduled_dt else None,
+        "observed_at_utc": now_dt.isoformat().replace("+00:00", "Z"),
+        "delta_from_report_seconds": delta_seconds,
+        "within_report_window": within_trigger_window,
+        "consistency_with_observed": consistency_with_observed,
+        "evidence": {
+            "first_live_bucket_label": first_live_label,
+            "first_live_bucket_threshold_c": first_live_threshold,
+            "first_live_bucket_threshold_native": first_live_display_value,
+            "temperature_unit": display_unit,
+            "first_live_bucket_kind": first_live_kind,
+            "first_live_bucket_bid": _to_float(first_live_bucket.get("best_bid")),
+            "first_live_bucket_ask": _to_float(first_live_bucket.get("best_ask")),
+            "collapsed_prefix_count": len(triggered_prefix),
+            "collapsed_prefix_labels": collapsed_prefix_labels,
+            "collapsed_prefix_prev_bids": collapsed_prefix_prev_bids,
+            "collapsed_prefix_current_bids": collapsed_prefix_current_bids,
+            "collapsed_prefix_current_asks": collapsed_prefix_current_asks,
+            "live_ladder_rows": _build_live_ladder_rows(live_ladder_buckets),
+            "price_floor": float(price_floor),
+            "ask_collapse_threshold": float(ask_collapse_threshold),
+            "trigger_mode": trigger_mode,
+        },
+        "message": (
+            f"盘口异常提示：向上正序扫描后，最低仍未被打死的档位是 {first_live_label}，"
+            f"市场当前更像先按这一档附近交易。"
+        ),
+    }
+
+
 def infer_market_implied_report_signal(
     *,
     bucket_snapshots: list[dict[str, Any]],
@@ -169,53 +293,61 @@ def infer_market_implied_report_signal(
                 continue
             first_live_bucket = bucket
             break
-        if triggered_prefix and first_live_bucket is not None:
-            first_live_threshold = _to_float(first_live_bucket.get("threshold_c"))
-            first_live_label = str(first_live_bucket.get("bucket_label") or "")
-            first_live_kind = str(first_live_bucket.get("bucket_kind") or "")
-            first_live_display_value, display_unit = _bucket_display_threshold(first_live_bucket)
-            collapsed_prefix_labels = [str(bucket.get("bucket_label") or "") for bucket in triggered_prefix]
-            collapsed_prefix_prev_bids = {
-                str(bucket.get("bucket_label") or ""): _to_float(bucket.get("prev_best_bid"))
-                for bucket in triggered_prefix
-                if str(bucket.get("bucket_label") or "").strip()
-            }
-            signal_type = "report_temp_top_bucket_lock_in" if first_live_kind == "at_or_above" else "report_temp_scan_floor_stop"
-            return {
-                "schema_version": MARKET_IMPLIED_WEATHER_SIGNAL_SCHEMA_VERSION,
-                "signal_type": signal_type,
-                "triggered": True,
-                "implied_report_temp_lower_bound_c": first_live_threshold,
-                "implied_report_temp_lower_bound_native": first_live_display_value,
-                "bound_operator": ">=" if first_live_kind == "at_or_above" else "~=",
-                "target_bucket_threshold_c": first_live_threshold,
-                "target_bucket_threshold_native": first_live_display_value,
-                "temperature_unit": display_unit,
-                "confidence": "high" if len(triggered_prefix) >= 2 else "medium",
-                "scheduled_report_utc": scheduled_dt.isoformat().replace("+00:00", "Z") if scheduled_dt else None,
-                "observed_at_utc": now_dt.isoformat().replace("+00:00", "Z"),
-                "delta_from_report_seconds": delta_seconds,
-                "within_report_window": within_trigger_window,
-                "consistency_with_observed": "ascending_scan_first_live_bucket",
-                "evidence": {
-                    "first_live_bucket_label": first_live_label,
-                    "first_live_bucket_threshold_c": first_live_threshold,
-                    "first_live_bucket_threshold_native": first_live_display_value,
-                    "temperature_unit": display_unit,
-                    "first_live_bucket_kind": first_live_kind,
-                    "first_live_bucket_bid": _to_float(first_live_bucket.get("best_bid")),
-                    "collapsed_prefix_count": len(triggered_prefix),
-                    "collapsed_prefix_labels": collapsed_prefix_labels,
-                    "collapsed_prefix_prev_bids": collapsed_prefix_prev_bids,
-                    "price_floor": float(price_floor),
-                    "ask_collapse_threshold": float(ask_collapse_threshold),
-                    "trigger_mode": "ascending_scan_stop_on_first_live_bucket",
-                },
-                "message": (
-                    f"盘口异常提示：向上正序扫描后，最低仍未被打死的档位是 {first_live_label}，"
-                    f"市场当前更像先按这一档附近交易。"
-                ),
-            }
+        if (
+            triggered_prefix
+            and first_live_bucket is not None
+            and _bucket_live_now(first_live_bucket, price_floor=price_floor, ask_collapse_threshold=ask_collapse_threshold)
+        ):
+            return _build_ascending_scan_signal(
+                first_live_bucket=first_live_bucket,
+                triggered_prefix=triggered_prefix,
+                live_ladder_buckets=[
+                    bucket
+                    for bucket in scan_candidates
+                    if float(_bucket_lower_bound_c(bucket) or -9999.0) >= float(_bucket_lower_bound_c(first_live_bucket) or -9999.0)
+                ],
+                scheduled_dt=scheduled_dt,
+                now_dt=now_dt,
+                delta_seconds=delta_seconds,
+                within_trigger_window=within_trigger_window,
+                price_floor=price_floor,
+                ask_collapse_threshold=ask_collapse_threshold,
+                confidence="high" if len(triggered_prefix) >= 2 else "medium",
+                consistency_with_observed="ascending_scan_first_live_bucket",
+                trigger_mode="ascending_scan_stop_on_first_live_bucket",
+            )
+
+        dead_prefix: list[dict[str, Any]] = []
+        first_live_bucket = None
+        for bucket in scan_candidates:
+            if _bucket_dead_now(bucket, price_floor=price_floor, ask_collapse_threshold=ask_collapse_threshold):
+                dead_prefix.append(bucket)
+                continue
+            first_live_bucket = bucket
+            break
+        if (
+            dead_prefix
+            and first_live_bucket is not None
+            and _bucket_live_now(first_live_bucket, price_floor=price_floor, ask_collapse_threshold=ask_collapse_threshold)
+        ):
+            return _build_ascending_scan_signal(
+                first_live_bucket=first_live_bucket,
+                triggered_prefix=dead_prefix,
+                live_ladder_buckets=[
+                    bucket
+                    for bucket in scan_candidates
+                    if float(_bucket_lower_bound_c(bucket) or -9999.0) >= float(_bucket_lower_bound_c(first_live_bucket) or -9999.0)
+                ],
+                scheduled_dt=scheduled_dt,
+                now_dt=now_dt,
+                delta_seconds=delta_seconds,
+                within_trigger_window=within_trigger_window,
+                price_floor=price_floor,
+                ask_collapse_threshold=ask_collapse_threshold,
+                confidence="medium" if len(dead_prefix) >= 2 else "low",
+                consistency_with_observed="ascending_scan_first_live_bucket_no_baseline",
+                trigger_mode="ascending_scan_stop_on_first_live_bucket_no_baseline",
+            )
 
     top_higher_candidates = [
         bucket
@@ -245,6 +377,7 @@ def infer_market_implied_report_signal(
                         "implied_report_temp_lower_bound_c": top_threshold,
                         "implied_report_temp_lower_bound_native": _bucket_display_threshold(top_higher)[0],
                         "bound_operator": ">=",
+                        "target_bucket_label": str(top_higher.get("bucket_label") or ""),
                         "target_bucket_threshold_c": top_threshold,
                         "target_bucket_threshold_native": _bucket_display_threshold(top_higher)[0],
                         "temperature_unit": _bucket_display_threshold(top_higher)[1],
@@ -261,6 +394,13 @@ def infer_market_implied_report_signal(
                             "temperature_unit": _bucket_display_threshold(top_higher)[1],
                             "collapsed_lower_bucket_count": len(lower_dead),
                             "collapsed_lower_bucket_labels": [str(bucket.get("bucket_label") or "") for bucket in lower_dead],
+                            "live_ladder_rows": _build_live_ladder_rows(
+                                [
+                                    bucket
+                                    for bucket in top_higher_candidates
+                                    if float(_to_float(bucket.get("threshold_c")) or -9999.0) >= float(top_threshold)
+                                ]
+                            ),
                             "price_floor": float(price_floor),
                             "ask_collapse_threshold": float(ask_collapse_threshold),
                             "trigger_mode": "all_lower_buckets_dead_except_top_or_higher",
@@ -321,6 +461,7 @@ def infer_market_implied_report_signal(
             "implied_report_temp_lower_bound_c": threshold_c + 1.0,
             "implied_report_temp_lower_bound_native": implied_display_lower_bound,
             "bound_operator": ">=",
+            "target_bucket_label": str(bucket.get("bucket_label") or ""),
             "target_bucket_threshold_c": threshold_c,
             "target_bucket_threshold_native": display_threshold,
             "temperature_unit": display_unit,

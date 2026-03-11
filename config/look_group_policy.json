@@ -3,10 +3,18 @@
     "rate_limit": {
       "enabled": true,
       "apply_in_direct": false,
-      "user_cooldown_sec": 60,
-      "user_cooldown_scope": "sender-global",
-      "result_scope": "telegram-groups-shared",
-      "inflight_wait_sec": 20,
+      "user_cooldown": {
+        "mode": "adaptive",
+        "scope": "sender-per-group",
+        "fixed_sec": 60,
+        "base_sec": 15,
+        "step_sec": 15,
+        "max_sec": 90,
+        "window_sec": 180,
+        "burst_soft_limit": 1
+      },
+      "result_scope": "group-only",
+      "inflight_wait_sec": 3,
       "inflight_stale_sec": 120
     }
   },

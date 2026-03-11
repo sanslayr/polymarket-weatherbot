@@ -149,6 +149,35 @@ Last updated: 2026-03-03
   - Toronto 不采用 Buffalo（地形/下垫面代表性不一致）；
   - Seoul 指定 Incheon 站点；若 24h 内无实测则仍禁用实测探空。
 
+## 13) 2026-03-11 OpenClaw 运行面收口
+
+- 清理双运行面：
+  - 停用并移除 system-level `openclaw-gateway.service`
+  - 保留单一 user-level `openclaw-gateway.service`
+- 清理双安装源：
+  - 运行面真源固定为 `/home/ubuntu/.npm-global/lib/node_modules/openclaw`
+  - shell 默认入口固定为 `/home/ubuntu/.local/bin/openclaw`
+  - 通过 `~/.npmrc` 将用户态 `npm -g` 前缀固定到 `~/.npm-global`
+- 辅助运维入口收口：
+  - `~/.local/bin/openclaw-systemd` 改为只管理 user service
+- 目的：
+  - 避免 system/user 双轨互相抢占端口
+  - 避免“改了一处 inactive install tree，但线上跑的是另一处”的补丁式耦合
+
+## 14) 2026-03-11 /look 群聊动态限流收口
+
+- 默认群聊冷却从固定 `60s` 改为动态机制：
+  - `sender-per-group`
+  - `180s` 观测窗
+  - `15s` 起步
+  - 每新增一层 burst `+15s`
+  - 上限 `90s`
+- 保留同 query 的 in-flight 去重和同群作用域。
+- `/look` 强制 live METAR / Polymarket 刷新时，不再做“已完成结果 120s 复用”短路。
+- 目的：
+  - 避免固定 `60s` 对轻度连续查询过于僵硬
+  - 避免跨群共享单用户冷却导致互相干扰
+
 ---
 
 ## 仍在持续优化（未封板）

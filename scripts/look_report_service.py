@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -32,6 +33,7 @@ from polymarket_client import prefetch_polymarket_event as _prefetch_polymarket_
 from polymarket_render_service import _build_polymarket_section
 from realtime_pipeline import classify_window_phase
 from report_render_service import choose_section_text
+from runtime_cache_policy import runtime_cache_enabled
 from station_catalog import (
     Station,
     direction_factor_for as _direction_factor_for,
@@ -50,6 +52,9 @@ SCRIPTS_DIR = ROOT / "scripts"
 CACHE_DIR = ROOT / "cache" / "runtime"
 _POLY_PREFETCH_POOL = ThreadPoolExecutor(max_workers=2)
 _METAR_FETCH_POOL = ThreadPoolExecutor(max_workers=4)
+MGM_CACHE_TTL_MINUTES = int(os.getenv("WEATHERBOT_MGM_CACHE_TTL_MINUTES", "10") or "10")
+MGM_CACHE_STALE_HOURS = float(os.getenv("WEATHERBOT_MGM_CACHE_STALE_HOURS", "2") or "2")
+MGM_TIMEOUT_SECONDS = float(os.getenv("WEATHERBOT_MGM_TIMEOUT_SECONDS", "4") or "4")
 
 
 def _env_flag(name: str, default: str = "1") -> bool:
@@ -57,8 +62,8 @@ def _env_flag(name: str, default: str = "1") -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-LOOK_FORCE_LIVE_METAR = _env_flag("LOOK_FORCE_LIVE_METAR")
-LOOK_FORCE_LIVE_POLYMARKET = _env_flag("LOOK_FORCE_LIVE_POLYMARKET")
+LOOK_FORCE_LIVE_METAR = _env_flag("LOOK_FORCE_LIVE_METAR", "1")
+LOOK_FORCE_LIVE_POLYMARKET = _env_flag("LOOK_FORCE_LIVE_POLYMARKET", "1")
 
 
 @dataclass
@@ -146,9 +151,63 @@ def _run_synoptic_section(
     )
 
 
+def _mgm_cache_path(icao: str) -> Path:
+    return CACHE_DIR / f"mgm_reference_{str(icao).upper()}.json"
+
+
+def _parse_cache_ts(value: Any) -> datetime | None:
+    try:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _read_mgm_cache(icao: str, *, allow_stale: bool = False) -> dict[str, Any] | None:
+    if not runtime_cache_enabled():
+        return None
+    path = _mgm_cache_path(icao)
+    if not path.exists():
+        return None
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        payload = doc.get("payload")
+        if not isinstance(payload, dict) or not payload:
+            return None
+        now_utc = datetime.now(timezone.utc)
+        expires_at = _parse_cache_ts(doc.get("expires_at_utc"))
+        if expires_at is not None and now_utc <= expires_at:
+            return payload
+        if allow_stale:
+            updated_at = _parse_cache_ts(doc.get("updated_at_utc"))
+            if updated_at is not None and (now_utc - updated_at) <= timedelta(hours=max(1.0, MGM_CACHE_STALE_HOURS)):
+                return payload
+    except Exception:
+        return None
+    return None
+
+
+def _write_mgm_cache(icao: str, payload: dict[str, Any]) -> None:
+    if not runtime_cache_enabled() or not payload:
+        return
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    now_utc = datetime.now(timezone.utc)
+    doc = {
+        "updated_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
+        "expires_at_utc": (now_utc + timedelta(minutes=max(3, MGM_CACHE_TTL_MINUTES))).isoformat().replace("+00:00", "Z"),
+        "payload": payload,
+    }
+    _mgm_cache_path(icao).write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+
+
 def _fetch_mgm_reference(st: Station) -> dict[str, Any] | None:
     if str(st.icao).upper() != "LTAC":
         return None
+    cached = _read_mgm_cache(st.icao)
+    if cached is not None:
+        return cached
 
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -161,7 +220,7 @@ def _fetch_mgm_reference(st: Station) -> dict[str, Any] | None:
         cands = requests.get(
             f"https://servis.mgm.gov.tr/web/merkezler?sorgu={query}",
             headers=headers,
-            timeout=12,
+            timeout=MGM_TIMEOUT_SECONDS,
         ).json()
         if not isinstance(cands, list) or not cands:
             return None
@@ -172,12 +231,12 @@ def _fetch_mgm_reference(st: Station) -> dict[str, Any] | None:
         obs = requests.get(
             f"https://servis.mgm.gov.tr/web/sondurumlar?merkezid={mid}",
             headers=headers,
-            timeout=12,
+            timeout=MGM_TIMEOUT_SECONDS,
         ).json()
         if not isinstance(obs, list) or not obs:
             return None
         row = obs[0] or {}
-        return {
+        payload = {
             "merkez_id": mid,
             "veri_zamani": row.get("veriZamani"),
             "temp_c": row.get("sicaklik"),
@@ -187,7 +246,12 @@ def _fetch_mgm_reference(st: Station) -> dict[str, Any] | None:
             "metar": row.get("rasatMetar"),
             "ilce": center.get("ilce"),
         }
+        _write_mgm_cache(st.icao, payload)
+        return payload
     except Exception:
+        stale = _read_mgm_cache(st.icao, allow_stale=True)
+        if stale is not None:
+            return stale
         return None
 
 
@@ -271,6 +335,26 @@ def _render_footer(links: dict[str, Any]) -> str:
         f"[Wunderground]({links['wunderground']}) | "
         f"[探空图（Tropicaltidbits）]({links['sounding_tropicaltidbits']})"
     )
+
+
+def _should_use_compact_header(primary_window: dict[str, Any], metar_diag: dict[str, Any]) -> bool:
+    phase = str(classify_window_phase(primary_window, metar_diag).get("phase") or "unknown")
+    if phase in {"near_window", "in_window", "post"}:
+        return True
+
+    try:
+        peak_local = datetime.fromisoformat(str(primary_window.get("peak_local") or ""))
+        latest_local = datetime.fromisoformat(str(metar_diag.get("latest_report_local") or ""))
+        if peak_local.tzinfo is not None and latest_local.tzinfo is None:
+            latest_local = latest_local.replace(tzinfo=peak_local.tzinfo)
+        elif peak_local.tzinfo is None and latest_local.tzinfo is not None:
+            peak_local = peak_local.replace(tzinfo=latest_local.tzinfo)
+        hours_to_peak = (peak_local - latest_local).total_seconds() / 3600.0
+        if peak_local.date() == latest_local.date() and hours_to_peak < 12.0:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _build_metar_only_bundle(
@@ -578,8 +662,7 @@ def build_look_report_bundle(
             sounding_model=sounding_model_used,
         )
 
-    gate_now = classify_window_phase(primary, metar_diag)
-    compact_synoptic = str(gate_now.get("phase") or "unknown") in {"near_window", "in_window"}
+    compact_synoptic = _should_use_compact_header(primary, metar_diag)
 
     poly_prefetched_event = None
     if poly_prefetch_future is not None:

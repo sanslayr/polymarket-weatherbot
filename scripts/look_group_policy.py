@@ -16,10 +16,18 @@ DEFAULT_POLICY_DOC: dict[str, Any] = {
         "rate_limit": {
             "enabled": True,
             "apply_in_direct": False,
-            "user_cooldown_sec": 60,
-            "user_cooldown_scope": "sender-global",
-            "result_scope": "telegram-groups-shared",
-            "inflight_wait_sec": 20,
+            "user_cooldown": {
+                "mode": "adaptive",
+                "scope": "sender-per-group",
+                "fixed_sec": 60,
+                "base_sec": 15,
+                "step_sec": 15,
+                "max_sec": 90,
+                "window_sec": 180,
+                "burst_soft_limit": 1,
+            },
+            "result_scope": "group-only",
+            "inflight_wait_sec": 3,
             "inflight_stale_sec": 120,
         },
     },
@@ -28,11 +36,22 @@ DEFAULT_POLICY_DOC: dict[str, Any] = {
 
 
 @dataclass(frozen=True)
+class UserCooldownPolicy:
+    mode: str
+    scope: str
+    fixed_sec: int
+    base_sec: int
+    step_sec: int
+    max_sec: int
+    window_sec: int
+    burst_soft_limit: int
+
+
+@dataclass(frozen=True)
 class RateLimitPolicy:
     enabled: bool
     apply_in_direct: bool
-    user_cooldown_sec: int
-    user_cooldown_scope: str
+    user_cooldown: UserCooldownPolicy
     result_scope: str
     inflight_wait_sec: int
     inflight_stale_sec: int
@@ -51,23 +70,36 @@ def resolve_look_group_policy(peer_id: str | None) -> LookGroupPolicy:
     group_overrides = ((doc.get("groups") or {}).get(str(peer_id or "")) if peer_id else None) or {}
     merged = _deep_merge(defaults, group_overrides)
     rate_limit_raw = dict(merged.get("rate_limit") or {})
+    user_cooldown_raw = _resolve_user_cooldown_raw(rate_limit_raw)
     return LookGroupPolicy(
         policy_id=str(peer_id or "defaults"),
         rate_limit=RateLimitPolicy(
             enabled=bool(rate_limit_raw.get("enabled", True)),
             apply_in_direct=bool(rate_limit_raw.get("apply_in_direct", False)),
-            user_cooldown_sec=max(0, _to_int(rate_limit_raw.get("user_cooldown_sec"), 60)),
-            user_cooldown_scope=_normalize_choice(
-                rate_limit_raw.get("user_cooldown_scope"),
-                allowed={"sender-global", "sender-per-group"},
-                fallback="sender-global",
+            user_cooldown=UserCooldownPolicy(
+                mode=_normalize_choice(
+                    user_cooldown_raw.get("mode"),
+                    allowed={"adaptive", "fixed"},
+                    fallback="adaptive",
+                ),
+                scope=_normalize_choice(
+                    user_cooldown_raw.get("scope"),
+                    allowed={"sender-global", "sender-per-group"},
+                    fallback="sender-per-group",
+                ),
+                fixed_sec=max(0, _to_int(user_cooldown_raw.get("fixed_sec"), 60)),
+                base_sec=max(0, _to_int(user_cooldown_raw.get("base_sec"), 15)),
+                step_sec=max(0, _to_int(user_cooldown_raw.get("step_sec"), 15)),
+                max_sec=max(0, _to_int(user_cooldown_raw.get("max_sec"), 90)),
+                window_sec=max(1, _to_int(user_cooldown_raw.get("window_sec"), 180)),
+                burst_soft_limit=max(0, _to_int(user_cooldown_raw.get("burst_soft_limit"), 1)),
             ),
             result_scope=_normalize_choice(
                 rate_limit_raw.get("result_scope"),
                 allowed={"telegram-groups-shared", "group-only"},
-                fallback="telegram-groups-shared",
+                fallback="group-only",
             ),
-            inflight_wait_sec=max(0, _to_int(rate_limit_raw.get("inflight_wait_sec"), 20)),
+            inflight_wait_sec=max(0, _to_int(rate_limit_raw.get("inflight_wait_sec"), 3)),
             inflight_stale_sec=max(1, _to_int(rate_limit_raw.get("inflight_stale_sec"), 120)),
         ),
         raw=merged,
@@ -83,6 +115,21 @@ def _load_policy_doc() -> dict[str, Any]:
     except Exception:
         pass
     return dict(DEFAULT_POLICY_DOC)
+
+
+def _resolve_user_cooldown_raw(rate_limit_raw: dict[str, Any]) -> dict[str, Any]:
+    nested = dict(rate_limit_raw.get("user_cooldown") or {})
+    legacy_scope = rate_limit_raw.get("user_cooldown_scope")
+    legacy_fixed_sec = rate_limit_raw.get("user_cooldown_sec")
+
+    if legacy_scope is not None:
+        nested["scope"] = legacy_scope
+
+    if legacy_fixed_sec is not None:
+        nested["fixed_sec"] = legacy_fixed_sec
+        nested["mode"] = "fixed"
+
+    return nested
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

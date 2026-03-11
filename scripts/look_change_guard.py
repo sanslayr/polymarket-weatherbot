@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Any
 
 import requests
 
 from hourly_data_service import model_cycle_tag
-from metar_utils import metar_obs_time_utc
+from metar_utils import metar_obs_time_utc, read_cached_metar_24h
 
-REPORT_RESULT_VERSION = "look-report-v2026-03-09-8"
+REPORT_RESULT_VERSION = "look-report-v2026-03-11-27"
+LOOK_RESULT_REUSE_WINDOW_SECONDS = int(os.getenv("LOOK_RESULT_REUSE_WINDOW_SECONDS", "120") or "120")
+LOOK_METAR_SIGNATURE_TIMEOUT_SECONDS = float(
+    os.getenv("LOOK_METAR_SIGNATURE_TIMEOUT_SECONDS", "3") or "3"
+)
+LOOK_FORCE_LIVE_METAR = str(os.getenv("LOOK_FORCE_LIVE_METAR", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+LOOK_FORCE_LIVE_POLYMARKET = str(os.getenv("LOOK_FORCE_LIVE_POLYMARKET", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def build_cached_result_meta(*, icao: str, model: str, metar24: list[dict[str, Any]] | None) -> dict[str, Any]:
@@ -28,6 +35,8 @@ def build_unchanged_notice(
     model: str,
     cached_payload: dict[str, Any] | None,
 ) -> str | None:
+    if LOOK_FORCE_LIVE_METAR or LOOK_FORCE_LIVE_POLYMARKET:
+        return None
     payload = cached_payload or {}
     meta = payload.get("result_meta") if isinstance(payload.get("result_meta"), dict) else {}
     if str(meta.get("report_version") or "").strip() != REPORT_RESULT_VERSION:
@@ -42,7 +51,15 @@ def build_unchanged_notice(
     if not cached_raw or not cached_obs:
         return None
 
-    live_metar = fetch_live_latest_metar_signature(icao)
+    if LOOK_RESULT_REUSE_WINDOW_SECONDS > 0 and _seconds_since_generated(payload) <= LOOK_RESULT_REUSE_WINDOW_SECONDS:
+        return (
+            f"♻️ 已查询过 {query_label}；结果仍在 {LOOK_RESULT_REUSE_WINDOW_SECONDS}s 复用窗口内。"
+            f"请查看上一次该站点日期的 /look 结果（{_format_age_since_generated(payload)}前生成）。"
+        )
+
+    live_metar = _latest_cached_metar_signature(icao)
+    if live_metar is None:
+        live_metar = fetch_live_latest_metar_signature(icao)
     if not live_metar:
         return None
     if str(live_metar.get("raw_ob") or "").strip() != cached_raw:
@@ -59,7 +76,7 @@ def build_unchanged_notice(
 def fetch_live_latest_metar_signature(icao: str) -> dict[str, str] | None:
     url = f"https://aviationweather.gov/api/data/metar?ids={str(icao or '').upper()}&format=json&hours=24"
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=LOOK_METAR_SIGNATURE_TIMEOUT_SECONDS)
         response.raise_for_status()
         payload = response.json()
     except Exception:
@@ -68,6 +85,13 @@ def fetch_live_latest_metar_signature(icao: str) -> dict[str, str] | None:
         return None
     latest = _latest_metar_signature([item for item in payload if isinstance(item, dict)])
     return latest if latest else None
+
+
+def _latest_cached_metar_signature(icao: str) -> dict[str, str] | None:
+    cached_rows = read_cached_metar_24h(icao, allow_stale=False)
+    if not cached_rows:
+        return None
+    return _latest_metar_signature(cached_rows)
 
 
 def _forecast_signature(model: str) -> str:

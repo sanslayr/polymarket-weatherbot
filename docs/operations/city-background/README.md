@@ -17,8 +17,10 @@
 - `docs/operations/city-background/profiles/KORD_chicago.md`
 - `docs/operations/city-background/profiles/KSEA_seattle.md`
 - `docs/operations/city-background/profiles/LFPG_paris.md`
+- `docs/operations/city-background/profiles/LLBG_tel_aviv.md`
 - `docs/operations/city-background/profiles/LTAC_ankara.md`
 - `docs/operations/city-background/profiles/NZWN_wellington.md`
+- `docs/operations/city-background/profiles/RJTT_tokyo.md`
 - `docs/operations/city-background/profiles/RKSI_seoul.md`
 - `docs/operations/city-background/profiles/SAEZ_buenos_aires.md`
 - `docs/operations/city-background/profiles/SBGR_sao_paulo.md`

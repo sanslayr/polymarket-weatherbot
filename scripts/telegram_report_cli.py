@@ -12,7 +12,9 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -42,6 +44,7 @@ def _reexec_into_skill_venv() -> None:
 _reexec_into_skill_venv()
 
 PROCESS_T0 = time.perf_counter()
+TRACE_LOG_PATH = Path(__file__).resolve().parents[4] / "logs" / "look-cli-latency.jsonl"
 
 def _format_local_header_time(now_utc: datetime, now_local: datetime) -> str:
     local_time = now_local.strftime("%H:%M")
@@ -49,25 +52,18 @@ def _format_local_header_time(now_utc: datetime, now_local: datetime) -> str:
         local_time = f"{now_local.month}/{now_local.day} {local_time}"
     return f"{local_time} Local ({format_utc_offset(now_local)})"
 
-from hourly_data_service import prune_runtime_cache as _prune_runtime_cache
-from look_change_guard import build_cached_result_meta, build_unchanged_notice
+from look_change_guard import build_unchanged_notice
 from look_command import parse_telegram_command, render_look_help
-from look_report_service import LookReportBundle, build_look_report_bundle
 from look_runtime_control import LookRuntimeContext, LookRuntimeController, build_request_key
 from station_catalog import (
     Station,
     default_model_for_station,
-    direction_factor_for as _direction_factor_for,
     format_utc_offset,
     resolve_station,
     site_tag_for as _site_tag_for,
     station_timezone_name,
     terrain_tag_for as _terrain_tag_for,
 )
-from telegram_notifier import send_telegram_message
-
-LOOK_SEND_PENDING_NOTICE = str(os.getenv("LOOK_SEND_PENDING_NOTICE", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
-
 def _resolve_target_date_for_station(raw_target_date: str | None, tz_name_station: str) -> str:
     normalized = raw_target_date
     if normalized and len(normalized) == 8 and normalized.isdigit():
@@ -79,59 +75,22 @@ def _resolve_target_date_for_station(raw_target_date: str | None, tz_name_statio
         return now_utc.astimezone(ZoneInfo(tz_name_station)).strftime("%Y-%m-%d")
     except Exception:
         return now_utc.strftime("%Y-%m-%d")
-
-
-def _parse_env_int(name: str) -> int | None:
-    raw = str(os.getenv(name) or "").strip()
-    if not raw:
-        return None
-    try:
-        return int(raw)
-    except Exception:
-        return None
-
-
-def _send_pending_look_notice(st: Station, target_date: str) -> None:
-    if not LOOK_SEND_PENDING_NOTICE:
-        return
-    channel = str(os.getenv("OPENCLAW_CHANNEL") or "").strip().lower()
-    if channel != "telegram":
-        return
-    peer_id = str(os.getenv("OPENCLAW_PEER_ID") or "").strip()
-    account_id = str(os.getenv("OPENCLAW_ACCOUNT_ID") or "weatherbot").strip() or "weatherbot"
-    reply_to_message_id = _parse_env_int("OPENCLAW_MESSAGE_ID")
-    message_thread_id = _parse_env_int("OPENCLAW_THREAD_ID")
-    if not peer_id or reply_to_message_id is None:
-        return
-    query_label = f"{st.city}({st.icao})-{target_date.replace('-', '')}"
-    text = f"👀正在查看{query_label}天气形势......"
-    try:
-        send_telegram_message(
-            text,
-            chat_id=peer_id,
-            account=account_id,
-            parse_mode=None,
-            disable_web_page_preview=True,
-            reply_to_message_id=reply_to_message_id,
-            message_thread_id=message_thread_id,
-            timeout=5.0,
-        )
-    except Exception:
-        return
-
-
 def _perf_log(stage: str, seconds: float) -> None:
     _ = (stage, seconds)
     return
 
 
-def _format_runtime_tag(tag: str) -> str:
-    txt = str(tag or "").strip()
-    if len(txt) == 10 and txt.isdigit():
-        return f"{txt[0:4]}/{txt[4:6]}/{txt[6:8]} {txt[8:10]}Z"
-    if txt.endswith("Z") and len(txt) == 11 and txt[:10].isdigit():
-        return f"{txt[0:4]}/{txt[4:6]}/{txt[6:8]} {txt[8:10]}Z"
-    return txt
+def _emit_runtime_trace(payload: dict[str, object]) -> None:
+    try:
+        TRACE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            **payload,
+        }
+        with TRACE_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def _render_report_header(st: Station, bundle: LookReportBundle) -> str:
@@ -139,7 +98,6 @@ def _render_report_header(st: Station, bundle: LookReportBundle) -> str:
     lon_hemi = "E" if st.lon >= 0 else "W"
     terrain_tag = _terrain_tag_for(st.icao)
     site_tag = _site_tag_for(st.icao)
-    direction_factor = _direction_factor_for(st.icao)
     head_geo = f"{abs(st.lat):.4f}{lat_hemi}, {abs(st.lon):.4f}{lon_hemi}"
     if site_tag:
         head_geo = f"{head_geo} ({site_tag})"
@@ -152,42 +110,17 @@ def _render_report_header(st: Station, bundle: LookReportBundle) -> str:
     ]
 
     if bundle.mode == "metar_only":
-        header_lines.append(
-            f"分析链路: 小时预报/3D背景不可用（最近运行时次参考: {_format_runtime_tag(bundle.runtime_utc)}）"
-        )
+        header_lines.append("数据提醒: 当前按实况降级生成。")
     else:
-        if not bundle.compact_synoptic:
-            syn_rt_fmt = _format_runtime_tag(bundle.synoptic_runtime_used)
-            syn_prev_rt_fmt = _format_runtime_tag(bundle.synoptic_previous_runtime_used)
-            cycle_bits = []
-            if syn_rt_fmt:
-                cycle_bits.append(syn_rt_fmt + (f" {bundle.synoptic_stream_used}" if bundle.synoptic_stream_used else ""))
-            elif bundle.runtime_utc:
-                cycle_bits.append(_format_runtime_tag(bundle.runtime_utc))
-            if syn_prev_rt_fmt and syn_prev_rt_fmt != syn_rt_fmt:
-                cycle_bits.append(f"对比前一时次 {syn_prev_rt_fmt}")
-            cycle_txt = " | ".join(cycle_bits) if cycle_bits else _format_runtime_tag(bundle.runtime_utc)
-            header_lines.append(
-                f"分析链路: 小时预报源 {bundle.provider_used} | 数值预报场源 {bundle.synoptic_provider_used}（数值模型时次: {cycle_txt}）"
-            )
-            if direction_factor:
-                header_lines.append(f"方位因子: {direction_factor}")
-
         try:
             quality = bundle.forecast_quality
             missing = set(quality.get("missing_layers") or [])
             degraded = str(quality.get("source_state") or "") == "degraded"
             syn_fail = ("synoptic" in missing) or degraded
-            provider_used_3d = str(quality.get("synoptic_provider_used") or bundle.synoptic_provider_used)
             provider_requested_3d = str(quality.get("synoptic_provider_requested") or bundle.synoptic_provider_used)
-            if provider_requested_3d and provider_requested_3d != provider_used_3d:
-                header_lines.append(
-                    f"⚠️ 数据提醒：数值预报场已从 {provider_requested_3d} 回退到 {provider_used_3d}。"
-                )
-            elif syn_fail and bundle.synoptic_error:
-                header_lines.append(
-                    f"⚠️ 数据提醒：数值预报场({provider_used_3d}) 层存在降级，部分环流诊断可能偏弱。"
-                )
+            provider_used_3d = str(quality.get("synoptic_provider_used") or bundle.synoptic_provider_used)
+            if (provider_requested_3d and provider_requested_3d != provider_used_3d) or (syn_fail and bundle.synoptic_error):
+                header_lines.append("数据提醒: 高空背景存在降级，部分环流诊断可能偏弱。")
         except Exception:
             pass
 
@@ -207,12 +140,19 @@ def render_report(
     t_e2e = time.perf_counter()
     bootstrap_elapsed = max(0.0, t_e2e - PROCESS_T0)
     perf_local: dict[str, float] = {}
+    trace_base: dict[str, object] = {
+        "command": command_text,
+        "channel": channel or "",
+        "peer_kind": peer_kind or "",
+        "peer_id": peer_id or "",
+        "sender_id": sender_id or "",
+        "session_key": session_key or "",
+    }
 
     def _mark(stage: str, seconds: float) -> None:
         perf_local[stage] = float(seconds)
         _perf_log(stage, seconds)
 
-    _prune_runtime_cache()
     params = parse_telegram_command(command_text)
     if params.get("cmd") != "look":
         raise ValueError("Unsupported command. Use /look")
@@ -238,9 +178,8 @@ def render_report(
 
     model = default_model_for_station(st).lower()
     if model not in {"gfs", "ecmwf"}:
-        model = "gfs"
-
-    _send_pending_look_notice(st, target_date)
+        model = "ecmwf"
+    trace_base["model"] = model
 
     runtime_context = LookRuntimeContext.from_runtime(
         channel=channel,
@@ -263,13 +202,53 @@ def render_report(
             cached_payload=cached_payload,
         )
         if unchanged_notice:
-            return runtime_control.deliver_unchanged_notice(cached_payload, notice=unchanged_notice)
+            if not runtime_control.should_emit_unchanged_notice(cached_payload):
+                result = runtime_control.deliver_cached_or_notice(cached_payload, notice=unchanged_notice)
+                _emit_runtime_trace(
+                    {
+                        **trace_base,
+                        "station": st.icao,
+                        "target_date": target_date,
+                        "result_kind": "cached_payload",
+                        "elapsed_s": round(time.perf_counter() - t_e2e, 3),
+                        "bootstrap_s": round(bootstrap_elapsed, 3),
+                    }
+                )
+                return result
+            result = runtime_control.deliver_unchanged_notice(cached_payload, notice=unchanged_notice)
+            _emit_runtime_trace(
+                {
+                    **trace_base,
+                    "station": st.icao,
+                    "target_date": target_date,
+                    "result_kind": "unchanged_notice",
+                    "elapsed_s": round(time.perf_counter() - t_e2e, 3),
+                    "bootstrap_s": round(bootstrap_elapsed, 3),
+                }
+            )
+            return result
     preflight = runtime_control.preflight()
     if not preflight.proceed:
-        return str(preflight.text or "")
+        result = str(preflight.text or "")
+        _emit_runtime_trace(
+            {
+                **trace_base,
+                "station": st.icao,
+                "target_date": target_date,
+                "result_kind": "preflight_block",
+                "elapsed_s": round(time.perf_counter() - t_e2e, 3),
+                "bootstrap_s": round(bootstrap_elapsed, 3),
+            }
+        )
+        return result
 
     # 统一输出：固定走当前主报告链路，对外命令仅暴露 station/date。
     try:
+        from hourly_data_service import prune_runtime_cache as prune_runtime_cache
+        from look_change_guard import build_cached_result_meta
+        from look_report_service import build_look_report_bundle
+
+        prune_runtime_cache()
         bundle = build_look_report_bundle(
             station=st,
             target_date=target_date,
@@ -295,7 +274,10 @@ def render_report(
             )
             header = f"{header}\n{perf_line}"
 
-        result_text = f"{header}\n\n{bundle.body}\n{bundle.footer}"
+        result_text = "\n\n".join(part.strip() for part in [header, bundle.body] if str(part or "").strip())
+        if str(bundle.footer or "").strip():
+            result_text = f"{result_text}\n{bundle.footer.strip()}"
+        result_text = re.sub(r"\n{3,}", "\n\n", result_text).strip()
         runtime_control.success(
             result_text,
             result_meta=build_cached_result_meta(
@@ -304,9 +286,33 @@ def render_report(
                 metar24=bundle.metar24,
             ),
         )
+        _emit_runtime_trace(
+            {
+                **trace_base,
+                "station": st.icao,
+                "target_date": target_date,
+                "result_kind": "success",
+                "elapsed_s": round(total_elapsed, 3),
+                "bootstrap_s": round(bootstrap_elapsed, 3),
+                "output_chars": len(result_text),
+                "perf": {k: round(float(v), 3) for k, v in perf_local.items()},
+            }
+        )
         return result_text
-    except Exception:
+    except Exception as exc:
         runtime_control.failure()
+        _emit_runtime_trace(
+            {
+                **trace_base,
+                "station": st.icao,
+                "target_date": target_date,
+                "result_kind": "error",
+                "elapsed_s": round(time.perf_counter() - t_e2e, 3),
+                "bootstrap_s": round(bootstrap_elapsed, 3),
+                "error": str(exc),
+                "perf": {k: round(float(v), 3) for k, v in perf_local.items()},
+            }
+        )
         raise
 
 

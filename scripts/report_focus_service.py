@@ -138,7 +138,7 @@ def build_report_focus_bundle(
     vertical_regime = str(thermo.get("vertical_regime") or "")
     new_high_prob = _safe_float((weather_posterior.get("event_probs") or {}).get("new_high_next_60m")) or 0.0
     lock_prob = _safe_float((weather_posterior.get("event_probs") or {}).get("lock_by_window_end")) or 0.0
-    trend_horizon = _trend_horizon_phrase(metar_diag)
+    temp_trend_step = _safe_float(metar_diag.get("temp_trend_1step_c")) or 0.0
 
     vars_block = [f"⚠️ **关注变量**（{PHASE_LABELS.get(display_phase, PHASE_LABELS['unknown'])}）"]
     focus_candidates: list[tuple[float, str]] = []
@@ -171,23 +171,23 @@ def build_report_focus_bundle(
             0.9,
             early_peak_line,
         )
-    elif new_high_prob >= 0.68 and display_phase not in {"far", "early_peak_watch"}:
+    elif new_high_prob >= 0.82 and temp_trend_step >= 0.5 and display_phase not in {"far", "early_peak_watch"}:
         _push_focus_candidate(
             focus_candidates,
-            0.72,
-            f"{trend_horizon}仍有再创新高空间，优先看温度斜率是否继续维持正值。",
+            0.86,
+            "仍有再创新高空间，优先看温度斜率是否继续维持正值。",
         )
-    elif lock_prob >= 0.76:
+    elif lock_prob >= 0.84:
         _push_focus_candidate(
             focus_candidates,
-            0.72,
-            f"{trend_horizon}更偏向高点锁定，重点看下一报是否继续横盘或回落。",
+            0.82,
+            "更偏向高点锁定，重点看下一报是否继续横盘或回落。",
         )
     elif short_term_state == "reaccelerating":
         _push_focus_candidate(
             focus_candidates,
             0.62,
-            f"{trend_horizon}若升温继续放大，最高温上沿仍可小幅上修。",
+            "若升温继续放大，最高温上沿仍可小幅上修。",
         )
     else:
         _push_focus_candidate(

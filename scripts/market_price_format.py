@@ -37,5 +37,5 @@ def format_price_cents(value: Any, *, tick_cents: float | None = None, none_text
     cents = numeric * 100.0
     tick = float(tick_cents) if tick_cents is not None else infer_market_tick_cents(value)
     if tick <= 0.1 + 1e-9:
-        return f"{cents:.1f}¢"
+        return f"{cents:.1f}".rstrip("0").rstrip(".") + "¢"
     return f"{int(round(cents))}¢"

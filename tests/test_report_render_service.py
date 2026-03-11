@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -8,7 +9,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from report_render_service import choose_section_text  # noqa: E402
+from report_render_service import _natural_flow_chain_line, choose_section_text  # noqa: E402
 
 
 def _snapshot_template() -> dict:
@@ -19,7 +20,11 @@ def _snapshot_template() -> dict:
                 "- **主导机制**：低层混合仍在加深。",
                 "- 午后低层偏南风还能继续托住升温。",
                 "- 云量约束不强，但后段上冲空间有限。",
-            ]
+            ],
+            "summary": {
+                "pathway": "低层偏暖输送（850-925hPa）更明确，若云量放开，升温会更顺。",
+                "impact": "更可能比原先预报略高；影响会直接落在峰值窗。",
+            },
         },
         "boundary_layer_regime": {
             "headline": "低层混合仍在加深，后段更要看偏南风能否继续稳住。",
@@ -42,13 +47,14 @@ def _snapshot_template() -> dict:
             ],
         },
         "weather_posterior": {"event_probs": {}},
+        "posterior_feature_vector": {"time_phase": {"hours_to_peak": 2.5}},
         "quality_snapshot": {"scores": {"confidence_label": "medium"}},
         "condition_state": {},
     }
 
 
 class ReportRenderServiceTest(unittest.TestCase):
-    def test_compact_synoptic_becomes_single_sentence_near_window(self) -> None:
+    def test_same_day_near_window_puts_background_first_and_keeps_original_metar_block(self) -> None:
         text = choose_section_text(
             primary_window={
                 "peak_local": "2026-03-09T14:00",
@@ -56,70 +62,254 @@ class ReportRenderServiceTest(unittest.TestCase):
                 "end_local": "2026-03-09T15:00",
                 "peak_temp_c": 30.0,
             },
-            metar_text="- 当前实况平稳。",
-            metar_diag={},
+            metar_text="• **🌡️ 气温**：28.4°C（较上一报 +0.6°C）",
+            metar_diag={
+                "station_icao": "NZWN",
+                "latest_report_local": "2026-03-09T11:30:00+00:00",
+                "latest_temp": 28.4,
+                "observed_max_temp_c": 28.4,
+                "observed_max_time_local": "2026-03-09T11:30:00+00:00",
+                "latest_wdir": 180,
+                "latest_wspd": 8,
+                "latest_cloud_tokens": ["SCT025"],
+                "temp_trend_1step_c": 0.6,
+            },
             polymarket_event_url="",
             compact_synoptic=True,
             analysis_snapshot=_snapshot_template(),
         )
 
-        synoptic_block = text.split("\n\n", 1)[0]
-        self.assertTrue(synoptic_block.startswith("🧭 环流形势："))
-        self.assertNotIn("\n", synoptic_block)
-        self.assertNotIn("**环流形势对最高温影响**", synoptic_block)
-        self.assertNotIn("**主导机制**", synoptic_block)
-        self.assertIn("低层混合仍在加深，后段更要看偏南风能否继续稳住", synoptic_block)
+        first_block = text.split("\n\n", 1)[0]
+        self.assertTrue(first_block.startswith("🧭 背景："))
+        self.assertIn("Wellington", first_block)
+        self.assertIn("📡 **最新实况分析（METAR）**", text)
+        self.assertIn("较上一报 +0.6°C", text)
+        self.assertNotIn("⚠️ 关注", text)
+        self.assertNotIn("**环流形势对最高温影响**", text)
+        self.assertNotIn("**主导机制**", text)
 
-    def test_non_compact_synoptic_keeps_structured_block(self) -> None:
+    def test_far_window_prioritizes_synoptic_and_pushes_obs_to_reference(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["posterior_feature_vector"]["time_phase"]["hours_to_peak"] = 18.0
+        snapshot["temp_phase_decision"] = {"display_phase": "far"}
+        snapshot["peak_data"]["summary"]["phase_now"] = "far"
+        snapshot["boundary_layer_regime"]["layer_summary"] = "低层空气不太容易完全混匀，午后升温更要看升温势头能否维持。"
+        snapshot["synoptic_summary"]["summary"]["pathway"] = "暂未识别到单独可追踪的近站系统。"
+        snapshot["synoptic_summary"]["summary"]["impact"] = "最高温倾向略偏下沿。"
+
         text = choose_section_text(
             primary_window={
-                "peak_local": "2026-03-09T14:00",
-                "start_local": "2026-03-09T13:00",
-                "end_local": "2026-03-09T15:00",
+                "peak_local": "2026-03-10T14:00",
+                "start_local": "2026-03-10T13:00",
+                "end_local": "2026-03-10T15:00",
                 "peak_temp_c": 30.0,
             },
             metar_text="- 当前实况平稳。",
-            metar_diag={},
-            polymarket_event_url="",
-            compact_synoptic=False,
-            analysis_snapshot=_snapshot_template(),
-        )
-
-        synoptic_block = text.split("\n\n", 1)[0]
-        self.assertIn("🧭 **环流形势对最高温影响**", synoptic_block)
-        self.assertIn("**主导机制**", synoptic_block)
-
-    def test_far_window_downgrades_metar_and_moves_it_after_forecast(self) -> None:
-        snapshot = _snapshot_template()
-        snapshot["temp_phase_decision"] = {"display_phase": "far"}
-        snapshot["peak_data"]["summary"]["phase_now"] = "far"
-
-        text = choose_section_text(
-            primary_window={
-                "peak_local": "2026-03-11T14:00",
-                "start_local": "2026-03-11T13:00",
-                "end_local": "2026-03-11T15:00",
-                "peak_temp_c": 30.0,
-            },
-            metar_text="- 这里是完整 METAR 逐项分析。",
             metar_diag={
-                "latest_report_local": "2026-03-09T09:30:00+00:00",
+                "station_icao": "RJTT",
+                "latest_report_local": "2026-03-09T20:00:00+00:00",
                 "latest_temp": 21.0,
                 "latest_wdir": 180,
                 "latest_wspd": 9,
-                "latest_cloud_layers": "SCT025(疏云2500ft/762m)",
+                "latest_cloud_tokens": ["SCT025"],
+                "historical_context": {
+                    "summary_lines": [
+                        "站点背景摘要：峰值偏早，后段常见的是锁温或回落，而不是持续上冲。",
+                    ]
+                },
             },
             polymarket_event_url="",
             compact_synoptic=False,
             analysis_snapshot=snapshot,
         )
 
-        self.assertIn("📡 **当前实况参考（降级）**", text)
-        self.assertNotIn("📡 **最新实况分析（METAR）**", text)
-        self.assertNotIn("**实况分析**", text)
-        self.assertNotIn("下一报", text)
-        self.assertNotIn("未来20-40分钟", text)
-        self.assertLess(text.index("📈 **峰值窗口判断**"), text.index("📡 **当前实况参考（降级）**"))
+        first_block = text.split("\n\n", 1)[0]
+        self.assertTrue(first_block.startswith("🧭 环流："))
+        self.assertTrue(
+            "Tokyo当前更接近混合尚未充分建立的结构" in first_block
+            or "Tokyo当前主要矛盾在于低层风向切换时点" in first_block
+        )
+        self.assertIn("站点历史上更常见的是偏早见顶", first_block)
+        self.assertNotIn("暂未识别到单独可追踪的近站系统", first_block)
+        self.assertIn("📡 当前实况：", text)
+        self.assertNotIn("升温转弱", text)
+        self.assertLess(text.index("📈 **峰值窗口判断**"), text.index("📡 当前实况："))
+
+    def test_near_window_drops_generic_background_when_no_clear_signal(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["boundary_layer_regime"]["headline"] = "当前更像低层风场和午后升温效率共同作用，先看后段升温能否继续维持。"
+        snapshot["synoptic_summary"]["summary"]["pathway"] = "暂未识别到单独可追踪的近站系统。"
+        snapshot["synoptic_summary"]["summary"]["impact"] = "暂时看不出明显偏高或偏低；短时改写幅度有限。"
+
+        text = choose_section_text(
+            primary_window={
+                "peak_local": "2026-03-09T14:00",
+                "start_local": "2026-03-09T13:00",
+                "end_local": "2026-03-09T15:00",
+                "peak_temp_c": 30.0,
+            },
+            metar_text="- 这里是完整 METAR 逐项分析。",
+            metar_diag={
+                "station_icao": "NZWN",
+                "latest_report_local": "2026-03-09T11:30:00+00:00",
+                "latest_temp": 21.0,
+                "observed_max_temp_c": 21.0,
+                "observed_max_time_local": "2026-03-09T11:30:00+00:00",
+                "latest_wdir": 180,
+                "latest_wspd": 9,
+                "latest_cloud_tokens": ["SCT025"],
+            },
+            polymarket_event_url="",
+            compact_synoptic=False,
+            analysis_snapshot=snapshot,
+        )
+
+        self.assertTrue(text.startswith("📡 **最新实况分析（METAR）**"))
+        self.assertNotIn("🧭 背景：", text)
+
+    def test_near_window_drops_background_when_only_generic_mechanism_exists(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["boundary_layer_regime"]["headline"] = "当前更像低层混合仍在加深，后面主要看混合层还能不能继续做深。"
+        snapshot["synoptic_summary"]["summary"]["pathway"] = "低层混合仍在加深。"
+        snapshot["synoptic_summary"]["summary"]["impact"] = "短时改写幅度有限。"
+
+        text = choose_section_text(
+            primary_window={
+                "peak_local": "2026-03-09T14:00",
+                "start_local": "2026-03-09T13:00",
+                "end_local": "2026-03-09T15:00",
+                "peak_temp_c": 30.0,
+            },
+            metar_text="- 这里是完整 METAR 逐项分析。",
+            metar_diag={
+                "station_icao": "NZWN",
+                "latest_report_local": "2026-03-09T11:30:00+00:00",
+                "latest_temp": 21.0,
+                "observed_max_temp_c": 21.0,
+                "observed_max_time_local": "2026-03-09T11:30:00+00:00",
+                "latest_wdir": 180,
+                "latest_wspd": 9,
+                "latest_cloud_tokens": ["SCT025"],
+            },
+            polymarket_event_url="",
+            compact_synoptic=False,
+            analysis_snapshot=snapshot,
+        )
+
+        self.assertTrue(text.startswith("📡 **最新实况分析（METAR）**"))
+        self.assertNotIn("🧭 背景：", text)
+
+    def test_natural_flow_chain_line_avoids_mixing_attention_wrapper_with_full_mechanism_clause(self) -> None:
+        line = _natural_flow_chain_line("Munich", "云量演变仍是关键变量", "午后上沿更容易被压住")
+        self.assertEqual(line, "• Munich当前云量演变仍是关键变量。")
+        self.assertNotIn("Munich当前主要关注云量演变仍是关键变量", line)
+
+    def test_range_rationale_is_inserted_before_polymarket_block(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["synoptic_summary"]["summary"]["pathway"] = "锋后偏南气流仍在。"
+        snapshot["synoptic_summary"]["summary"]["impact"] = "午后上冲空间偏受限。"
+        snapshot["peak_data"]["summary"]["ranges"]["display"] = {"lo": 16.4, "hi": 18.4}
+        snapshot["peak_data"]["summary"]["ranges"]["core"] = {"lo": 17.0, "hi": 18.4}
+        with unittest.mock.patch(
+            "report_render_service._build_polymarket_section",
+            return_value=(
+                "📈 **Polymarket 盘口与博弈**\n"
+                "**博弈区间**\n"
+                "  • **17°C（😇潜在Alpha）：Bid 4.8¢ | Ask 6.8¢**\n"
+                "  • **18°C（👍最有可能）：Bid 19¢ | Ask 20¢**"
+            ),
+        ):
+            text = choose_section_text(
+                primary_window={
+                    "peak_local": "2026-03-09T14:00",
+                    "start_local": "2026-03-09T13:00",
+                    "end_local": "2026-03-09T15:00",
+                    "peak_temp_c": 30.0,
+                },
+                metar_text="• **🌡️ 气温**：28.4°C（较上一报 +0.6°C）",
+                metar_diag={
+                    "station_icao": "NZWN",
+                    "latest_report_local": "2026-03-09T11:30:00+00:00",
+                    "latest_temp": 16.0,
+                    "observed_max_temp_c": 28.4,
+                    "observed_max_time_local": "2026-03-09T11:30:00+00:00",
+                    "temp_trend_1step_c": 0.0,
+                },
+                polymarket_event_url="https://polymarket.com/event/test",
+                analysis_snapshot=snapshot,
+            )
+
+        self.assertIn("**判断依据**", text)
+        self.assertIn("最新报还在 16°C 一带横着走", text)
+        self.assertIn("区间先放在 17.0~18.4°C，下沿留给偏冷回摆", text)
+        self.assertIn("在锋后偏南气流持续维持的前提下", text)
+        self.assertLess(text.index("**判断依据**"), text.index("📈 **Polymarket 盘口与博弈**"))
+
+    def test_transition_window_can_promote_to_near_obs_on_live_signal(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["posterior_feature_vector"]["time_phase"]["hours_to_peak"] = 8.0
+        snapshot["peak_data"]["summary"]["ranges"]["core"] = {"lo": 17.5, "hi": 18.3}
+        snapshot["synoptic_summary"]["summary"]["pathway"] = "锋后偏南气流仍在。"
+
+        text = choose_section_text(
+            primary_window={
+                "peak_local": "2026-03-09T18:00",
+                "start_local": "2026-03-09T16:00",
+                "end_local": "2026-03-09T20:00",
+                "peak_temp_c": 18.0,
+            },
+            metar_text="**最新报：14:00 Local**（上一报 13:30）",
+            metar_diag={
+                "station_icao": "NZWN",
+                "latest_report_local": "2026-03-09T14:00:00+00:00",
+                "latest_temp": 17.0,
+                "observed_max_temp_c": 17.0,
+                "observed_max_time_local": "2026-03-09T14:00:00+00:00",
+                "temp_trend_1step_c": 0.6,
+            },
+            polymarket_event_url="",
+            analysis_snapshot=snapshot,
+        )
+
+        self.assertIn("📡 **最新实况分析（METAR）**", text)
+        self.assertNotIn("📡 当前实况：", text)
+
+    def test_compact_spacing_keeps_reminder_and_focus_tight(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["peak_data"]["block"] = [
+            "🌡️ **可能最高温区间（仅供参考）**",
+            "• **17.5~18.8°C**（主看 17.5~18.3°C；峰值窗 16:00~20:00 Local）",
+        ]
+        with patch(
+            "report_render_service.build_report_focus_bundle",
+            return_value={
+                "vars_block": ["⚠️ **关注变量**（接近窗口）", "未来20-40分钟仍有再创新高空间，优先看温度斜率是否继续维持正值"],
+                "metar_analysis_lines": ["• 实况提醒：短时升温仍在延续。"],
+                "market_label_policy": {},
+            },
+        ):
+            text = choose_section_text(
+                primary_window={
+                    "peak_local": "2026-03-09T18:00",
+                    "start_local": "2026-03-09T16:00",
+                    "end_local": "2026-03-09T20:00",
+                    "peak_temp_c": 18.0,
+                },
+                metar_text="**最新报：14:00 Local**（上一报 13:30）",
+                metar_diag={
+                    "station_icao": "NZWN",
+                    "latest_report_local": "2026-03-09T14:00:00+00:00",
+                    "latest_temp": 18.0,
+                    "observed_max_temp_c": 18.0,
+                    "observed_max_time_local": "2026-03-09T14:00:00+00:00",
+                    "temp_trend_1step_c": 0.6,
+                },
+                polymarket_event_url="",
+                analysis_snapshot=snapshot,
+            )
+
+        self.assertNotIn("\n\n• 实况提醒：", text)
+        self.assertNotIn("Local）\n\n⚠️ 关注：", text)
 
 
 if __name__ == "__main__":

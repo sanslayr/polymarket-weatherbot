@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from market_implied_weather_signal import infer_market_implied_report_signal
@@ -13,6 +15,78 @@ def _load_catalog(polymarket_event_url: str) -> dict[str, Any]:
     if catalog.get("event_found") and (catalog.get("markets") or []):
         return catalog
     return build_market_catalog_snapshot(polymarket_event_url, force_refresh=True)
+
+
+def _to_dt(value: Any) -> datetime | None:
+    try:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _clone_state_snapshot(state: dict[str, dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for asset_id, snapshot in (state or {}).items():
+        if not isinstance(snapshot, dict):
+            continue
+        token = str(asset_id or "").strip()
+        if not token:
+            continue
+        out[token] = dict(snapshot)
+    return out
+
+
+def _state_has_book_data(state: dict[str, dict[str, Any]] | None) -> bool:
+    for snapshot in (state or {}).values():
+        if not isinstance(snapshot, dict):
+            continue
+        if snapshot.get("best_bid") is not None or snapshot.get("best_ask") is not None or snapshot.get("last_trade_price") is not None:
+            return True
+    return False
+
+
+def _signal_price_floor() -> float:
+    try:
+        return max(0.0, float(os.getenv("MARKET_SIGNAL_PRICE_FLOOR", "0.02") or "0.02"))
+    except Exception:
+        return 0.02
+
+
+def _monitor_diagnostics(
+    *,
+    subscribed_asset_ids: list[str],
+    stream_result: dict[str, Any],
+) -> dict[str, Any]:
+    baseline_state = _clone_state_snapshot(stream_result.get("baseline_state") or {})
+    final_state = _clone_state_snapshot(stream_result.get("state") or {})
+    baseline_has_book_data = _state_has_book_data(baseline_state)
+    final_has_book_data = _state_has_book_data(final_state)
+    diagnostics = {
+        "subscribed_asset_count": len([item for item in subscribed_asset_ids if str(item).strip()]),
+        "baseline_asset_count": len(baseline_state),
+        "final_asset_count": len(final_state),
+        "message_count": len(stream_result.get("messages") or []),
+        "baseline_has_book_data": baseline_has_book_data,
+        "final_has_book_data": final_has_book_data,
+        "triggered_payload_present": bool(stream_result.get("triggered_payload")),
+    }
+    if not diagnostics["subscribed_asset_count"]:
+        diagnostics["status"] = "no_subscriptions"
+        diagnostics["ok"] = False
+        return diagnostics
+    if not (baseline_has_book_data or final_has_book_data):
+        diagnostics["status"] = "no_market_data"
+        diagnostics["ok"] = False
+        return diagnostics
+    diagnostics["status"] = "ok"
+    diagnostics["ok"] = True
+    return diagnostics
 
 
 def build_bucket_snapshots(
@@ -86,6 +160,7 @@ def run_market_monitor_cycle(
     )
     subscribed = list(dict.fromkeys((plan.get("core_watch_asset_ids") or []) + (plan.get("upside_scan_asset_ids") or [])))
     stream_result = stream_market_state(asset_ids=subscribed, duration_seconds=stream_seconds) if subscribed else {"messages": [], "state": {}}
+    monitor_diagnostics = _monitor_diagnostics(subscribed_asset_ids=subscribed, stream_result=stream_result)
     bucket_snapshots = build_bucket_snapshots(
         market_catalog_snapshot=catalog,
         current_state=stream_result.get("state") or {},
@@ -95,12 +170,16 @@ def run_market_monitor_cycle(
         bucket_snapshots=bucket_snapshots,
         scheduled_report_utc=scheduled_report_utc,
         latest_observed_temp_c=observed_max_temp_c,
+        price_floor=_signal_price_floor(),
     )
     return {
         "catalog": catalog,
         "subscription_plan": plan,
         "stream_result": stream_result,
         "bucket_snapshots": bucket_snapshots,
+        "monitor_ok": bool(monitor_diagnostics.get("ok")),
+        "monitor_status": str(monitor_diagnostics.get("status") or "unknown"),
+        "monitor_diagnostics": monitor_diagnostics,
         "signal": signal,
     }
 
@@ -113,7 +192,7 @@ def run_market_monitor_event_window(
     daily_peak_state: str = "open",
     stream_seconds: float = 120.0,
     baseline_seconds: float = 2.0,
-    core_only: bool = True,
+    core_only: bool = False,
 ) -> dict[str, Any]:
     catalog = _load_catalog(polymarket_event_url)
     plan = build_market_subscription_plan(
@@ -124,18 +203,35 @@ def run_market_monitor_event_window(
         core_only=core_only,
     )
     subscribed = list(dict.fromkeys((plan.get("core_watch_asset_ids") or []) + (plan.get("upside_scan_asset_ids") or [])))
+    scheduled_dt = _to_dt(scheduled_report_utc)
+    trigger_window_starts_at = scheduled_dt + timedelta(seconds=30) if scheduled_dt is not None else None
+    reference_state: dict[str, dict[str, Any]] | None = None
 
     def _on_update(payload: dict[str, Any]) -> dict[str, Any] | None:
+        nonlocal reference_state
+        current_state = _clone_state_snapshot(payload.get("current_state") or {})
+        observed_at_dt = _to_dt(payload.get("observed_at_utc"))
+        if (
+            trigger_window_starts_at is not None
+            and observed_at_dt is not None
+            and observed_at_dt < trigger_window_starts_at
+            and _state_has_book_data(current_state)
+        ):
+            # Keep the latest pre-report snapshot as the baseline for the first post-report move.
+            reference_state = current_state
+            return None
+        previous_state = reference_state or _clone_state_snapshot(payload.get("baseline_state") or {})
         bucket_snapshots = build_bucket_snapshots(
             market_catalog_snapshot=catalog,
-            current_state=payload.get("current_state") or {},
-            previous_state=payload.get("baseline_state") or {},
+            current_state=current_state,
+            previous_state=previous_state,
         )
         signal = infer_market_implied_report_signal(
             bucket_snapshots=bucket_snapshots,
             scheduled_report_utc=scheduled_report_utc,
             now_utc=payload.get("observed_at_utc"),
             latest_observed_temp_c=observed_max_temp_c,
+            price_floor=_signal_price_floor(),
         )
         if signal.get("triggered"):
             return {
@@ -154,21 +250,28 @@ def run_market_monitor_event_window(
         if subscribed
         else {"messages": [], "state": {}, "baseline_state": {}, "triggered_payload": None}
     )
+    monitor_diagnostics = _monitor_diagnostics(subscribed_asset_ids=subscribed, stream_result=stream_result)
     triggered_payload = dict(stream_result.get("triggered_payload") or {})
+    effective_previous_state = reference_state or _clone_state_snapshot(stream_result.get("baseline_state") or {})
     bucket_snapshots = triggered_payload.get("bucket_snapshots") or build_bucket_snapshots(
         market_catalog_snapshot=catalog,
         current_state=stream_result.get("state") or {},
-        previous_state=stream_result.get("baseline_state") or {},
+        previous_state=effective_previous_state,
     )
     signal = triggered_payload.get("signal") or infer_market_implied_report_signal(
         bucket_snapshots=bucket_snapshots,
         scheduled_report_utc=scheduled_report_utc,
         latest_observed_temp_c=observed_max_temp_c,
+        price_floor=_signal_price_floor(),
     )
     return {
         "catalog": catalog,
         "subscription_plan": plan,
         "stream_result": stream_result,
         "bucket_snapshots": bucket_snapshots,
+        "reference_state": effective_previous_state,
+        "monitor_ok": bool(monitor_diagnostics.get("ok")),
+        "monitor_status": str(monitor_diagnostics.get("status") or "unknown"),
+        "monitor_diagnostics": monitor_diagnostics,
         "signal": signal,
     }

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Runtime controls for /look inflight dedupe, scope-local replay, and delivery markers."""
+"""Runtime controls for /look adaptive cooldown, inflight dedupe, and delivery markers."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -12,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from look_group_policy import LookGroupPolicy, resolve_look_group_policy
+from look_group_policy import LookGroupPolicy, UserCooldownPolicy, resolve_look_group_policy
 
 STATE_DIR = Path(os.getenv("LOOK_RUNTIME_STATE_DIR") or "/tmp/polymarket-weatherbot-look-control")
 PENDING_DELIVERY_DIR = STATE_DIR / "pending-deliveries"
@@ -106,6 +107,14 @@ class PreflightDecision:
     text: str | None = None
 
 
+@dataclass(frozen=True)
+class UserCooldownStatus:
+    remaining_sec: int
+    required_gap_sec: int
+    recent_count: int
+    mode: str
+
+
 class LookRuntimeController:
     def __init__(self, *, context: LookRuntimeContext, compute_key: str, query_label: str | None = None) -> None:
         self.context = context
@@ -122,16 +131,13 @@ class LookRuntimeController:
         if not self._rate_limit_active():
             return PreflightDecision(True, None)
 
-        cooldown_left = self._user_cooldown_remaining()
-        if cooldown_left > 0:
-            return PreflightDecision(
-                False,
-                f"⏳ 请求过快，用户级冷却剩余 {cooldown_left} 秒。请稍后再试。",
-            )
-
         inflight_result = self._wait_for_inflight()
         if inflight_result is not None:
             return PreflightDecision(False, inflight_result)
+
+        cooldown = self._user_cooldown_status()
+        if cooldown.remaining_sec > 0:
+            return PreflightDecision(False, self._format_cooldown_block_message(cooldown))
 
         try:
             self._claim_inflight()
@@ -163,26 +169,41 @@ class LookRuntimeController:
             return True
         return bool(self.policy.rate_limit.apply_in_direct)
 
-    def _user_cooldown_remaining(self) -> int:
-        if not self.context.sender_id or self.policy.rate_limit.user_cooldown_sec <= 0:
-            return 0
-        payload = _read_json(_user_state_path(self._user_scope_key()))
-        if not payload:
-            return 0
-        last_started = _safe_float(payload.get("last_started_at"))
-        if last_started is None:
-            return 0
-        remaining = int(self.policy.rate_limit.user_cooldown_sec - (self.now - last_started))
-        return remaining if remaining > 0 else 0
+    def _user_cooldown_status(self) -> UserCooldownStatus:
+        cooldown_policy = self.policy.rate_limit.user_cooldown
+        if not self.context.sender_id:
+            return UserCooldownStatus(remaining_sec=0, required_gap_sec=0, recent_count=0, mode=cooldown_policy.mode)
+
+        starts = self._load_recent_user_starts(cooldown_policy)
+        if not starts:
+            return UserCooldownStatus(remaining_sec=0, required_gap_sec=0, recent_count=0, mode=cooldown_policy.mode)
+
+        last_started = starts[-1]
+        elapsed_since_last = max(0.0, self.now - last_started)
+        required_gap = self._required_user_gap_sec(cooldown_policy, recent_count=len(starts))
+        if required_gap <= 0:
+            return UserCooldownStatus(remaining_sec=0, required_gap_sec=0, recent_count=len(starts), mode=cooldown_policy.mode)
+        remaining = int(math.ceil(required_gap - elapsed_since_last))
+        return UserCooldownStatus(
+            remaining_sec=remaining if remaining > 0 else 0,
+            required_gap_sec=required_gap,
+            recent_count=len(starts),
+            mode=cooldown_policy.mode,
+        )
 
     def _touch_user_state(self) -> None:
         if not self.context.sender_id:
             return
+        cooldown_policy = self.policy.rate_limit.user_cooldown
+        starts = self._load_recent_user_starts(cooldown_policy)
+        starts.append(self.now)
+        starts = self._prune_recent_user_starts(starts, cooldown_policy, now_ts=self.now)
         _write_json_atomic(
             _user_state_path(self._user_scope_key()),
             {
                 "sender_scope": self._user_scope_key(),
                 "last_started_at": self.now,
+                "recent_started_at": starts[-12:],
                 "compute_key": self.compute_key,
                 "policy_id": self.policy.policy_id,
             },
@@ -256,6 +277,12 @@ class LookRuntimeController:
 
     def deliver_unchanged_notice(self, payload: dict[str, Any] | None, *, notice: str, fallback_text: str | None = None) -> str:
         return self.deliver_cached_or_notice(payload, notice=notice, fallback_text=fallback_text)
+
+    def should_emit_unchanged_notice(self, payload: dict[str, Any] | None, *, fallback_text: str | None = None) -> bool:
+        normalized = self._normalize_payload(payload, fallback_text=fallback_text)
+        if not normalized:
+            return False
+        return self._current_chat_already_received_payload(normalized)
 
     def _write_scoped_result(self, text: str, *, result_meta: dict[str, Any] | None = None, updated_at: float | None = None) -> None:
         stamp = float(updated_at if updated_at is not None else time.time())
@@ -446,11 +473,60 @@ class LookRuntimeController:
         return f"{RESULT_SCHEMA_VERSION}|telegram-groups-shared|{self.compute_key}"
 
     def _user_scope_key(self) -> str:
-        scope = self.policy.rate_limit.user_cooldown_scope
+        scope = self.policy.rate_limit.user_cooldown.scope
         sender = str(self.context.sender_id or "").strip()
         if scope == "sender-per-group" and self.context.peer_id:
             return f"{sender}|{self.context.peer_id}"
         return sender
+
+    def _format_cooldown_block_message(self, cooldown: UserCooldownStatus) -> str:
+        if cooldown.mode == "adaptive":
+            return (
+                f"⏳ 请求过快，当前动态冷却剩余 {cooldown.remaining_sec} 秒。"
+                f"当前作用域近窗内已触发 {cooldown.recent_count} 次 /look，当前冷却档位 {cooldown.required_gap_sec} 秒。"
+            )
+        return f"⏳ 请求过快，用户级冷却剩余 {cooldown.remaining_sec} 秒。请稍后再试。"
+
+    def _load_recent_user_starts(self, cooldown_policy: UserCooldownPolicy) -> list[float]:
+        payload = _read_json(_user_state_path(self._user_scope_key())) or {}
+        history: list[float] = []
+        raw_history = payload.get("recent_started_at")
+        if isinstance(raw_history, list):
+            for item in raw_history:
+                ts = _safe_float(item)
+                if ts is not None:
+                    history.append(ts)
+        if not history:
+            last_started = _safe_float(payload.get("last_started_at"))
+            if last_started is not None:
+                history.append(last_started)
+        return self._prune_recent_user_starts(history, cooldown_policy, now_ts=self.now)
+
+    def _prune_recent_user_starts(
+        self,
+        starts: list[float],
+        cooldown_policy: UserCooldownPolicy,
+        *,
+        now_ts: float,
+    ) -> list[float]:
+        window_sec = self._history_window_sec(cooldown_policy)
+        if window_sec > 0:
+            starts = [ts for ts in starts if ts >= 0 and (now_ts - ts) <= window_sec]
+        starts.sort()
+        return starts[-12:]
+
+    def _history_window_sec(self, cooldown_policy: UserCooldownPolicy) -> int:
+        if cooldown_policy.mode == "adaptive":
+            return max(cooldown_policy.window_sec, cooldown_policy.max_sec, cooldown_policy.base_sec)
+        return max(cooldown_policy.fixed_sec, 0)
+
+    def _required_user_gap_sec(self, cooldown_policy: UserCooldownPolicy, *, recent_count: int) -> int:
+        if cooldown_policy.mode == "fixed":
+            return max(0, cooldown_policy.fixed_sec)
+        max_sec = max(cooldown_policy.base_sec, cooldown_policy.max_sec)
+        penalty_steps = max(0, recent_count - cooldown_policy.burst_soft_limit)
+        required = cooldown_policy.base_sec + penalty_steps * cooldown_policy.step_sec
+        return min(max_sec, max(0, required))
 
     def _format_cached_result_notice(self, payload: dict[str, Any] | None, *, fallback: str) -> str:
         label = str((payload or {}).get("query_label") or self.query_label or "").strip()

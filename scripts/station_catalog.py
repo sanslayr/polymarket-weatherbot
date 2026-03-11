@@ -174,8 +174,8 @@ def common_alias_examples(station_csv: Path = DEFAULT_STATION_CSV) -> list[str]:
 
 
 def default_model_for_station(st: Station) -> str:
-    m = (os.getenv("LOOK_DEFAULT_MODEL", "gfs") or "gfs").strip().lower()
-    return m if m in {"gfs", "ecmwf"} else "gfs"
+    m = (os.getenv("LOOK_DEFAULT_MODEL", "ecmwf") or "ecmwf").strip().lower()
+    return m if m in {"gfs", "ecmwf"} else "ecmwf"
 
 
 def station_timezone_name(st: Station) -> str:

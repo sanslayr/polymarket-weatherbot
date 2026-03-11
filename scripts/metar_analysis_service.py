@@ -752,7 +752,7 @@ def metar_observation_block(
     if bias is not None and p_bias is not None:
         b_disp = (_to_temp_unit(float(bias)) - _to_temp_unit(0.0))
         b_txt = f"{b_disp:+.1f}°{unit}"
-        lines.append(f"同小时模式偏差：温度 {b_txt}；气压 {p_bias:+.1f}hPa")
+        lines.append(f"• 同小时模式偏差：温度 {b_txt}；气压 {p_bias:+.1f}hPa")
 
     t_trend = None
     if prev is not None:
@@ -943,7 +943,7 @@ def metar_observation_block(
             cloud_signal = ("回补" in cloud_txt) or ("开窗" in cloud_txt) or ("减少" in cloud_txt) or ("增加" in cloud_txt)
 
             if temp_signal or press_signal or wind_signal or cloud_signal:
-                if dt_now >= 0.5 and dt_prev >= 0.2:
+                if dt_now >= 0.8 and dt_prev >= 0.4 and (cloud_signal or wind_signal or press_signal):
                     reminder_bits.append("短时升温仍在延续")
                 elif dt_now <= -0.5 and dt_prev <= -0.2:
                     reminder_bits.append("温度有回落迹象")
@@ -977,7 +977,7 @@ def metar_observation_block(
         text = str(item).strip()
         if text and text not in deduped_reminders:
             deduped_reminders.append(text)
-    if deduped_reminders == ["温度在窄幅震荡"]:
+    if deduped_reminders in (["温度在窄幅震荡"], ["云量有回补"], ["云量在转疏"]):
         deduped_reminders = []
 
     if deduped_reminders:

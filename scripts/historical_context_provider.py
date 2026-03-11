@@ -7,6 +7,7 @@ import csv
 import gzip
 import math
 import os
+import pickle
 from collections import defaultdict
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -22,6 +23,8 @@ from synoptic_adjustment_context import branch_alignment, build_synoptic_adjustm
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REFERENCE_DIR = ROOT / "data" / "historical_reference"
 LEGACY_CACHE_REFERENCE_DIR = ROOT / "cache" / "historical_reference"
+RUNTIME_HISTORICAL_CACHE_DIR = ROOT / "cache" / "runtime" / "historical_context"
+STATION_HOURLY_INDEX_CACHE_DIR = RUNTIME_HISTORICAL_CACHE_DIR / "station_hourly_index"
 ARCHIVE_REFERENCE_CANDIDATES = (
     DEFAULT_REFERENCE_DIR,
     LEGACY_CACHE_REFERENCE_DIR,
@@ -54,6 +57,8 @@ RAW_CLOUD_COVER_MAP = {
     "10": 0.50,
 }
 
+CITY_PROFILE_DOCS_DIR = ROOT / "docs" / "operations" / "city-background" / "profiles"
+
 FEATURE_CN_MAP = {
     "late-day surge risk": "末段冲高倾向",
     "large diurnal swing": "日较差偏大",
@@ -73,6 +78,11 @@ FEATURE_CN_MAP = {
 def historical_context_enabled() -> bool:
     raw = str(os.getenv("LOOK_ENABLE_HISTORICAL_CONTEXT", "1")).strip().lower()
     return raw not in {"0", "false", "off", "no"}
+
+
+def historical_hourly_matching_enabled() -> bool:
+    raw = str(os.getenv("LOOK_ENABLE_HISTORICAL_HOURLY_MATCHING", "0")).strip().lower()
+    return raw in {"1", "true", "on", "yes"}
 
 
 def reference_dir() -> Path | None:
@@ -131,6 +141,63 @@ def archive_raw_dir() -> Path | None:
     return None
 
 
+def _station_hourly_index_cache_path(station_id: str) -> Path:
+    return STATION_HOURLY_INDEX_CACHE_DIR / f"{str(station_id or '').upper()}.pkl"
+
+
+def _station_hourly_index_signature(paths: list[Path]) -> tuple[int, int] | None:
+    if not paths:
+        return None
+    latest_mtime_ns = max(int(path.stat().st_mtime_ns) for path in paths)
+    return len(paths), latest_mtime_ns
+
+
+def _read_station_hourly_index_cache(station_id: str, signature: tuple[int, int] | None) -> dict[tuple[str, int], tuple[dict[str, Any], ...]] | None:
+    if signature is None:
+        return None
+    path = _station_hourly_index_cache_path(station_id)
+    try:
+        with path.open("rb") as handle:
+            payload = pickle.load(handle)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("station_id") or "").upper() != str(station_id or "").upper():
+        return None
+    if tuple(payload.get("signature") or ()) != signature:
+        return None
+    index = payload.get("index")
+    return index if isinstance(index, dict) else None
+
+
+def _write_station_hourly_index_cache(
+    station_id: str,
+    signature: tuple[int, int] | None,
+    index: dict[tuple[str, int], tuple[dict[str, Any], ...]],
+) -> None:
+    if signature is None:
+        return
+    try:
+        STATION_HOURLY_INDEX_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _station_hourly_index_cache_path(station_id)
+        tmp = path.with_suffix(f"{path.suffix}.tmp-{os.getpid()}")
+        with tmp.open("wb") as handle:
+            pickle.dump(
+                {
+                    "schema": "historical-hourly-index-v1",
+                    "station_id": str(station_id or "").upper(),
+                    "signature": signature,
+                    "index": index,
+                },
+                handle,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+        os.replace(tmp, path)
+    except Exception:
+        return
+
+
 def _has_live_observation_context(metar_diag: dict[str, Any]) -> bool:
     if bool((metar_diag or {}).get("metar_unavailable")):
         return False
@@ -139,6 +206,115 @@ def _has_live_observation_context(metar_diag: dict[str, Any]) -> bool:
         signals.get(key) is not None
         for key in ("latest_temp_c", "dewpoint_c", "latest_rh", "latest_wspd_kt", "cloud_effective_cover")
     )
+
+
+def _station_profile_doc_path(station_id: str) -> Path | None:
+    station_key = str(station_id or "").upper()
+    if not station_key:
+        return None
+    matches = sorted(CITY_PROFILE_DOCS_DIR.glob(f"{station_key}_*.md"))
+    return matches[0] if matches else None
+
+
+def _extract_profile_section_lines(text: str, heading_prefix: str, *, limit: int = 3) -> list[str]:
+    lines = str(text or "").splitlines()
+    capture = False
+    out: list[str] = []
+    for raw in lines:
+        line = str(raw or "").rstrip()
+        if line.startswith("## "):
+            capture = line.startswith(heading_prefix)
+            if not capture and out:
+                break
+            continue
+        if not capture:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("- ", "* ")):
+            item = stripped[2:].strip()
+        elif stripped and stripped[0].isdigit():
+            match = stripped.split(". ", 1)
+            item = match[1].strip() if len(match) == 2 and match[0].isdigit() else ""
+        else:
+            continue
+        if item:
+            out.append(item)
+        if len(out) >= limit:
+            break
+    return out
+
+
+@lru_cache(maxsize=64)
+def _load_station_profile_notes(station_id: str) -> dict[str, list[str]]:
+    path = _station_profile_doc_path(station_id)
+    if path is None or not path.exists():
+        return {"summary": [], "priority": []}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return {"summary": [], "priority": []}
+    return {
+        "summary": _extract_profile_section_lines(text, "## 1)", limit=3),
+        "priority": _extract_profile_section_lines(text, "## 13)", limit=3),
+    }
+
+
+def _build_profile_only_context(
+    station_key: str,
+    target_date: str,
+    station_prior: dict[str, str],
+    monthly_row: dict[str, str] | None,
+    live_regime: dict[str, Any],
+    synoptic_context: dict[str, Any] | None,
+    *,
+    site_tag: str | None,
+    terrain_tag: str | None,
+    factor_summary: str | None,
+) -> dict[str, Any]:
+    summary_lines: list[str] = []
+    if factor_summary:
+        summary_lines.append(f"站点固定因子：{factor_summary}")
+    elif site_tag or terrain_tag:
+        summary_lines.append(f"站点固定因子：{site_tag or terrain_tag}")
+    summary_lines.append(f"站点历史画像：{translate_special_features(station_prior.get('special_features'))}")
+    if monthly_row:
+        summary_lines.append(
+            "同月基线："
+            f"Tmax中位 {_fmt_c(_safe_float(monthly_row.get('tmax_median_c')))}，"
+            f"峰值时刻 {_fmt_hour(_safe_float(monthly_row.get('peak_hour_median')))}，"
+            f"午间低云 {_fmt_pct(_safe_float(monthly_row.get('midday_low_ceiling_share')))}"
+        )
+    profile_notes = _load_station_profile_notes(station_key)
+    for item in profile_notes.get("summary") or []:
+        summary_lines.append(f"站点背景摘要：{item}")
+    for item in profile_notes.get("priority") or []:
+        summary_lines.append(f"实况优先顺序：{item}")
+    return {
+        "available": True,
+        "mode": "profile_only",
+        "station_id": station_key,
+        "target_date": target_date,
+        "station_prior": station_prior,
+        "monthly_row": monthly_row,
+        "live_regime": live_regime,
+        "summary_lines": summary_lines,
+        "analog_summary_lines": [],
+        "branch_lines": [],
+        "analogs": [],
+        "weighted_reference": None,
+        "branch_assessment": {
+            "branch_mode": "profile_only",
+            "reference_strength": "none",
+            "reference_strength_cn": "画像参考",
+            "preferred_branch": "",
+            "preferred_branch_rationale": "当前已切到轻量 historical 模式，仅保留站点画像与月基线背景。",
+            "branch_details": [],
+        },
+        "adjustment_hint": "站点历史小时相似日匹配已短路，当前仅保留站点画像和月基线作背景参考。",
+        "synoptic_context": synoptic_context if isinstance(synoptic_context, dict) else {},
+    }
 
 
 def _is_humid_sticky(*, latest_temp: float | None, dewpoint: float | None, latest_rh: float | None) -> bool:
@@ -217,13 +393,18 @@ def _load_station_hourly_index(station_id: str) -> dict[tuple[str, int], tuple[d
     station_dir = base_dir / str(station_id or "").upper()
     if not station_dir.exists():
         return {}
+    raw_paths = sorted(station_dir.glob("*.csv.gz"))
+    signature = _station_hourly_index_signature(raw_paths)
+    cached = _read_station_hourly_index_cache(station_id, signature)
+    if cached is not None:
+        return cached
     try:
         zone = ZoneInfo(_station_timezone(station_id))
     except Exception:
         zone = ZoneInfo("UTC")
 
     grouped: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
-    for path in sorted(station_dir.glob("*.csv.gz")):
+    for path in raw_paths:
         with gzip.open(path, "rt", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             for raw in reader:
@@ -233,10 +414,12 @@ def _load_station_hourly_index(station_id: str) -> dict[tuple[str, int], tuple[d
                 key = (str(state["local_date"]), int(state["local_hour"]))
                 grouped[key].append(state)
 
-    return {
+    index = {
         key: tuple(sorted(value, key=lambda item: int(item.get("local_minute") or 0)))
         for key, value in grouped.items()
     }
+    _write_station_hourly_index_cache(station_id, signature, index)
+    return index
 
 
 def build_historical_context(
@@ -272,6 +455,32 @@ def build_historical_context(
         forecast_decision=forecast_decision,
         external_context=synoptic_context,
     )
+    if not historical_hourly_matching_enabled():
+        context = _build_profile_only_context(
+            station_key,
+            target_date,
+            station_prior,
+            monthly_row,
+            live_regime,
+            normalized_synoptic_context,
+            site_tag=site_tag,
+            terrain_tag=terrain_tag,
+            factor_summary=factor_summary,
+        )
+        if _has_live_observation_context(metar_diag):
+            context["summary_lines"].append(
+                "当前实况匹配："
+                f"{live_regime['primary_regime_cn']}（标签：{', '.join(live_regime['tags_cn']) or '过渡'}）"
+            )
+            context["summary_lines"].append("检索口径：当前为轻量模式，仅保留站点画像、月基线和实况标签背景。")
+        else:
+            context["summary_lines"].append(
+                "当前阶段：实况不足，按站点画像和预报背景提供轻量参考"
+                f"（路径：{_forecast_path_label(forecast_decision)}）"
+            )
+            context["summary_lines"].append("检索口径：当前为轻量模式，仅保留站点画像、月基线和环流背景。")
+        return context
+
     analogs = find_similar_days(
         station_key,
         target_date,

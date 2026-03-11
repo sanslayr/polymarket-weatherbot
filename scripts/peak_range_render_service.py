@@ -18,13 +18,11 @@ def render_peak_range_block(
     display_range = dict(ranges.get("display") or {})
     core_range = dict(ranges.get("core") or {})
     window = dict(ranges.get("window") or {})
-    skew_bucket = str(ranges.get("skew_bucket") or "neutral")
-    tail_note = str(ranges.get("tail_note") or "").strip()
     annotations = [str(item) for item in (summary.get("annotations") or []) if str(item).strip()]
     block = ["🌡️ **可能最高温区间（仅供参考）**"]
     if settled.get("active"):
         block.append(
-            f"- **{fmt_range_fn(float(settled.get('lo')), float(settled.get('hi')))}**（{str(settled.get('reason') or '')}）"
+            f"• **{fmt_range_fn(float(settled.get('lo')), float(settled.get('hi')))}**（{str(settled.get('reason') or '')}）"
         )
     else:
         disp_lo = float(display_range.get("lo"))
@@ -33,12 +31,10 @@ def render_peak_range_block(
         core_hi = float(core_range.get("hi"))
         window_label = str(window.get("label") or "峰值窗")
         window_text = str(window.get("text") or "")
-        if skew_bucket in {"upper_tail", "lower_tail"} and tail_note:
-            block.append(
-                f"- **{fmt_range_fn(disp_lo, disp_hi)}**（主看 {fmt_range_fn(core_lo, core_hi)}；{window_label} {window_text}；{tail_note}）"
-            )
+        if core_lo != disp_lo or core_hi != disp_hi:
+            block.append(f"• **{fmt_range_fn(disp_lo, disp_hi)}**（主看 {fmt_range_fn(core_lo, core_hi)}；{window_label} {window_text}）")
         else:
-            block.append(f"- **{fmt_range_fn(disp_lo, disp_hi)}**（{window_label} {window_text}）")
+            block.append(f"• **{fmt_range_fn(disp_lo, disp_hi)}**（{window_label} {window_text}）")
 
     block.extend(annotations)
     return block

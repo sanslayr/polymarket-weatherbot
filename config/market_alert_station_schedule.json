@@ -10,7 +10,7 @@
     "KMIA": {"cadence_min": 60, "minute_slots": [53]},
     "KORD": {"cadence_min": 60, "minute_slots": [51]},
     "KSEA": {"cadence_min": 60, "minute_slots": [53]},
-    "LLBG": {"cadence_min": 30, "minute_slots": [0, 30]},
+    "LLBG": {"cadence_min": 30, "minute_slots": [20, 50]},
     "LFPG": {"cadence_min": 30, "minute_slots": [0, 30]},
     "LTAC": {"cadence_min": 30, "minute_slots": [20, 50]},
     "NZWN": {"cadence_min": 30, "minute_slots": [0, 30]},

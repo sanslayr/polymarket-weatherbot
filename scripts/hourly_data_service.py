@@ -21,6 +21,7 @@ CACHE_TTL_HOURS = int(os.getenv("WEATHERBOT_HOURLY_CACHE_TTL_HOURS", "24") or "2
 OPENMETEO_TIMEOUT_SECONDS = float(os.getenv("WEATHERBOT_OPENMETEO_TIMEOUT_SECONDS", "3") or "3")
 OPENMETEO_BREAKER_SECONDS = int(os.getenv("OPENMETEO_BREAKER_SECONDS", "900") or "900")
 OPENMETEO_BREAKER_FILE = CACHE_DIR / "openmeteo_breaker.json"
+PRUNE_STAMP_FILE = CACHE_DIR / ".runtime_prune_stamp"
 HOURLY_REUSE_CACHE_FIRST = str(os.getenv("WEATHERBOT_HOURLY_REUSE_CACHE_FIRST", "1") or "1").strip().lower() in {
     "1",
     "true",
@@ -79,6 +80,55 @@ def _trip_openmeteo_breaker(reason: str = "429", seconds: int | None = None) -> 
         pass
 
 
+def _parse_prune_interval_seconds() -> int:
+    try:
+        return max(60, int(os.getenv("WEATHERBOT_RUNTIME_PRUNE_INTERVAL_SECONDS", "900") or "900"))
+    except Exception:
+        return 900
+
+
+def _prune_due(now: datetime) -> bool:
+    if not runtime_cache_enabled():
+        return False
+    try:
+        if not PRUNE_STAMP_FILE.exists():
+            return True
+        last = datetime.fromisoformat(PRUNE_STAMP_FILE.read_text(encoding="utf-8").strip().replace("Z", "+00:00"))
+        return (now - last) >= timedelta(seconds=_parse_prune_interval_seconds())
+    except Exception:
+        return True
+
+
+def _touch_prune_stamp(now: datetime) -> None:
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        PRUNE_STAMP_FILE.write_text(now.isoformat().replace("+00:00", "Z"), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _purge_dir_by_age(path: Path, *, suffixes: tuple[str, ...], max_age_hours: int) -> int:
+    removed = 0
+    if not path.exists() or not path.is_dir() or max_age_hours <= 0:
+        return removed
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=max_age_hours)
+    for p in path.rglob("*"):
+        try:
+            if not p.is_file():
+                continue
+            if suffixes and p.suffix.lower() not in suffixes:
+                continue
+            mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+            if mtime > cutoff:
+                continue
+            p.unlink(missing_ok=True)
+            removed += 1
+        except Exception:
+            continue
+    return removed
+
+
 def _cache_key(*parts: str) -> str:
     raw = "|".join(parts)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
@@ -86,6 +136,24 @@ def _cache_key(*parts: str) -> str:
 
 def _cache_path(kind: str, *parts: str) -> Path:
     return CACHE_DIR / f"{kind}_{_cache_key(*parts)}.json"
+
+
+def _hourly_cache_model_key(kind: str, model: str) -> str:
+    kind_norm = str(kind or "").strip().lower()
+    if kind_norm == "hourly":
+        return "openmeteo"
+    if kind_norm == "hourly_gfs":
+        return "gfs"
+    return str(model or "").strip().lower()
+
+
+def _hourly_cycle_model(kind: str, model: str) -> str:
+    kind_norm = str(kind or "").strip().lower()
+    if kind_norm == "hourly":
+        return "ecmwf"
+    if kind_norm == "hourly_gfs":
+        return "gfs"
+    return str(model or "").strip().lower()
 
 
 def _read_cache(
@@ -136,6 +204,8 @@ def prune_runtime_cache(max_age_hours: int = 24) -> None:
     if not CACHE_DIR.exists():
         return
     now = datetime.now(timezone.utc)
+    if not _prune_due(now):
+        return
 
     for p in CACHE_DIR.glob("*.json"):
         try:
@@ -156,6 +226,14 @@ def prune_runtime_cache(max_age_hours: int = 24) -> None:
             except Exception:
                 continue
 
+    ggrid_keep_h = int(os.getenv("GFS_GRID_CACHE_HOURS", str(grib_keep_h)) or str(grib_keep_h))
+    _purge_dir_by_age(CACHE_DIR / "gfs_grids", suffixes=(".grib2",), max_age_hours=ggrid_keep_h)
+
+    ecmwf_keep_h = int(os.getenv("ECMWF_OPEN_DATA_CACHE_HOURS", "24") or "24")
+    _purge_dir_by_age(CACHE_DIR / "ecmwf_open_data", suffixes=(".grib2",), max_age_hours=ecmwf_keep_h)
+
+    _touch_prune_stamp(now)
+
 
 def model_cycle_tag(model: str, now_utc: datetime) -> str:
     m = (model or "").strip().lower()
@@ -170,7 +248,7 @@ def model_cycle_tag(model: str, now_utc: datetime) -> str:
 
 
 def _get_cached_hourly_cycle(kind: str, st: Station, target_date: str, model: str, cycle_tag: str) -> dict[str, Any] | None:
-    return _read_cache(kind, st.icao, target_date, model.lower(), cycle_tag, allow_stale=True)
+    return _read_cache(kind, st.icao, target_date, _hourly_cache_model_key(kind, model), cycle_tag, allow_stale=True)
 
 
 def _get_cached_hourly_previous_cycles(
@@ -183,15 +261,16 @@ def _get_cached_hourly_previous_cycles(
     max_back: int = 3,
     max_age_hours: int | None = None,
 ) -> dict[str, Any] | None:
-    cfg = BSL.MODEL_CONFIGS.get((model or "").lower())
+    cycle_model = _hourly_cycle_model(kind, model)
+    cfg = BSL.MODEL_CONFIGS.get(cycle_model)
     cycle_h = int(getattr(cfg, "cycle_hours", 6) or 6)
     for back in range(1, max_back + 1):
-        prev_tag = model_cycle_tag(model, now_utc - timedelta(hours=cycle_h * back))
+        prev_tag = model_cycle_tag(cycle_model, now_utc - timedelta(hours=cycle_h * back))
         c = _read_cache(
             kind,
             st.icao,
             target_date,
-            model.lower(),
+            _hourly_cache_model_key(kind, model),
             prev_tag,
             allow_stale=True,
             max_age_hours=max_age_hours,
@@ -208,7 +287,7 @@ def _best_cached_hourly_payload(
     model: str,
     now_utc: datetime,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    cycle_tag = model_cycle_tag(model, now_utc)
+    cycle_tag = model_cycle_tag(_hourly_cycle_model(kind, model), now_utc)
     cached_cur = _get_cached_hourly_cycle(kind, st, target_date, model, cycle_tag)
     if cached_cur:
         return cached_cur, "current"
@@ -228,7 +307,8 @@ def _best_cached_hourly_payload(
 
 def fetch_hourly_openmeteo(st: Station, target_date: str, model: str) -> dict[str, Any]:
     now_utc = datetime.now(timezone.utc)
-    cycle_tag = model_cycle_tag(model, now_utc)
+    cache_model = _hourly_cache_model_key("hourly", model)
+    cycle_tag = model_cycle_tag(_hourly_cycle_model("hourly", model), now_utc)
     cached_cur = _get_cached_hourly_cycle("hourly", st, target_date, model, cycle_tag)
     if cached_cur:
         return cached_cur
@@ -248,7 +328,7 @@ def fetch_hourly_openmeteo(st: Station, target_date: str, model: str) -> dict[st
     }
 
     if _openmeteo_breaker_active():
-        stale = _read_cache("hourly", st.icao, target_date, model.lower(), cycle_tag, allow_stale=True)
+        stale = _read_cache("hourly", st.icao, target_date, cache_model, cycle_tag, allow_stale=True)
         if stale:
             return stale
         raise RuntimeError("open-meteo breaker active")
@@ -259,7 +339,7 @@ def fetch_hourly_openmeteo(st: Station, target_date: str, model: str) -> dict[st
             r = requests.get(url, params=params, timeout=OPENMETEO_TIMEOUT_SECONDS)
             r.raise_for_status()
             data = r.json()
-            _write_cache("hourly", data, st.icao, target_date, model.lower(), cycle_tag)
+            _write_cache("hourly", data, st.icao, target_date, cache_model, cycle_tag)
             return data
         except Exception as exc:
             last_err = exc
@@ -267,7 +347,7 @@ def fetch_hourly_openmeteo(st: Station, target_date: str, model: str) -> dict[st
                 _trip_openmeteo_breaker("hourly_429", seconds=_retry_after_seconds_from_exc(exc))
                 break
 
-    stale = _read_cache("hourly", st.icao, target_date, model.lower(), cycle_tag, allow_stale=True)
+    stale = _read_cache("hourly", st.icao, target_date, cache_model, cycle_tag, allow_stale=True)
     if stale:
         return stale
     assert last_err is not None
@@ -276,7 +356,8 @@ def fetch_hourly_openmeteo(st: Station, target_date: str, model: str) -> dict[st
 
 def fetch_hourly_gfs_grib2(st: Station, target_date: str, model: str) -> dict[str, Any]:
     now_utc = datetime.now(timezone.utc)
-    cycle_tag = model_cycle_tag(model, now_utc)
+    cache_model = _hourly_cache_model_key("hourly_gfs", model)
+    cycle_tag = model_cycle_tag(_hourly_cycle_model("hourly_gfs", model), now_utc)
     cached_cur = _get_cached_hourly_cycle("hourly_gfs", st, target_date, model, cycle_tag)
     if cached_cur:
         return cached_cur
@@ -285,7 +366,7 @@ def fetch_hourly_gfs_grib2(st: Station, target_date: str, model: str) -> dict[st
 
     try:
         data = fetch_hourly_like(st, target_date, cycle_tag, ROOT.parent.parent)
-        _write_cache("hourly_gfs", data, st.icao, target_date, model.lower(), cycle_tag)
+        _write_cache("hourly_gfs", data, st.icao, target_date, cache_model, cycle_tag)
         return data
     except Exception as exc:
         if "429" in str(exc) or "Too Many Requests" in str(exc):

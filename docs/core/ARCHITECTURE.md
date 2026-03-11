@@ -16,6 +16,18 @@ Last updated: 2026-03-09
 - `scripts/station_catalog.py`
   - 站点解析、别名、时区、站点元信息
 
+### A1. Host Runtime Boundary
+
+- Telegram `/look` 入口必须由单一 OpenClaw user service 承载：
+  - CLI front door：`/home/ubuntu/.local/bin/openclaw`
+  - package root：`/home/ubuntu/.npm-global/lib/node_modules/openclaw`
+  - gateway unit：`/home/ubuntu/.config/systemd/user/openclaw-gateway.service`
+- weatherbot repo 负责 `/look` 领域逻辑、live METAR 刷新和 live Polymarket 刷新。
+- OpenClaw gateway 只负责 channel ingress、tool dispatch 和报告回推。
+- 不允许并行保留 `/usr/lib/node_modules/openclaw` + `/etc/systemd/system/openclaw-gateway.service` 这一类 system-level 旧轨道。
+- 运维细节见：
+  - [OPENCLAW_RUNTIME_BOUNDARY.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/operations/OPENCLAW_RUNTIME_BOUNDARY.md)
+
 ### B. Provider / Raw Data
 
 - 小时预报：`scripts/hourly_data_service.py`

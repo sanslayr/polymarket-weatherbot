@@ -18,17 +18,18 @@ from city_profile_overrides import CITY_CLIMATE_WINDOWS, CITY_PROFILE_OVERRIDES
 from historical_context_provider import regime_to_cn, translate_special_features
 
 ROOT = Path(__file__).resolve().parent.parent
-REFERENCE_DIR = ROOT / "cache" / "historical_reference"
-PRIOR_CSV = REFERENCE_DIR / "weatherbot_station_priors.csv"
-MONTHLY_CSV = REFERENCE_DIR / "weatherbot_monthly_climatology.csv"
-DAILY_CSV = REFERENCE_DIR / "weatherbot_daily_local_regimes.csv"
+REFERENCE_DIR_CANDIDATES = (
+    ROOT / "data" / "historical_reference",
+    ROOT / "cache" / "historical_reference",
+    ROOT.parent / "polymarket-weather-archive" / "reports",
+)
 STATION_CSV = ROOT / "station_links.csv"
 DOCS_DIR = ROOT / "docs" / "operations" / "city-background"
 PROFILES_DIR = DOCS_DIR / "profiles"
 RAW_ISD_DIR = Path(
     os.getenv(
         "WEATHER_ARCHIVE_RAW_ISD_DIR",
-        str(ROOT.parent / "polymarket-weather-archive" / "data" / "raw" / "metar_isd"),
+        str(ROOT / "data" / "historical_reference" / "raw_metar_isd"),
     )
 )
 HOURLY_CACHE: dict[tuple[str, str], list[dict[str, object]]] = {}
@@ -121,6 +122,28 @@ SEASONAL_SITUATION_SPECS: list[tuple[str, str]] = [
 class ClimateWindow:
     label: str
     months: frozenset[int]
+
+
+def _resolve_reference_dir() -> Path:
+    env_dir = str(os.getenv("WEATHERBOT_HISTORICAL_DIR") or "").strip()
+    candidates: list[Path] = []
+    if env_dir:
+        candidates.append(Path(env_dir))
+    candidates.extend(REFERENCE_DIR_CANDIDATES)
+    for candidate in candidates:
+        if (
+            (candidate / "weatherbot_station_priors.csv").exists()
+            and (candidate / "weatherbot_monthly_climatology.csv").exists()
+            and (candidate / "weatherbot_daily_local_regimes.csv").exists()
+        ):
+            return candidate
+    raise FileNotFoundError("historical reference directory not found")
+
+
+REFERENCE_DIR = _resolve_reference_dir()
+PRIOR_CSV = REFERENCE_DIR / "weatherbot_station_priors.csv"
+MONTHLY_CSV = REFERENCE_DIR / "weatherbot_monthly_climatology.csv"
+DAILY_CSV = REFERENCE_DIR / "weatherbot_daily_local_regimes.csv"
 
 
 def main() -> None:

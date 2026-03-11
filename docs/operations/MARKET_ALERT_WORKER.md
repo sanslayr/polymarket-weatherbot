@@ -63,13 +63,16 @@ Token resolution order:
 ## Optional Environment
 
 - `MARKET_ALERT_MAX_WORKERS`
-  - default `6`
+  - default `12`
 - `MARKET_ALERT_COOLDOWN_SECONDS`
   - default `900`
 - `MARKET_EVENT_WINDOW_STREAM_SECONDS`
-  - default `275`
+  - default `245`
 - `MARKET_EVENT_WINDOW_BASELINE_SECONDS`
   - default `2`
+- `MARKET_SIGNAL_PRICE_FLOOR`
+  - default `0.02`
+  - minimum `best_bid` required for a bucket to count as an actionable live level
 
 ## Start Command
 
@@ -100,6 +103,7 @@ python3 -m unittest \
 ## Operational Notes
 
 - The worker is designed for proactive alerts, not for rendering `/look` output.
+- The monitoring window starts at the routine report timestamp and ends 4 minutes later.
 - Duplicate suppression is keyed by station + signal type + scheduled report timestamp + bucket.
 - By default, notifications prefer direct chat targets before group targets.
 - Alert wording must remain probabilistic. Do not phrase alerts as confirmed official observations.

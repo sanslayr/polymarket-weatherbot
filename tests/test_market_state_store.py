@@ -31,6 +31,25 @@ class MarketStateStoreTest(unittest.TestCase):
         self.assertEqual(snap["mid_price"], 0.04)
         self.assertEqual(snap["spread"], 0.02)
 
+    def test_apply_book_message_sorts_bids_desc_and_asks_asc(self) -> None:
+        store = MarketStateStore()
+        store.apply_message(
+            {
+                "event_type": "book",
+                "asset_id": "abc",
+                "bids": [{"price": "0.001", "size": "10"}, {"price": "0.002", "size": "20"}],
+                "asks": [{"price": "0.999", "size": "30"}, {"price": "0.005", "size": "40"}],
+                "timestamp": "2026-03-10T22:20:30Z",
+            }
+        )
+        snap = store.snapshot()["abc"]
+        self.assertEqual(snap["best_bid"], 0.002)
+        self.assertEqual(snap["best_ask"], 0.005)
+        self.assertEqual(snap["top_bid_size"], 20.0)
+        self.assertEqual(snap["top_ask_size"], 40.0)
+        self.assertEqual(snap["top_bid_levels"][0]["price"], 0.002)
+        self.assertEqual(snap["top_ask_levels"][0]["price"], 0.005)
+
     def test_apply_price_change_can_clear_best_bid(self) -> None:
         store = MarketStateStore()
         store.apply_message(

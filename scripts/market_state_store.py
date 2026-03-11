@@ -58,6 +58,25 @@ def _level_rows(levels: list[Any], limit: int = 3) -> list[dict[str, float]]:
     return out
 
 
+def _normalize_book_side(levels: list[Any], *, side: str, depth_limit: int = 3) -> tuple[float | None, float | None, list[dict[str, float]]]:
+    normalized: list[dict[str, float]] = []
+    for item in levels or []:
+        if not isinstance(item, dict):
+            continue
+        price = _to_float(item.get("price"))
+        size = _to_float(item.get("size"))
+        if price is None:
+            continue
+        normalized.append({"price": price, "size": size or 0.0})
+    if not normalized:
+        return None, None, []
+    reverse = str(side).strip().lower() == "bid"
+    normalized.sort(key=lambda item: (float(item["price"]), float(item["size"])), reverse=reverse)
+    best = normalized[0]
+    top_levels = normalized[:depth_limit]
+    return best["price"], best["size"], top_levels
+
+
 def _sum_level_size(levels: list[dict[str, float]]) -> float | None:
     if not levels:
         return None
@@ -141,17 +160,15 @@ class MarketStateStore:
         if event_type == "book":
             bids = payload.get("bids") if isinstance(payload.get("bids"), list) else []
             asks = payload.get("asks") if isinstance(payload.get("asks"), list) else []
-            best_bid = _to_float(bids[0].get("price")) if bids and isinstance(bids[0], dict) else None
-            best_ask = _to_float(asks[0].get("price")) if asks and isinstance(asks[0], dict) else None
-            top_bid_levels = _level_rows(bids)
-            top_ask_levels = _level_rows(asks)
+            best_bid, top_bid_size, top_bid_levels = _normalize_book_side(bids, side="bid")
+            best_ask, top_ask_size, top_ask_levels = _normalize_book_side(asks, side="ask")
             book_timestamp = payload.get("timestamp") or payload.get("timestampMs")
             state.update(
                 {
                     "best_bid": best_bid,
                     "best_ask": best_ask,
-                    "top_bid_size": _to_float(bids[0].get("size")) if bids and isinstance(bids[0], dict) else None,
-                    "top_ask_size": _to_float(asks[0].get("size")) if asks and isinstance(asks[0], dict) else None,
+                    "top_bid_size": top_bid_size,
+                    "top_ask_size": top_ask_size,
                     "top_bid_levels": top_bid_levels,
                     "top_ask_levels": top_ask_levels,
                     "bid_depth_3": _sum_level_size(top_bid_levels),
