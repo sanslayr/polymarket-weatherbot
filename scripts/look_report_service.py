@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -12,8 +11,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
-
-import requests
 
 import build_station_links as BSL
 from analysis_snapshot_service import build_analysis_snapshot
@@ -33,13 +30,16 @@ from polymarket_client import prefetch_polymarket_event as _prefetch_polymarket_
 from polymarket_render_service import _build_polymarket_section
 from realtime_pipeline import classify_window_phase
 from report_render_service import choose_section_text
-from runtime_cache_policy import runtime_cache_enabled
 from station_catalog import (
     Station,
     direction_factor_for as _direction_factor_for,
     factor_summary_for as _factor_summary_for,
     site_tag_for as _site_tag_for,
     terrain_tag_for as _terrain_tag_for,
+)
+from station_external_reference_service import (
+    fetch_station_external_reference,
+    render_station_external_reference_line,
 )
 from synoptic_provider_router import DEFAULT_SYNOPTIC_PROVIDER, normalize_synoptic_provider
 from temperature_shape_analysis import analyze_temperature_shape
@@ -52,9 +52,6 @@ SCRIPTS_DIR = ROOT / "scripts"
 CACHE_DIR = ROOT / "cache" / "runtime"
 _POLY_PREFETCH_POOL = ThreadPoolExecutor(max_workers=2)
 _METAR_FETCH_POOL = ThreadPoolExecutor(max_workers=4)
-MGM_CACHE_TTL_MINUTES = int(os.getenv("WEATHERBOT_MGM_CACHE_TTL_MINUTES", "10") or "10")
-MGM_CACHE_STALE_HOURS = float(os.getenv("WEATHERBOT_MGM_CACHE_STALE_HOURS", "2") or "2")
-MGM_TIMEOUT_SECONDS = float(os.getenv("WEATHERBOT_MGM_TIMEOUT_SECONDS", "4") or "4")
 
 
 def _env_flag(name: str, default: str = "1") -> bool:
@@ -151,178 +148,6 @@ def _run_synoptic_section(
     )
 
 
-def _mgm_cache_path(icao: str) -> Path:
-    return CACHE_DIR / f"mgm_reference_{str(icao).upper()}.json"
-
-
-def _parse_cache_ts(value: Any) -> datetime | None:
-    try:
-        text = str(value or "").strip()
-        if not text:
-            return None
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
-    except Exception:
-        return None
-
-
-def _read_mgm_cache(icao: str, *, allow_stale: bool = False) -> dict[str, Any] | None:
-    if not runtime_cache_enabled():
-        return None
-    path = _mgm_cache_path(icao)
-    if not path.exists():
-        return None
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-        payload = doc.get("payload")
-        if not isinstance(payload, dict) or not payload:
-            return None
-        now_utc = datetime.now(timezone.utc)
-        expires_at = _parse_cache_ts(doc.get("expires_at_utc"))
-        if expires_at is not None and now_utc <= expires_at:
-            return payload
-        if allow_stale:
-            updated_at = _parse_cache_ts(doc.get("updated_at_utc"))
-            if updated_at is not None and (now_utc - updated_at) <= timedelta(hours=max(1.0, MGM_CACHE_STALE_HOURS)):
-                return payload
-    except Exception:
-        return None
-    return None
-
-
-def _write_mgm_cache(icao: str, payload: dict[str, Any]) -> None:
-    if not runtime_cache_enabled() or not payload:
-        return
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    now_utc = datetime.now(timezone.utc)
-    doc = {
-        "updated_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
-        "expires_at_utc": (now_utc + timedelta(minutes=max(3, MGM_CACHE_TTL_MINUTES))).isoformat().replace("+00:00", "Z"),
-        "payload": payload,
-    }
-    _mgm_cache_path(icao).write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
-
-
-def _fetch_mgm_reference(st: Station) -> dict[str, Any] | None:
-    if str(st.icao).upper() != "LTAC":
-        return None
-    cached = _read_mgm_cache(st.icao)
-    if cached is not None:
-        return cached
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://www.mgm.gov.tr/",
-        "Origin": "https://www.mgm.gov.tr",
-        "Accept": "application/json, text/plain, */*",
-    }
-    try:
-        query = requests.utils.quote("esenboga")
-        cands = requests.get(
-            f"https://servis.mgm.gov.tr/web/merkezler?sorgu={query}",
-            headers=headers,
-            timeout=MGM_TIMEOUT_SECONDS,
-        ).json()
-        if not isinstance(cands, list) or not cands:
-            return None
-        center = cands[0]
-        mid = center.get("merkezId")
-        if mid is None:
-            return None
-        obs = requests.get(
-            f"https://servis.mgm.gov.tr/web/sondurumlar?merkezid={mid}",
-            headers=headers,
-            timeout=MGM_TIMEOUT_SECONDS,
-        ).json()
-        if not isinstance(obs, list) or not obs:
-            return None
-        row = obs[0] or {}
-        payload = {
-            "merkez_id": mid,
-            "veri_zamani": row.get("veriZamani"),
-            "temp_c": row.get("sicaklik"),
-            "rh": row.get("nem"),
-            "wind_kmh": row.get("ruzgarHiz"),
-            "wind_dir": row.get("ruzgarYon"),
-            "metar": row.get("rasatMetar"),
-            "ilce": center.get("ilce"),
-        }
-        _write_mgm_cache(st.icao, payload)
-        return payload
-    except Exception:
-        stale = _read_mgm_cache(st.icao, allow_stale=True)
-        if stale is not None:
-            return stale
-        return None
-
-
-def _wind_dir_text_cn(direction_deg: Any) -> str:
-    try:
-        deg = float(direction_deg) % 360.0
-    except Exception:
-        return "风向不定"
-    dirs = [
-        "北风", "东北偏北风", "东北风", "东北偏东风",
-        "东风", "东南偏东风", "东南风", "东南偏南风",
-        "南风", "西南偏南风", "西南风", "西南偏西风",
-        "西风", "西北偏西风", "西北风", "西北偏北风",
-    ]
-    idx = int(((deg + 11.25) % 360.0) // 22.5)
-    return dirs[idx]
-
-
-def _render_mgm_reference_line(mgm_ref: dict[str, Any], unit_pref: str) -> str:
-    def _fmt_temp_ref(v_c: Any) -> str:
-        try:
-            v = float(v_c)
-        except Exception:
-            return str(v_c)
-        if unit_pref == "F":
-            return f"{(v * 9.0 / 5.0 + 32.0):.1f}°F"
-        return f"{v:.1f}°C"
-
-    fields = []
-    vz = str(mgm_ref.get("veri_zamani") or "")
-    vz_txt = "--:-- Local"
-    if vz:
-        try:
-            parsed = datetime.fromisoformat(vz.replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            vz_txt = parsed.astimezone(ZoneInfo("Europe/Istanbul")).strftime("%H:%M Local")
-        except Exception:
-            if "T" in vz and len(vz) >= 16:
-                vz_txt = vz[11:16] + " Local"
-    fields.append(f"- MGM参考（{vz_txt}）")
-
-    try:
-        temp_c = float(mgm_ref.get("temp_c")) if mgm_ref.get("temp_c") is not None else None
-    except Exception:
-        temp_c = None
-    if temp_c is not None:
-        fields.append(f"气温={_fmt_temp_ref(temp_c)}")
-
-    rh = mgm_ref.get("rh")
-    if rh is not None:
-        fields.append(f"湿度={rh}%")
-
-    wind_dir = mgm_ref.get("wind_dir")
-    if wind_dir not in (None, ""):
-        try:
-            deg = float(wind_dir)
-            fields.append(f"风向={_wind_dir_text_cn(deg)}（{deg:.0f}°）")
-        except Exception:
-            fields.append(f"风向={wind_dir}")
-
-    wind_kmh = mgm_ref.get("wind_kmh")
-    if wind_kmh is not None:
-        try:
-            fields.append(f"风速={float(wind_kmh):.1f}km/h")
-        except Exception:
-            fields.append(f"风速={wind_kmh}km/h")
-
-    return "，".join(fields)
-
-
 def _is_openmeteo_rate_limited_error(exc: Exception) -> bool:
     msg = str(exc)
     return ("429" in msg) or ("Too Many Requests" in msg) or ("open-meteo breaker active" in msg)
@@ -377,9 +202,11 @@ def _build_metar_only_bundle(
         tz_name,
         temp_unit=unit_pref,
     )
-    mgm_ref = _fetch_mgm_reference(station)
-    if mgm_ref:
-        metar_text = metar_text + "\n" + _render_mgm_reference_line(mgm_ref, unit_pref)
+    external_reference = fetch_station_external_reference(station)
+    if external_reference:
+        reference_line = render_station_external_reference_line(external_reference, unit_pref)
+        if reference_line:
+            metar_text = metar_text + "\n" + reference_line
 
     now_utc = datetime.now(timezone.utc)
     now_local = now_utc.astimezone(ZoneInfo(tz_name))
@@ -494,10 +321,14 @@ def build_look_report_bundle(
         target_date=target_date,
         temp_unit=unit_pref,
     )
-    mgm_ref = _fetch_mgm_reference(station)
-    if mgm_ref:
-        metar_text = metar_text + "\n" + _render_mgm_reference_line(mgm_ref, unit_pref)
-        metar_diag["mgm_reference"] = mgm_ref
+    external_reference = fetch_station_external_reference(station)
+    if external_reference:
+        reference_line = render_station_external_reference_line(external_reference, unit_pref)
+        if reference_line:
+            metar_text = metar_text + "\n" + reference_line
+        metar_diag["external_station_reference"] = external_reference
+        if str(external_reference.get("source") or "").strip().lower() == "mgm":
+            metar_diag["mgm_reference"] = external_reference
     metar_diag["station_icao"] = str(station.icao).upper()
     try:
         metar_diag["station_lat"] = float(station.lat)

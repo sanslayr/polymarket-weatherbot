@@ -12,6 +12,10 @@ This worker is separate from `/look`:
 - `market_alert_worker.py` handles continuous monitoring around routine METAR windows
 - Telegram delivery goes through the `weatherbot` account by default
 
+Detailed push contract now lives in:
+
+- [MARKET_ALERT_NOTIFICATION_FLOW.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/MARKET_ALERT_NOTIFICATION_FLOW.md)
+
 ## Module Boundary
 
 The alert stack currently lives in:

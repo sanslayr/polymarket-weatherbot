@@ -178,6 +178,21 @@ Last updated: 2026-03-03
   - 避免固定 `60s` 对轻度连续查询过于僵硬
   - 避免跨群共享单用户冷却导致互相干扰
 
+## 15) 2026-03-11 skill review 收口
+
+- `/look` 主编排中的 LTAC/MGM 特例已抽离：
+  - 新增 `scripts/station_external_reference_service.py`
+  - `look_report_service.py` 不再直接承载站点专用外部源缓存/抓取/渲染
+- 新增异动推送单一真源文档：
+  - `docs/core/MARKET_ALERT_NOTIFICATION_FLOW.md`
+- 更新架构与索引文档：
+  - `docs/core/ARCHITECTURE.md`
+  - `DOCS_INDEX.md`
+  - `docs/core/MARKET_ARCHITECTURE.md`
+- 目的：
+  - 避免站点特例继续污染主 `/look` orchestrator
+  - 避免 market alert 推送逻辑继续分散在 plan / worker / formatter / 修复日志中
+
 ---
 
 ## 仍在持续优化（未封板）

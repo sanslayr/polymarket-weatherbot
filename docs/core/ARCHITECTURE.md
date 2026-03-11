@@ -1,6 +1,6 @@
 # polymarket-weatherbot Architecture
 
-Last updated: 2026-03-09
+Last updated: 2026-03-11
 
 目标：让天气分析链路足够清晰、可扩展、可复用，并为后续 Tmax 概率层、自动扫描和自动交易层保留稳定接口。
 
@@ -39,6 +39,9 @@ Last updated: 2026-03-09
 - ECMWF provider：`scripts/ecmwf_open_data_provider.py`
 - GFS provider：`scripts/gfs_grib_provider.py`
 - 实况：`scripts/metar_utils.py`
+- 站点外部参考 adapter：`scripts/station_external_reference_service.py`
+  - 承载站点特定的外部参考源（当前为 LTAC/MGM）
+  - 约束：station-specific source 不能继续塞进 `/look` orchestrator
 - 实测探空：`scripts/sounding_obs_service.py`
 
 ### C. Synoptic / Forecast Decision
@@ -196,3 +199,5 @@ Last updated: 2026-03-09
   - [MARKET_ARCHITECTURE.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/MARKET_ARCHITECTURE.md)
 - 主动告警运维说明：
   - [MARKET_ALERT_WORKER.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/operations/MARKET_ALERT_WORKER.md)
+- 主动告警推送契约：
+  - [MARKET_ALERT_NOTIFICATION_FLOW.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/MARKET_ALERT_NOTIFICATION_FLOW.md)

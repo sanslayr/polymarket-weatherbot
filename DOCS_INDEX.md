@@ -1,6 +1,6 @@
 # polymarket-weatherbot Docs Index (structured)
 
-Last updated: 2026-03-09
+Last updated: 2026-03-11
 
 ## TL;DR（先读顺序）
 1. `docs/core/LOOK_OUTPUT_CONTRACT.md`（输出约束，最高优先级）
@@ -8,7 +8,8 @@ Last updated: 2026-03-09
 3. `docs/core/ARCHITECTURE.md`（当前运行时结构）
 4. `docs/core/TARGET_ARCHITECTURE.md`（目标版 weather/market/research 架构）
 5. `docs/core/DECISION_SCHEMA.md`（运行时决策契约）
-6. `docs/core/TECHNICAL_IMPLEMENTATION_NOTES.md`（技术实现细节）
+6. `docs/core/MARKET_ALERT_NOTIFICATION_FLOW.md`（异动推送真源）
+7. `docs/core/TECHNICAL_IMPLEMENTATION_NOTES.md`（技术实现细节）
 
 ---
 
@@ -18,6 +19,7 @@ Last updated: 2026-03-09
 - `docs/core/ARCHITECTURE.md`
 - `docs/core/TARGET_ARCHITECTURE.md`
 - `docs/core/MARKET_ARCHITECTURE.md`
+- `docs/core/MARKET_ALERT_NOTIFICATION_FLOW.md`
 - `docs/core/MARKET_TRADING_PLAN.md`
 - `docs/core/DECISION_SCHEMA.md`
 - `docs/core/FORECAST_3D_STORAGE.md`
@@ -38,6 +40,7 @@ Last updated: 2026-03-09
 
 ### C. Reviews（历史复盘）
 - `docs/reviews/ARCHITECTURE_FRAMEWORK_REVIEW_2026-03-09.md`
+- `docs/reviews/SKILL_REVIEW_2026-03-11.md`
 - `docs/reviews/ARCH_REVIEW_2026-03-03.md`
 - `docs/reviews/FORECAST_MODULE_REVIEW_2026-03-01.md`
 - `docs/reviews/FORECAST_PIPELINE_REVIEW_2026-03-01.md`
@@ -53,6 +56,7 @@ Last updated: 2026-03-09
 ## 2) 维护分工（防混乱）
 - **天气形势规则变更** → 改 `docs/core/SPECIAL_CASE_PLAYBOOK.md`
 - **技术实现细节变更**（市场解析/数据精度/渲染）→ 改 `docs/core/TECHNICAL_IMPLEMENTATION_NOTES.md`
+- **异动推送 trigger / dedupe / 版式边界变更** → 改 `docs/core/MARKET_ALERT_NOTIFICATION_FLOW.md`
 - **项目总览 / 当前能力边界变更** → 改 `docs/core/PROJECT_OVERVIEW.md`
 - **输出口径变更** → 改 `docs/core/LOOK_OUTPUT_CONTRACT.md`
 - **日志与归档治理变更** → 改 `docs/operations/LOG_ARCHIVE_POLICY.md`

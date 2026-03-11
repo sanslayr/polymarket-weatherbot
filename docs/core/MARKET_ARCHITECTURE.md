@@ -1,6 +1,6 @@
 # Market Architecture
 
-Last updated: 2026-03-09
+Last updated: 2026-03-11
 
 ## Goal
 
@@ -12,6 +12,8 @@ Build a market branch that can:
 - remain decoupled from weather inference
 
 Detailed rollout and contract planning lives in [MARKET_TRADING_PLAN.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/MARKET_TRADING_PLAN.md).
+
+Current alert notification contract lives in [MARKET_ALERT_NOTIFICATION_FLOW.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/MARKET_ALERT_NOTIFICATION_FLOW.md).
 
 ## Current State
 
