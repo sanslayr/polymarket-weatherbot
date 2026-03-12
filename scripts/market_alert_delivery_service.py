@@ -10,14 +10,18 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def alert_key(station_icao: str, signal: dict[str, Any]) -> str:
+def alert_key(station_icao: str, signal: dict[str, Any], *, event_url: str = "") -> str:
+    evidence = dict(signal.get("evidence") or {})
+    target_bucket_label = str(signal.get("target_bucket_label") or "")
+    target_bucket_threshold = str(signal.get("target_bucket_threshold_c") or signal.get("target_bucket_threshold_native") or "")
+    first_live_bucket_label = str(evidence.get("first_live_bucket_label") or "")
     return "|".join(
         [
             station_icao,
             str(signal.get("signal_type") or ""),
-            str(signal.get("scheduled_report_utc") or ""),
-            str(signal.get("target_bucket_threshold_c") or ""),
-            str((signal.get("evidence") or {}).get("first_live_bucket_label") or ""),
+            str(event_url or ""),
+            target_bucket_label or target_bucket_threshold,
+            first_live_bucket_label,
         ]
     )
 
@@ -46,6 +50,8 @@ def build_window_result(payload: dict[str, Any]) -> dict[str, Any]:
         "scheduled_report_utc": str(signal.get("scheduled_report_utc") or ""),
         "within_report_window": bool(signal.get("within_report_window")),
         "event_url": str(payload.get("event_url") or ""),
+        "resident_mode": bool(payload.get("resident_mode")),
+        "resident_reason": str(payload.get("resident_reason") or ""),
         "sent": False,
     }
 
@@ -75,7 +81,7 @@ def handle_completed_task(
     if not signal.get("triggered"):
         return window_result
 
-    dedupe_key = alert_key(payload["station"].icao, signal)
+    dedupe_key = alert_key(payload["station"].icao, signal, event_url=str(payload.get("event_url") or ""))
     if not should_send_alert(state, dedupe_key, cooldown_seconds):
         window_result["delivery"] = {
             "account": alert_account,

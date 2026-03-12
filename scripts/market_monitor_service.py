@@ -167,6 +167,7 @@ def _infer_signal_payload(
     scheduled_report_utc: str,
     observed_max_temp_c: float | None,
     observed_at_utc: str | None = None,
+    continuous_mode: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     bucket_snapshots = build_bucket_snapshots(
         market_catalog_snapshot=market_catalog_snapshot,
@@ -179,6 +180,7 @@ def _infer_signal_payload(
         now_utc=observed_at_utc,
         latest_observed_temp_c=observed_max_temp_c,
         price_floor=_signal_price_floor(),
+        continuous_mode=continuous_mode,
     )
     return bucket_snapshots, signal
 
@@ -231,6 +233,8 @@ def run_market_monitor_event_window(
     stream_seconds: float = 120.0,
     baseline_seconds: float = 2.0,
     core_only: bool = False,
+    previous_state: dict[str, dict[str, Any]] | None = None,
+    continuous_mode: bool = False,
 ) -> dict[str, Any]:
     catalog, plan, subscribed = _subscription_inputs(
         polymarket_event_url=polymarket_event_url,
@@ -240,7 +244,7 @@ def run_market_monitor_event_window(
         core_only=core_only,
     )
     scheduled_dt = _to_dt(scheduled_report_utc)
-    trigger_window_starts_at = scheduled_dt + timedelta(seconds=30) if scheduled_dt is not None else None
+    trigger_window_starts_at = None if continuous_mode else (scheduled_dt + timedelta(seconds=30) if scheduled_dt is not None else None)
     reference_state: dict[str, dict[str, Any]] | None = None
 
     def _on_update(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -248,7 +252,9 @@ def run_market_monitor_event_window(
         current_state = _clone_state_snapshot(payload.get("current_state") or {})
         observed_at_dt = _to_dt(payload.get("observed_at_utc"))
         if (
-            trigger_window_starts_at is not None
+            not continuous_mode
+            and previous_state is None
+            and trigger_window_starts_at is not None
             and observed_at_dt is not None
             and observed_at_dt < trigger_window_starts_at
             and _state_has_book_data(current_state)
@@ -256,14 +262,15 @@ def run_market_monitor_event_window(
             # Keep the latest pre-report snapshot as the baseline for the first post-report move.
             reference_state = current_state
             return None
-        previous_state = reference_state or _clone_state_snapshot(payload.get("baseline_state") or {})
+        effective_previous_state = _clone_state_snapshot(previous_state) or reference_state or _clone_state_snapshot(payload.get("baseline_state") or {})
         bucket_snapshots, signal = _infer_signal_payload(
             market_catalog_snapshot=catalog,
             current_state=current_state,
-            previous_state=previous_state,
+            previous_state=effective_previous_state,
             scheduled_report_utc=scheduled_report_utc,
             observed_max_temp_c=observed_max_temp_c,
             observed_at_utc=payload.get("observed_at_utc"),
+            continuous_mode=continuous_mode,
         )
         if signal.get("triggered"):
             return {
@@ -284,7 +291,7 @@ def run_market_monitor_event_window(
     )
     monitor_diagnostics = _monitor_diagnostics(subscribed_asset_ids=subscribed, stream_result=stream_result)
     triggered_payload = dict(stream_result.get("triggered_payload") or {})
-    effective_previous_state = reference_state or _clone_state_snapshot(stream_result.get("baseline_state") or {})
+    effective_previous_state = _clone_state_snapshot(previous_state) or reference_state or _clone_state_snapshot(stream_result.get("baseline_state") or {})
     if triggered_payload.get("bucket_snapshots") and triggered_payload.get("signal"):
         bucket_snapshots = triggered_payload.get("bucket_snapshots")
         signal = triggered_payload.get("signal")
@@ -295,6 +302,7 @@ def run_market_monitor_event_window(
             previous_state=effective_previous_state,
             scheduled_report_utc=scheduled_report_utc,
             observed_max_temp_c=observed_max_temp_c,
+            continuous_mode=continuous_mode,
         )
     return {
         "catalog": catalog,
@@ -302,6 +310,7 @@ def run_market_monitor_event_window(
         "stream_result": stream_result,
         "bucket_snapshots": bucket_snapshots,
         "reference_state": effective_previous_state,
+        "final_state": _clone_state_snapshot(stream_result.get("state") or {}),
         "monitor_ok": bool(monitor_diagnostics.get("ok")),
         "monitor_status": str(monitor_diagnostics.get("status") or "unknown"),
         "monitor_diagnostics": monitor_diagnostics,

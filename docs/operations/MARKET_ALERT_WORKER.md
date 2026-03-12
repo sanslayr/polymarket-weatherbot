@@ -1,6 +1,6 @@
 # Market Alert Worker
 
-Last updated: 2026-03-11
+Last updated: 2026-03-12
 
 ## Purpose
 
@@ -43,12 +43,15 @@ This is the correct place for the abnormal-move notification module when using t
    - owns `state.json` / `worker.pid` / `worker.log`
 2. `market_alert_scheduler.py`
    - loads `station_links.csv`
-   - fetches recent METAR observations
+   - reads recent METAR observations from the shared `metar24` runtime cache
    - estimates routine reporting cadence
-   - identifies the current or next report-time monitoring window
+   - identifies the current routine report window, next routine window, or resident monitoring block
 3. `market_monitor_service.py`
    - subscribes to the relevant Polymarket buckets during that window
-   - keeps the pre-report baseline and evaluates report-window repricing
+   - keeps the pre-report baseline for routine windows
+   - resident mode starts without inherited baseline
+   - when the station returns to routine mode, routine pre-report snapshots build a fresh baseline again
+   - evaluates both report-window repricing and resident-mode repricing
 4. `market_signal_alert_service.py`
    - formats the Telegram text with the `盘口归零异动` title
 5. `market_alert_delivery_service.py`
@@ -86,6 +89,14 @@ Token resolution order:
   - default `245`
 - `MARKET_EVENT_WINDOW_BASELINE_SECONDS`
   - default `2`
+- `MARKET_ALERT_RESIDENT_BLOCK_SECONDS`
+  - default `240`
+- `MARKET_ALERT_RESIDENT_SPECI_HOURS`
+  - default `2`
+- `MARKET_ALERT_RESIDENT_ACTIVE_MINUTES`
+  - default `90`
+- `MARKET_ALERT_RESIDENT_LIKELY_MINUTES`
+  - default `45`
 - `MARKET_SIGNAL_PRICE_FLOOR`
   - default `0.02`
   - minimum `best_bid` required for a bucket to count as an actionable live level
@@ -119,9 +130,13 @@ python3 -m unittest \
 ## Operational Notes
 
 - The worker is designed for proactive alerts, not for rendering `/look` output.
-- The monitoring window starts at the routine report timestamp and ends 4 minutes later.
-- Formal signal evaluation begins after the post-report `+30s` gate; pre-report snapshots are only used as baseline.
-- Duplicate suppression is keyed by station + signal type + scheduled report timestamp + bucket.
+- Routine monitoring starts at the routine report timestamp and ends 4 minutes later.
+- Stations with `recent_speci_2h` or elevated `speci_active/speci_likely` state enter resident monitoring blocks even outside the routine window.
+- Formal routine-window signal evaluation begins after the post-report `+30s` gate; resident blocks evaluate continuously.
+- Resident blocks do not inherit a cross-block baseline; entering resident mode discards any prior baseline state.
+- If a resident block would overlap the next routine window, the resident block is clipped so routine monitoring can take over on time.
+- If a station resolves to `no_subscriptions` because the current event day has no tradable active market, the worker suppresses that station for the rest of that event day.
+- Duplicate suppression is keyed by station + signal type + event URL + bucket identity, not by `scheduled_report_utc` alone.
 - By default, notifications prefer direct chat targets before group targets.
 - Alert wording must remain probabilistic. Do not phrase alerts as confirmed official observations.
 - Telegram market links are sent with preview enabled.

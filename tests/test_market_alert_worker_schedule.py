@@ -71,6 +71,32 @@ class MarketAlertWorkerScheduleTest(unittest.TestCase):
         self.assertEqual(end, datetime(2026, 3, 9, 9, 54, tzinfo=timezone.utc))
         self.assertEqual(scheduled, "2026-03-09T09:50:00Z")
 
+    def test_current_or_next_window_returns_resident_block_outside_routine_window(self) -> None:
+        ctx = {
+            "latest_report_utc": datetime(2026, 3, 9, 9, 20, tzinfo=timezone.utc),
+            "routine_cadence_min": 30.0,
+            "routine_minute_slots": [20, 50],
+            "resident_mode": True,
+            "resident_until_utc": "2026-03-09T11:20:00Z",
+        }
+        start, end, scheduled = current_or_next_window(ctx, datetime(2026, 3, 9, 9, 40, 15, tzinfo=timezone.utc))
+        self.assertEqual(start, datetime(2026, 3, 9, 9, 40, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2026, 3, 9, 9, 44, tzinfo=timezone.utc))
+        self.assertEqual(scheduled, "2026-03-09T09:40:00Z")
+
+    def test_current_or_next_window_clips_resident_block_before_next_routine_window(self) -> None:
+        ctx = {
+            "latest_report_utc": datetime(2026, 3, 9, 9, 20, tzinfo=timezone.utc),
+            "routine_cadence_min": 30.0,
+            "routine_minute_slots": [20, 50],
+            "resident_mode": True,
+            "resident_until_utc": "2026-03-09T11:20:00Z",
+        }
+        start, end, scheduled = current_or_next_window(ctx, datetime(2026, 3, 9, 9, 48, 15, tzinfo=timezone.utc))
+        self.assertEqual(start, datetime(2026, 3, 9, 9, 48, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2026, 3, 9, 9, 50, tzinfo=timezone.utc))
+        self.assertEqual(scheduled, "2026-03-09T09:48:00Z")
+
     def test_window_stream_seconds_remaining_clips_to_window_end(self) -> None:
         self.assertEqual(
             window_stream_seconds_remaining(
@@ -164,6 +190,26 @@ class MarketAlertWorkerScheduleTest(unittest.TestCase):
         self.assertIsNotNone(ctx)
         self.assertEqual(ctx["latest_report_utc"], datetime(2026, 3, 11, 1, 0, tzinfo=timezone.utc))
         self.assertEqual(ctx["observed_max_temp_c"], 17.0)
+
+    def test_scheduler_metar_context_enters_resident_mode_for_recent_speci(self) -> None:
+        station = Station(city="Wellington", icao="NZWN", lat=-41.32, lon=174.80)
+        rows = [
+            {"reportTime": "2026-03-11T00:00:00Z", "rawOb": "METAR TEST 110000Z", "temp": "16"},
+            {"reportTime": "2026-03-11T00:20:00Z", "rawOb": "SPECI TEST 110020Z", "temp": "18"},
+            {"reportTime": "2026-03-11T00:30:00Z", "rawOb": "METAR TEST 110030Z", "temp": "17"},
+        ]
+        from unittest.mock import patch
+
+        with patch("market_alert_scheduler.stale_cached_metar_rows", return_value=rows), patch(
+            "market_alert_scheduler.utc_now",
+            return_value=datetime(2026, 3, 11, 1, 0, tzinfo=timezone.utc),
+        ):
+            ctx = scheduler_metar_context(station)
+
+        self.assertIsNotNone(ctx)
+        self.assertTrue(ctx["recent_speci_2h"])
+        self.assertTrue(ctx["resident_mode"])
+        self.assertEqual(ctx["resident_reason"], "recent_speci_2h")
 
 
     def test_infer_routine_minute_slots_extracts_fixed_half_hour_pattern(self) -> None:

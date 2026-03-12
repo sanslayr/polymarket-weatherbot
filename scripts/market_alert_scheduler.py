@@ -19,6 +19,19 @@ ROOT = Path(__file__).resolve().parent.parent
 SCHEDULE_CONFIG_PATH = ROOT / "config" / "market_alert_station_schedule.json"
 _SCHEDULE_CACHE_MTIME_NS: int | None = None
 _SCHEDULE_CACHE: dict[str, Any] = {}
+_RESIDENT_BLOCK_SECONDS = max(60, int(os.getenv("MARKET_ALERT_RESIDENT_BLOCK_SECONDS", "240") or "240"))
+_RESIDENT_SPECI_HOURS = max(1.0, float(os.getenv("MARKET_ALERT_RESIDENT_SPECI_HOURS", "2") or "2"))
+_RESIDENT_ACTIVE_MINUTES = max(15, int(os.getenv("MARKET_ALERT_RESIDENT_ACTIVE_MINUTES", "90") or "90"))
+_RESIDENT_LIKELY_MINUTES = max(15, int(os.getenv("MARKET_ALERT_RESIDENT_LIKELY_MINUTES", "45") or "45"))
+
+
+def _to_float(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except Exception:
+        return None
 
 
 def utc_now() -> datetime:
@@ -70,6 +83,127 @@ def stale_cached_metar_rows(icao: str) -> list[dict[str, Any]]:
     if not isinstance(payload, list):
         return []
     return [item for item in payload if isinstance(item, dict)]
+
+
+def _metar_obs_rows(rows: list[dict[str, Any]], *, tz: ZoneInfo | None = None) -> list[tuple[datetime, dict[str, Any]]]:
+    out: list[tuple[datetime, dict[str, Any]]] = []
+    for row in rows or []:
+        try:
+            dt = metar_obs_time_utc(row)
+        except Exception:
+            continue
+        out.append(((dt.astimezone(tz) if tz is not None else dt.astimezone(timezone.utc)), row))
+    out.sort(key=lambda item: item[0])
+    return out
+
+
+def _wx_transition_score(current: dict[str, Any], previous: dict[str, Any] | None) -> float:
+    if previous is None:
+        return 0.0
+    current_wx = str(current.get("wxString") or current.get("wx") or "").strip().upper()
+    previous_wx = str(previous.get("wxString") or previous.get("wx") or "").strip().upper()
+    if current_wx and current_wx != previous_wx:
+        return 1.0
+    return 0.0
+
+
+def _speci_watch_state(
+    *,
+    rows: list[dict[str, Any]],
+    now_utc: datetime,
+    routine_cadence_min: float | None,
+) -> dict[str, Any]:
+    obs_rows = _metar_obs_rows(rows)
+    recent_speci_2h = False
+    latest_speci_utc: datetime | None = None
+    recent_interval_min: float | None = None
+    speci_active = False
+    speci_likely_score = 0.0
+
+    if len(obs_rows) >= 2:
+        recent_interval_min = round((obs_rows[-1][0] - obs_rows[-2][0]).total_seconds() / 60.0, 1)
+
+    cutoff_utc = now_utc - timedelta(hours=float(_RESIDENT_SPECI_HOURS))
+    for obs_utc, row in obs_rows:
+        if obs_utc >= cutoff_utc and str(row.get("rawOb") or "").upper().startswith("SPECI "):
+            recent_speci_2h = True
+            latest_speci_utc = obs_utc
+
+    raw_speci_recent = any(str(row.get("rawOb") or "").upper().startswith("SPECI ") for _obs_utc, row in obs_rows[-3:])
+    short_interval = False
+    if recent_interval_min is not None:
+        if routine_cadence_min is not None:
+            short_interval = bool(recent_interval_min <= max(15.0, 0.70 * float(routine_cadence_min)))
+        else:
+            short_interval = bool(recent_interval_min <= 20.0)
+    speci_active = bool(recent_speci_2h or raw_speci_recent or short_interval)
+
+    latest_row = obs_rows[-1][1] if obs_rows else None
+    previous_row = obs_rows[-2][1] if len(obs_rows) >= 2 else None
+    if latest_row is not None and previous_row is not None:
+        latest_temp = _to_float(latest_row.get("temp"))
+        previous_temp = _to_float(previous_row.get("temp"))
+        if latest_temp is not None and previous_temp is not None:
+            temp_step = abs(latest_temp - previous_temp)
+            if temp_step >= 1.2:
+                speci_likely_score += 0.90
+            if temp_step >= 2.0:
+                speci_likely_score += 0.50
+
+        latest_wspd = _to_float(latest_row.get("wspd"))
+        previous_wspd = _to_float(previous_row.get("wspd"))
+        if latest_wspd is not None and previous_wspd is not None and abs(latest_wspd - previous_wspd) >= 6.0:
+            speci_likely_score += 0.60
+
+        latest_wdir = _to_float(latest_row.get("wdir"))
+        previous_wdir = _to_float(previous_row.get("wdir"))
+        if latest_wdir is not None and previous_wdir is not None:
+            angle_delta = abs(latest_wdir - previous_wdir) % 360.0
+            if min(angle_delta, 360.0 - angle_delta) >= 50.0:
+                speci_likely_score += 0.45
+
+        speci_likely_score += _wx_transition_score(latest_row, previous_row)
+
+    if routine_cadence_min is not None and float(routine_cadence_min) >= 50.0:
+        speci_likely_score += 0.25
+    if short_interval:
+        speci_likely_score += 0.35
+
+    speci_likely_threshold = 1.35
+    speci_likely = bool((not speci_active) and speci_likely_score >= speci_likely_threshold)
+
+    resident_reason = None
+    resident_until_utc: datetime | None = None
+    if recent_speci_2h and latest_speci_utc is not None:
+        resident_reason = "recent_speci_2h"
+        resident_until_utc = latest_speci_utc + timedelta(hours=float(_RESIDENT_SPECI_HOURS))
+    elif speci_active and obs_rows:
+        resident_reason = "speci_active"
+        resident_until_utc = obs_rows[-1][0] + timedelta(minutes=float(_RESIDENT_ACTIVE_MINUTES))
+    elif speci_likely and obs_rows:
+        resident_reason = "speci_likely"
+        resident_until_utc = obs_rows[-1][0] + timedelta(minutes=float(_RESIDENT_LIKELY_MINUTES))
+
+    resident_mode = bool(resident_until_utc is not None and resident_until_utc > now_utc)
+    return {
+        "recent_speci_2h": recent_speci_2h,
+        "latest_speci_utc": latest_speci_utc.isoformat().replace("+00:00", "Z") if latest_speci_utc is not None else None,
+        "recent_interval_min": recent_interval_min,
+        "speci_active": speci_active,
+        "speci_likely": speci_likely,
+        "speci_likely_score": round(float(speci_likely_score), 2),
+        "speci_likely_threshold": speci_likely_threshold,
+        "resident_mode": resident_mode,
+        "resident_reason": resident_reason,
+        "resident_until_utc": resident_until_utc.isoformat().replace("+00:00", "Z") if resident_until_utc is not None else None,
+    }
+
+
+def _resident_window(now_utc: datetime) -> tuple[datetime, datetime]:
+    block_seconds = max(60, int(_RESIDENT_BLOCK_SECONDS))
+    anchor_ts = int(now_utc.timestamp() // block_seconds) * block_seconds
+    start = datetime.fromtimestamp(anchor_ts, tz=timezone.utc)
+    return start, start + timedelta(seconds=block_seconds)
 
 
 def station_from_row(row: dict[str, str]) -> Station:
@@ -369,6 +503,11 @@ def scheduler_metar_context(station: Station) -> dict[str, Any] | None:
         latest_report_utc = latest_scheduled_report_utc
     if latest_report_utc is None or cadence_min is None:
         return None
+    speci_watch = _speci_watch_state(
+        rows=valid_rows,
+        now_utc=now_utc,
+        routine_cadence_min=cadence_min,
+    )
     return {
         "latest_report_utc": latest_report_utc,
         "observed_max_temp_c": obs_max,
@@ -380,6 +519,15 @@ def scheduler_metar_context(station: Station) -> dict[str, Any] | None:
         "inferred_routine_minute_slots": inferred_minute_slots,
         "schedule_source": "config" if configured_schedule.get("minute_slots") else "inferred",
         "schedule_drift": schedule_drift,
+        "resident_mode": bool(speci_watch.get("resident_mode")),
+        "resident_reason": speci_watch.get("resident_reason"),
+        "resident_until_utc": speci_watch.get("resident_until_utc"),
+        "recent_speci_2h": bool(speci_watch.get("recent_speci_2h")),
+        "recent_metar_interval_min": speci_watch.get("recent_interval_min"),
+        "speci_active": bool(speci_watch.get("speci_active")),
+        "speci_likely": bool(speci_watch.get("speci_likely")),
+        "speci_likely_score": speci_watch.get("speci_likely_score"),
+        "speci_likely_threshold": speci_watch.get("speci_likely_threshold"),
     }
 
 
@@ -421,6 +569,14 @@ def current_or_next_window(ctx: dict[str, Any], now_utc: datetime) -> tuple[date
     else:
         scheduled_report = scheduled_report_dt
         next_start = scheduled_report
+
+    resident_until = parse_utcish(ctx.get("resident_until_utc"))
+    if bool(ctx.get("resident_mode")) and resident_until is not None and resident_until > now_utc:
+        resident_start, resident_end = _resident_window(now_utc)
+        if next_start > now_utc and next_start < resident_end:
+            resident_end = next_start
+        if resident_end > now_utc:
+            return resident_start, resident_end, resident_start.isoformat().replace("+00:00", "Z")
     next_end = scheduled_report + timedelta(seconds=240)
     return next_start, next_end, scheduled_report.isoformat().replace("+00:00", "Z")
 

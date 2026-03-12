@@ -303,6 +303,83 @@ class MarketMonitorServiceTest(unittest.TestCase):
         self.assertEqual(result["monitor_diagnostics"]["subscribed_asset_count"], 2)
         self.assertFalse(result["signal"]["triggered"])
 
+    def test_event_window_continuous_mode_uses_previous_state_outside_report_window(self) -> None:
+        catalog = {
+            "markets": [
+                {
+                    "bucket_label": "19°C",
+                    "bucket_kind": "exact",
+                    "temperature_unit": "C",
+                    "threshold_native": 19,
+                    "threshold_c": 19,
+                    "lower_bound_c": 18.5,
+                    "upper_bound_c": 19.49,
+                    "yes_token_id": "a",
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "bucket_label": "20°C",
+                    "bucket_kind": "exact",
+                    "temperature_unit": "C",
+                    "threshold_native": 20,
+                    "threshold_c": 20,
+                    "lower_bound_c": 19.5,
+                    "upper_bound_c": 20.49,
+                    "yes_token_id": "b",
+                    "active": True,
+                    "closed": False,
+                },
+            ]
+        }
+
+        def fake_monitor_market_state(*, on_update, **_kwargs):
+            triggered = on_update(
+                {
+                    "baseline_state": {},
+                    "current_state": {
+                        "a": {"best_bid": 0.0, "best_ask": 0.01, "last_trade_price": 0.01},
+                        "b": {"best_bid": 0.07, "best_ask": 0.09, "last_trade_price": 0.08},
+                    },
+                    "messages": [],
+                    "observed_at_utc": "2026-03-09T09:50:20Z",
+                    "elapsed_seconds": 20.0,
+                }
+            )
+            return {
+                "messages": [],
+                "state": {
+                    "a": {"best_bid": 0.0, "best_ask": 0.01, "last_trade_price": 0.01},
+                    "b": {"best_bid": 0.07, "best_ask": 0.09, "last_trade_price": 0.08},
+                },
+                "baseline_state": {},
+                "triggered_payload": triggered,
+            }
+
+        with patch("market_monitor_service._load_catalog", return_value=catalog), patch(
+            "market_monitor_service.monitor_market_state",
+            side_effect=fake_monitor_market_state,
+        ):
+            result = run_market_monitor_event_window(
+                polymarket_event_url="https://example.com/event",
+                observed_max_temp_c=19.0,
+                scheduled_report_utc="2026-03-09T09:30:00Z",
+                stream_seconds=60.0,
+                baseline_seconds=2.0,
+                core_only=False,
+                previous_state={
+                    "a": {"best_bid": 0.06, "best_ask": 0.07, "last_trade_price": 0.065},
+                    "b": {"best_bid": 0.05, "best_ask": 0.07, "last_trade_price": 0.06},
+                },
+                continuous_mode=True,
+            )
+
+        self.assertTrue(result["signal"]["triggered"])
+        self.assertEqual(result["signal"]["signal_type"], "report_temp_scan_floor_stop")
+        self.assertEqual(result["signal"]["implied_report_temp_lower_bound_c"], 20.0)
+        self.assertEqual(result["reference_state"]["a"]["best_bid"], 0.06)
+        self.assertEqual(result["final_state"]["b"]["best_bid"], 0.07)
+
 
 if __name__ == "__main__":
     unittest.main()

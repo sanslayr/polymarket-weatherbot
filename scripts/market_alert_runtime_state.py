@@ -73,11 +73,32 @@ def acquire_singleton_lock() -> None:
 
 def load_worker_state() -> dict[str, Any]:
     if not STATE_PATH.exists():
-        return {"last_alerts": {}, "last_window_runs": {}, "last_window_results": {}, "last_errors": {}}
+        return {
+            "last_alerts": {},
+            "last_window_runs": {},
+            "last_window_results": {},
+            "last_errors": {},
+            "day_disabled_events": {},
+        }
     try:
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        payload = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("worker state must be object")
+        payload.pop("resident_previous_states", None)
+        payload.setdefault("last_alerts", {})
+        payload.setdefault("last_window_runs", {})
+        payload.setdefault("last_window_results", {})
+        payload.setdefault("last_errors", {})
+        payload.setdefault("day_disabled_events", {})
+        return payload
     except Exception:
-        return {"last_alerts": {}, "last_window_runs": {}, "last_window_results": {}, "last_errors": {}}
+        return {
+            "last_alerts": {},
+            "last_window_runs": {},
+            "last_window_results": {},
+            "last_errors": {},
+            "day_disabled_events": {},
+        }
 
 
 def save_worker_state(state: dict[str, Any]) -> None:

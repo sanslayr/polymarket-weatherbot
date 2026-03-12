@@ -1,6 +1,6 @@
 # Market Alert Notification Flow
 
-Last updated: 2026-03-11
+Last updated: 2026-03-12
 
 目标：把“盘口异动推送”这条链路的触发、去重、版式和运行边界写成单一真源，避免信息分散在 plan / worker / formatter / 临时修复记录里。
 
@@ -9,6 +9,7 @@ Last updated: 2026-03-11
 - 这条链路独立于 `/look`
 - `/look` 负责 request/response 报告
 - `market_alert_worker.py` 负责 routine METAR 报时附近的主动监控和推送
+- worker 也会对 `recent_speci_2h / speci_active / speci_likely` 站点进入 resident block
 - 告警文本必须保持 `market-implied` / `盘口归零异动` 语气，不能表述成官方实况已确认
 
 ## 2) 运行链路
@@ -32,13 +33,15 @@ Last updated: 2026-03-11
 - `market_alert_scheduler.py`
   - 选择站点
   - 估算 routine METAR cadence
-  - 打开 report-time monitoring window
+  - 打开 report-time monitoring window 或 resident monitoring block
   - 生成 event URL / schedule drift 上下文
 - `market_alert_runtime_state.py`
   - 管理 singleton lock、state 文件、pid 文件、worker log 路径
 - `market_monitor_service.py`
   - 组装 catalog + subscription plan + state snapshot
   - 在事件窗口内保留 pre-report baseline
+  - resident block 不继承旧 baseline
+  - 回到 routine 时再重新建立 pre-report baseline
   - 调用 signal inference
   - `cycle` / `event_window` 共用同一套 subscription/signal helper
 - `market_implied_weather_signal.py`
@@ -50,11 +53,19 @@ Last updated: 2026-03-11
 
 ## 3) 触发窗口
 
-- 仅在 routine METAR report window 内主动监控
-- 事件窗口默认从 routine report timestamp 开始，最长监控约 `245s`
+- 基础模式是在 routine METAR report window 内主动监控
+- routine 事件窗口默认从 report timestamp 开始，最长监控约 `245s`
 - 为避免把预热期波动误判成正式报后异动：
   - pre-report 阶段持续更新 baseline
   - post-report `+30s` 后才进入正式 signal 判定窗口
+- 对下列站点追加 resident mode：
+  - `recent_speci_2h == true`
+  - 或 `speci_active == true`
+  - 或 `speci_likely == true`
+- resident mode 以连续 `240s` block 运行
+- resident block 不再依赖 routine report `+30s` gate
+- 进入 resident mode 时丢弃 inherited baseline；回到 routine 后再用新的 pre-report snapshot 建 baseline
+- resident block 如果会撞上下一次 routine report，会先截断并让 routine window 接管
 
 ## 4) Signal 类型
 
@@ -72,7 +83,8 @@ Last updated: 2026-03-11
 ## 5) 去重与推送
 
 - duplicate suppression key:
-  - `station + signal_type + scheduled_report_utc + bucket`
+  - `station + signal_type + event_url + bucket`
+- if an event day has no tradable active market, that station/event pair is skipped for the rest of the local event day
 - worker 级冷却：
   - `MARKET_ALERT_COOLDOWN_SECONDS`
   - 默认 `900s`

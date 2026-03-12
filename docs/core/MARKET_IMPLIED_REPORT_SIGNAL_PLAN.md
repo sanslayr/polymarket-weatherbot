@@ -1,6 +1,6 @@
 # Market-Implied Report Signal Plan
 
-Last updated: 2026-03-11
+Last updated: 2026-03-12
 
 ## Goal
 
@@ -109,6 +109,8 @@ Runtime context:
 - `scheduled_report_utc`
 - `now_utc`
 - `latest_observed_temp_c` (optional)
+- `continuous_mode` (optional)
+- `previous_state` is optional, but resident mode should not depend on cross-block inherited baseline
 
 ## First Signal Family
 
@@ -140,6 +142,13 @@ Output:
 - confidence label
 - evidence payload
 - human alert message
+
+Resident-mode adjustment:
+
+- when a station is in resident monitoring mode, the trigger window gate is opened continuously
+- entering resident mode should discard inherited baseline state
+- when the station re-enters routine mode, a fresh pre-report baseline should be built again
+- duplicate suppression should key on market identity + bucket identity, not only routine report timestamp
 
 ### `report_temp_scan_floor_stop`
 
@@ -181,6 +190,23 @@ before requiring:
 - multi-bucket confirmation
 
 Multi-bucket confirmation can still be used to upgrade confidence.
+
+## Resident Monitoring Adjustment
+
+Resident mode exists to cover stations that have entered a more unstable reporting regime even if the very first SPECI is not known in real time.
+
+Recommended resident entry rule:
+
+- `recent_speci_2h`
+- or `speci_active`
+- or `speci_likely`
+
+Recommended runtime behavior:
+
+- keep monitoring in short rolling blocks
+- do not let resident blocks overlap the next routine report window
+- allow `ascending scan` and `dead_now` style triggers outside the normal report-time gate
+- still keep cooldown / dedupe so one market structure does not spam repeated pushes
 
 ## Telegram Push Feasibility
 

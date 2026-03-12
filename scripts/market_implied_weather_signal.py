@@ -257,13 +257,17 @@ def infer_market_implied_report_signal(
     trigger_window_start_seconds: int = 30,
     trigger_window_end_seconds: int = 300,
     ask_collapse_threshold: float = 0.01,
+    continuous_mode: bool = False,
 ) -> dict[str, Any]:
     now_dt = _to_dt(now_utc) or datetime.now(timezone.utc)
     scheduled_dt = _to_dt(scheduled_report_utc)
     delta_seconds = _window_seconds(now_dt, scheduled_dt)
-    within_trigger_window = (
-        delta_seconds is not None
-        and float(trigger_window_start_seconds) <= delta_seconds <= float(trigger_window_end_seconds)
+    within_trigger_window = bool(
+        continuous_mode
+        or (
+            delta_seconds is not None
+            and float(trigger_window_start_seconds) <= delta_seconds <= float(trigger_window_end_seconds)
+        )
     )
 
     best_signal: dict[str, Any] | None = None

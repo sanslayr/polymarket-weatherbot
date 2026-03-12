@@ -60,6 +60,52 @@ def _window_run_key(station_icao: str, scheduled_report_utc: str) -> str:
     return f"{station_icao}|{scheduled_report_utc}"
 
 
+def _station_has_active_task(active_tasks: dict[str, Future], station_icao: str) -> bool:
+    prefix = f"{station_icao}|"
+    return any(task_key.startswith(prefix) for task_key in active_tasks)
+
+
+def _catalog_counts(catalog: dict[str, Any] | None) -> dict[str, Any]:
+    markets = [dict(item) for item in ((catalog or {}).get("markets") or []) if isinstance(item, dict)]
+    live_markets = [m for m in markets if not bool(m.get("closed")) and bool(m.get("active"))]
+    tradable_live_markets = [m for m in live_markets if str(m.get("yes_token_id") or "").strip()]
+    return {
+        "event_found": bool((catalog or {}).get("event_found")),
+        "market_count": len(markets),
+        "live_market_count": len(live_markets),
+        "tradable_live_market_count": len(tradable_live_markets),
+    }
+
+
+def _should_disable_station_for_event(payload: dict[str, Any]) -> bool:
+    if str(payload.get("monitor_status") or "") != "no_subscriptions":
+        return False
+    return int(payload.get("tradable_live_market_count") or 0) <= 0
+
+
+def _is_day_disabled_for_event(state: dict[str, Any], station_icao: str, event_url: str) -> bool:
+    entry = ((state.get("day_disabled_events") or {}).get(station_icao) or {})
+    return bool(entry and str(entry.get("event_url") or "") == str(event_url or ""))
+
+
+def _update_day_disabled_event(state: dict[str, Any], payload: dict[str, Any]) -> None:
+    disabled = state.setdefault("day_disabled_events", {})
+    station_icao = str(getattr(payload.get("station"), "icao", "") or "").strip().upper()
+    event_url = str(payload.get("event_url") or "")
+    if not station_icao:
+        return
+    if _should_disable_station_for_event(payload):
+        disabled[station_icao] = {
+            "event_url": event_url,
+            "disabled_at_utc": utc_now().isoformat().replace("+00:00", "Z"),
+            "reason": "no_active_market_for_event_day",
+        }
+        return
+    entry = disabled.get(station_icao) or {}
+    if entry and str(entry.get("event_url") or "") != event_url:
+        disabled.pop(station_icao, None)
+
+
 def _log_window_decision(
     *,
     state: dict[str, Any],
@@ -90,6 +136,7 @@ def _station_task(
     scheduled_report_utc: str,
     *,
     stream_seconds: float,
+    continuous_mode: bool = False,
 ) -> dict[str, Any]:
     from market_monitor_service import run_market_monitor_event_window
 
@@ -103,11 +150,13 @@ def _station_task(
         stream_seconds=stream_seconds,
         baseline_seconds=float(os.getenv("MARKET_EVENT_WINDOW_BASELINE_SECONDS", "2") or "2"),
         core_only=False,
+        continuous_mode=continuous_mode,
     )
     signal = dict(result.get("signal") or {})
     monitor_ok = bool(result.get("monitor_ok", True))
     monitor_status = str(result.get("monitor_status") or ("ok" if monitor_ok else "unknown"))
     monitor_diagnostics = dict(result.get("monitor_diagnostics") or {})
+    catalog_counts = _catalog_counts(result.get("catalog") if isinstance(result.get("catalog"), dict) else {})
     if not signal.get("triggered"):
         return {
             "station": station,
@@ -116,6 +165,10 @@ def _station_task(
             "monitor_ok": monitor_ok,
             "monitor_status": monitor_status,
             "monitor_diagnostics": monitor_diagnostics,
+            "final_state": dict(result.get("final_state") or {}),
+            "resident_mode": bool(continuous_mode),
+            "resident_reason": str(metar_ctx.get("resident_reason") or ""),
+            **catalog_counts,
             "sent": False,
         }
     observed_utc = str(signal.get("observed_at_utc") or "")
@@ -153,6 +206,10 @@ def _station_task(
         "monitor_ok": monitor_ok,
         "monitor_status": monitor_status,
         "monitor_diagnostics": monitor_diagnostics,
+        "final_state": dict(result.get("final_state") or {}),
+        "resident_mode": bool(continuous_mode),
+        "resident_reason": str(metar_ctx.get("resident_reason") or ""),
+        **catalog_counts,
         "sent": False,
     }
 
@@ -184,6 +241,7 @@ def main() -> None:
                         cooldown_seconds=cooldown_seconds,
                         alert_account=alert_account,
                     )
+                    _update_day_disabled_event(state, payload)
                     state.setdefault("last_window_runs", {})[task_key] = utc_now().isoformat().replace("+00:00", "Z")
                     state.setdefault("last_window_results", {})[task_key] = window_result
                     log.write(
@@ -210,6 +268,7 @@ def main() -> None:
                 metar_ctx = scheduler_metar_context(station)
                 if not metar_ctx or metar_ctx.get("routine_cadence_min") is None:
                     continue
+                resident_mode = bool(metar_ctx.get("resident_mode"))
                 row_now_utc = utc_now()
                 drift = metar_ctx.get("schedule_drift")
                 if isinstance(drift, dict):
@@ -223,6 +282,19 @@ def main() -> None:
                         state.setdefault("last_schedule_drifts", {})[station.icao] = drift_key
                         log.flush()
                 window_start, window_end, scheduled_report_utc = current_or_next_window(metar_ctx, row_now_utc)
+                event_url = polymarket_event_url(row, station, scheduled_report_utc=scheduled_report_utc, now_utc=row_now_utc)
+                if _is_day_disabled_for_event(state, station.icao, event_url):
+                    if row_now_utc >= window_start:
+                        _log_window_decision(
+                            state=state,
+                            log=log,
+                            run_key=_window_run_key(station.icao, scheduled_report_utc),
+                            station=station,
+                            scheduled_report_utc=scheduled_report_utc,
+                            window_start=window_start,
+                            reason="day_disabled_no_active_market",
+                        )
+                    continue
                 run_key = _window_run_key(station.icao, scheduled_report_utc)
                 if run_key in active_tasks:
                     if row_now_utc >= window_start:
@@ -237,6 +309,18 @@ def main() -> None:
                         )
                     if next_wake is None or window_start < next_wake:
                         next_wake = window_start
+                    continue
+                if _station_has_active_task(active_tasks, station.icao):
+                    if row_now_utc >= window_start:
+                        _log_window_decision(
+                            state=state,
+                            log=log,
+                            run_key=run_key,
+                            station=station,
+                            scheduled_report_utc=scheduled_report_utc,
+                            window_start=window_start,
+                            reason="station_busy",
+                        )
                     continue
                 if state.get("last_window_runs", {}).get(run_key):
                     if row_now_utc >= window_start:
@@ -280,6 +364,7 @@ def main() -> None:
                         metar_ctx,
                         scheduled_report_utc,
                         stream_seconds=stream_seconds,
+                        continuous_mode=resident_mode,
                     )
                     continue
                 if next_wake is None or window_start < next_wake:
