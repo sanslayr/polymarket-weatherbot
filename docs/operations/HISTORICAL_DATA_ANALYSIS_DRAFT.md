@@ -3,6 +3,12 @@
 Last updated: 2026-03-02
 Status: Draft（先设计，后实施）
 
+补充说明：
+
+- 本文继续保留为高层历史回放/评估草案。
+- 更细的 posterior learning、factor schema、训练数据分层与日级发布设计，见：
+  - [POSTERIOR_LEARNING_PLAN.md](/home/ubuntu/.openclaw/workspace/skills/polymarket-weatherbot/docs/core/POSTERIOR_LEARNING_PLAN.md)
+
 ## 1) 目标
 
 围绕 Tmax 判断链路，建立可持续的数据学习闭环：
