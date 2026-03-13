@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from market_price_format import format_price_cents, infer_market_tick_cents
@@ -35,20 +35,27 @@ def _format_signal_time(
     local_tz_label: str | None = None,
 ) -> str:
     utc_dt = _parse_dt(observed_at_utc)
-    if utc_dt is None:
-        return str(observed_at_utc or "").strip()
-    utc_text = utc_dt.astimezone(timezone.utc).strftime("%Y/%m/%d %H:%M:%S UTC")
-
     local_dt = _parse_dt(observed_at_local)
     if local_dt is None:
-        return utc_text
-    local_text = local_dt.strftime("%H:%M:%S")
+        if utc_dt is None:
+            return str(observed_at_utc or "").strip()
+        local_dt = utc_dt.astimezone(timezone.utc)
+    local_text = local_dt.strftime("%Y/%m/%d %H:%M:%S")
     local_label = str(local_tz_label or "Local").strip() or "Local"
-    if (local_dt.utcoffset() or timezone.utc.utcoffset(None)).total_seconds() == 0:
-        return utc_text
-    if local_dt.date() != utc_dt.astimezone(local_dt.tzinfo).date():
-        local_text = local_dt.strftime("%Y/%m/%d %H:%M:%S")
-    return f"{utc_text} | {local_text} {local_label}"
+    return f"{local_text} {local_label}（{_format_utc_offset_label(local_dt.utcoffset())}）"
+
+
+def _format_utc_offset_label(offset: timedelta | None) -> str:
+    if offset is None:
+        return "UTC"
+    total_minutes = int(round(offset.total_seconds() / 60.0))
+    sign = "+" if total_minutes >= 0 else "-"
+    abs_minutes = abs(total_minutes)
+    hours = abs_minutes // 60
+    minutes = abs_minutes % 60
+    if minutes == 0:
+        return f"UTC{sign}{hours}"
+    return f"UTC{sign}{hours:02d}:{minutes:02d}"
 
 
 def _format_temp_value(value: Any) -> str | None:
@@ -114,17 +121,7 @@ def _title_with_date(
     observed_at_local: str | None,
     signal: dict[str, Any],
 ) -> str:
-    date_text = str(scheduled_report_label or "").strip()
-    if not date_text:
-        local_dt = _parse_dt(observed_at_local)
-        if local_dt is not None:
-            date_text = local_dt.strftime("%Y/%m/%d")
-    if not date_text:
-        scheduled_dt = _parse_dt(signal.get("scheduled_report_utc"))
-        if scheduled_dt is not None:
-            date_text = scheduled_dt.astimezone(timezone.utc).strftime("%Y/%m/%d")
-    suffix = f" @ {date_text}" if date_text else ""
-    return f"⚠️ *盘口归零异动 | {city}{suffix}*"
+    return f"⚠️ *盘口归零异动 | {city}*"
 
 
 def _format_observed_max_note(
@@ -143,8 +140,8 @@ def _format_observed_max_note(
         return None
     time_dt = _parse_dt(observed_max_time_local)
     if time_dt is None:
-        return f"已记录METAR最高温：{temp_label}"
-    return f"已记录METAR最高温：{temp_label} @ {time_dt.strftime('%H:%M')} Local"
+        return f"已知METAR最高温：{temp_label}；"
+    return f"已知METAR最高温：{temp_label}（{time_dt.strftime('%H:%M')}）；"
 
 
 def _format_bid_ask_clause(*, bid_value: Any, ask_value: Any, tick_cents: float | None) -> str:
@@ -340,7 +337,7 @@ def format_market_signal_alert(
         lines.append(f"• 盘口观察：{'；'.join(collapse_clauses)}。")
     if ladder_lines:
         lines.append("")
-        lines.append("*当前市场盘口价格：*")
+        lines.append("*当前市场盘口：*")
     for ladder_line in ladder_lines:
         lines.append(ladder_line)
     if polymarket_event_url:

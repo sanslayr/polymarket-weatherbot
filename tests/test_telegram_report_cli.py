@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 
 os.environ["WEATHERBOT_SKIP_VENV_REEXEC"] = "1"
@@ -22,7 +23,7 @@ class TelegramReportCliTests(unittest.TestCase):
         now_utc = datetime(2026, 3, 11, 5, 2, tzinfo=timezone.utc)
         bundle = SimpleNamespace(
             now_utc=now_utc,
-            now_local=now_utc,
+            now_local=now_utc.astimezone(ZoneInfo("Asia/Tokyo")),
             mode="full",
             compact_synoptic=False,
             forecast_quality={
@@ -38,6 +39,8 @@ class TelegramReportCliTests(unittest.TestCase):
         header = telegram_report_cli._render_report_header(station, bundle)
 
         self.assertIn("生成时间:", header)
+        self.assertIn("2026/03/11 14:02:00 Local (UTC+09:00)", header)
+        self.assertNotIn("UTC |", header)
         self.assertNotIn("分析链路:", header)
         self.assertNotIn("小时预报源", header)
         self.assertNotIn("数值预报场源", header)
@@ -48,7 +51,7 @@ class TelegramReportCliTests(unittest.TestCase):
         now_utc = datetime(2026, 3, 11, 5, 2, tzinfo=timezone.utc)
         bundle = SimpleNamespace(
             now_utc=now_utc,
-            now_local=now_utc,
+            now_local=now_utc.astimezone(ZoneInfo("Asia/Tokyo")),
             mode="metar_only",
             compact_synoptic=False,
             forecast_quality={},

@@ -91,6 +91,12 @@ CITY_CLIMATE_WINDOWS: dict[str, list[dict[str, object]]] = {
         {"label": "暖湿季(6-8)", "months": [6, 7, 8]},
         {"label": "秋季(9-11)", "months": [9, 10, 11]},
     ],
+    "VHHH": [
+        {"label": "干凉季(11-2)", "months": [11, 12, 1, 2]},
+        {"label": "春季回暖 / 海雾季(3-4)", "months": [3, 4]},
+        {"label": "雨季 / 台风暖湿季(5-9)", "months": [5, 6, 7, 8, 9]},
+        {"label": "秋季转季(10)", "months": [10]},
+    ],
     "SAEZ": [
         {"label": "暖季(12-2)", "months": [12, 1, 2]},
         {"label": "秋季(3-5)", "months": [3, 4, 5]},
@@ -107,6 +113,18 @@ CITY_CLIMATE_WINDOWS: dict[str, list[dict[str, object]]] = {
         {"label": "前季风热季(3-5)", "months": [3, 4, 5]},
         {"label": "雨季 / 季风季(6-9)", "months": [6, 7, 8, 9]},
         {"label": "后季风(10)", "months": [10]},
+    ],
+    "WSSS": [
+        {"label": "东北季风(12-2)", "months": [12, 1, 2]},
+        {"label": "前转季(3-4)", "months": [3, 4]},
+        {"label": "西南季风(5-9)", "months": [5, 6, 7, 8, 9]},
+        {"label": "后转季(10-11)", "months": [10, 11]},
+    ],
+    "ZSPD": [
+        {"label": "冷季(12-2)", "months": [12, 1, 2]},
+        {"label": "春季(3-5)", "months": [3, 4, 5]},
+        {"label": "梅雨 / 盛夏暖湿季(6-9)", "months": [6, 7, 8, 9]},
+        {"label": "秋季(10-11)", "months": [10, 11]},
     ],
 }
 
@@ -536,6 +554,38 @@ CITY_PROFILE_OVERRIDES: dict[str, dict[str, object]] = {
             }
         ],
     },
+    "VHHH": {
+        "core_identity": "珠江口离岸填海机场，海风、地形风和湿层切换往往比香港岛/九龙热岛印象更关键。",
+        "decisive_factors": [
+            "站点位于主城西侧远郊离岸机场，日较差和升温上沿通常都小于香港高密城区，不应直接套用市区热岛经验。",
+            "珠江口暖湿气流、Lantau 山地绕流和海风切入时点会共同决定午后还能不能继续上冲。",
+            "春夏海雾、低云、阵雨重置和台风外围雨带都会显著压低峰值，必须和相对开阔日拆开处理。",
+        ],
+        "failure_modes": [
+            "把 VHHH 当成香港岛/九龙热岛代理，会系统性高估高温上限和日较差。",
+            "忽略海风与地形风切换，只按当前温度线性外推，容易把午后锁温看得过晚。",
+        ],
+        "watch_order": [
+            "先看风向是否维持在珠江口暖湿通道，再看云底、能见度和降水残留，最后判断午后是否还保有陆面增温窗口。",
+        ],
+        "repo_notes": [
+            "VHHH 可优先参考 Kowloon(45004) 实测探空，重点看近地层湿层厚度、海风层和逆温高度。",
+        ],
+        "focus_slices": [
+            {
+                "label": "雨季沿海风向分型",
+                "months": [5, 6, 7, 8, 9],
+                "conditions": {
+                    "precip_day_flag": False,
+                    "midday_low_ceiling_flag": False,
+                },
+                "sectors": ["E", "SE", "S", "W", "NW"],
+                "min_days": 50,
+                "min_sector_days": 10,
+                "note": "用于区分珠江口海风暖湿样本与相对偏陆/背风象限，不要把 Hong Kong 机场当成纯城市热岛站。",
+            }
+        ],
+    },
     "SAEZ": {
         "core_identity": "河口平原大日较差站，北到东北暖平流与南侧冷空气重置切换非常关键。",
         "decisive_factors": [
@@ -622,6 +672,69 @@ CITY_PROFILE_OVERRIDES: dict[str, dict[str, object]] = {
                 "min_days": 70,
                 "min_sector_days": 12,
                 "note": "用于区分前季风干混合高温样本与西侧/西北侧偏干风背景，重点看 Tmax 和日较差。",
+            }
+        ],
+    },
+    "WSSS": {
+        "core_identity": "赤道海岸填海机场，全年高湿与海峡海风主导，重点不是能不能热，而是云雨重置后还能不能恢复有效增温。",
+        "decisive_factors": [
+            "高露点和湿层厚度几乎全年都在场，说明单看气温斜率远不如把露点、低云和降水重置放在前面。",
+            "Changi 位于主城东侧海岸，温度振幅通常小于更内陆、更密集开发的城市热岛样本，不应套内陆热站模板。",
+            "转季和季风切换阶段的阵雨/雷暴触发很频繁，上午一旦被重置，午后上沿会被明显压平。",
+        ],
+        "failure_modes": [
+            "把 WSSS 按普通内陆热站外推，会系统性高估 clean-ramp 概率和日较差。",
+            "忽略对流重置和高湿锁温，只按当前升温线性延伸，容易把上限看得过热。",
+        ],
+        "watch_order": [
+            "先看是否已有对流或雷阵雨重置，再看云底和露点，最后判断海风背景下午后是否还保有小幅爬升空间。",
+        ],
+        "repo_notes": [
+            "当前未配置稳定可用实测探空站；Singapore 近邻高空站在现有 UWYO 文本接口不可稳定提取，运行时按 no_designated_station 处理。",
+        ],
+        "focus_slices": [
+            {
+                "label": "转季高湿无雨日分风向表现",
+                "months": [3, 4, 10, 11],
+                "conditions": {
+                    "precip_day_flag": False,
+                    "midday_low_ceiling_flag": False,
+                },
+                "sectors": ["NE", "E", "S", "SW", "W"],
+                "min_days": 50,
+                "min_sector_days": 10,
+                "note": "用于区分转季阶段不同海风/季风象限下的升温效率，重点不是绝对高温，而是雨后恢复和峰值窗是否被压平。",
+            }
+        ],
+    },
+    "ZSPD": {
+        "core_identity": "长江口海岸远郊机场，不是上海主城区热岛代理，海风和江海湿层切入会直接改写午后上限。",
+        "decisive_factors": [
+            "偏西到偏西南陆地背景更容易维持较高上沿；东到东北海风一旦推进，午后常会更早锁温。",
+            "ZSPD 位于主城东南侧远郊海岸，温度振幅通常小于上海内陆城区，不应直接拿陆家嘴/徐家汇热岛经验套机场样本。",
+            "梅雨季、台风外围和近海低云/阵雨重置并不轻，必须把海风抑制和降水重置从典型晴热日里拆开看。",
+        ],
+        "failure_modes": [
+            "把 ZSPD 当上海市中心热岛代理，会系统性高估晴热上限和晚峰概率。",
+            "忽略海风切入时点，只看当前升温斜率，容易把午后锁温看得太晚。",
+        ],
+        "watch_order": [
+            "先看是否仍维持在西到西南陆地背景，再看东侧海风和低云何时侵入，最后看露点与湿层是否会截断峰值窗。",
+        ],
+        "repo_notes": [
+            "当前未配置稳定可用实测探空站；Shanghai 近邻高空站在现有 UWYO 文本接口不可稳定提取，运行时按 no_designated_station 处理。",
+        ],
+        "focus_slices": [
+            {
+                "label": "梅雨 / 盛夏分风向表现",
+                "months": [6, 7, 8, 9],
+                "conditions": {
+                    "precip_day_flag": False,
+                },
+                "sectors": ["SW", "W", "E", "NE", "N"],
+                "min_days": 60,
+                "min_sector_days": 12,
+                "note": "用于拆开长江口海岸站在偏陆高温背景和海风压制背景下的差异，避免把 Shanghai 市区热岛经验直接套到 ZSPD。",
             }
         ],
     },

@@ -49,7 +49,9 @@ def build_live_condition_signals(metar_diag: dict[str, Any]) -> dict[str, Any]:
     return {
         "cloud_effective_cover": pick_smoothed(metar_diag, "cloud_effective_cover_smooth", "cloud_effective_cover"),
         "radiation_eff": pick_smoothed(metar_diag, "radiation_eff_smooth", "radiation_eff"),
-        "temp_trend_c": pick_smoothed(metar_diag, "temp_trend_smooth_c", "temp_trend_1step_c"),
+        "temp_trend_c": pick_smoothed(metar_diag, "temp_trend_effective_c", "temp_trend_smooth_c")
+        if safe_float(metar_diag.get("temp_trend_effective_c")) is not None
+        else pick_smoothed(metar_diag, "temp_trend_smooth_c", "temp_trend_1step_c"),
         "temp_bias_c": pick_smoothed(metar_diag, "temp_bias_smooth_c", "temp_bias_c"),
         "dewpoint_c": safe_float(metar_diag.get("latest_dewpoint")),
         "latest_temp_c": safe_float(metar_diag.get("latest_temp")),

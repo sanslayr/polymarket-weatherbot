@@ -129,6 +129,31 @@ def _purge_dir_by_age(path: Path, *, suffixes: tuple[str, ...], max_age_hours: i
     return removed
 
 
+def _purge_matching_files_by_age(
+    path: Path,
+    *,
+    pattern: str,
+    max_age_hours: int,
+) -> int:
+    removed = 0
+    if not path.exists() or not path.is_dir() or max_age_hours <= 0:
+        return removed
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=max_age_hours)
+    for p in path.rglob(pattern):
+        try:
+            if not p.is_file():
+                continue
+            mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+            if mtime > cutoff:
+                continue
+            p.unlink(missing_ok=True)
+            removed += 1
+        except Exception:
+            continue
+    return removed
+
+
 def _cache_key(*parts: str) -> str:
     raw = "|".join(parts)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
@@ -141,7 +166,8 @@ def _cache_path(kind: str, *parts: str) -> Path:
 def _hourly_cache_model_key(kind: str, model: str) -> str:
     kind_norm = str(kind or "").strip().lower()
     if kind_norm == "hourly":
-        return "openmeteo"
+        model_norm = str(model or "").strip().lower()
+        return f"openmeteo-{model_norm or 'forecast'}"
     if kind_norm == "hourly_gfs":
         return "gfs"
     return str(model or "").strip().lower()
@@ -150,10 +176,20 @@ def _hourly_cache_model_key(kind: str, model: str) -> str:
 def _hourly_cycle_model(kind: str, model: str) -> str:
     kind_norm = str(kind or "").strip().lower()
     if kind_norm == "hourly":
-        return "ecmwf"
+        model_norm = str(model or "").strip().lower()
+        return model_norm if model_norm in {"ecmwf", "gfs"} else "ecmwf"
     if kind_norm == "hourly_gfs":
         return "gfs"
     return str(model or "").strip().lower()
+
+
+def _openmeteo_hourly_endpoint(model: str) -> str:
+    model_norm = str(model or "").strip().lower()
+    if model_norm == "gfs":
+        return "https://api.open-meteo.com/v1/gfs"
+    if model_norm == "ecmwf":
+        return "https://api.open-meteo.com/v1/ecmwf"
+    return "https://api.open-meteo.com/v1/forecast"
 
 
 def _read_cache(
@@ -230,7 +266,29 @@ def prune_runtime_cache(max_age_hours: int = 24) -> None:
     _purge_dir_by_age(CACHE_DIR / "gfs_grids", suffixes=(".grib2",), max_age_hours=ggrid_keep_h)
 
     ecmwf_keep_h = int(os.getenv("ECMWF_OPEN_DATA_CACHE_HOURS", "24") or "24")
-    _purge_dir_by_age(CACHE_DIR / "ecmwf_open_data", suffixes=(".grib2",), max_age_hours=ecmwf_keep_h)
+    ecmwf_ens_keep_h = int(
+        os.getenv(
+            "ECMWF_ENS_OPEN_DATA_CACHE_HOURS",
+            str(min(ecmwf_keep_h, 12)),
+        )
+        or str(min(ecmwf_keep_h, 12))
+    )
+    ecmwf_dir = CACHE_DIR / "ecmwf_open_data"
+    _purge_matching_files_by_age(
+        ecmwf_dir,
+        pattern="ecmwf_ens_*.grib2",
+        max_age_hours=ecmwf_ens_keep_h,
+    )
+    if ecmwf_dir.exists() and ecmwf_dir.is_dir():
+        for p in ecmwf_dir.rglob("*.grib2"):
+            try:
+                if p.name.startswith("ecmwf_ens_"):
+                    continue
+                mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+                if (now - mtime) > timedelta(hours=ecmwf_keep_h):
+                    p.unlink(missing_ok=True)
+            except Exception:
+                continue
 
     _touch_prune_stamp(now)
 
@@ -317,7 +375,7 @@ def fetch_hourly_openmeteo(st: Station, target_date: str, model: str) -> dict[st
     start_date = (d - timedelta(days=1)).isoformat()
     end_date = (d + timedelta(days=1)).isoformat()
 
-    url = "https://api.open-meteo.com/v1/forecast"
+    url = _openmeteo_hourly_endpoint(model)
     params = {
         "latitude": st.lat,
         "longitude": st.lon,

@@ -18,6 +18,9 @@
     "RKSI": {"cadence_min": 30, "minute_slots": [0, 30]},
     "SAEZ": {"cadence_min": 60, "minute_slots": [0]},
     "SBGR": {"cadence_min": 60, "minute_slots": [0]},
-    "VILK": {"cadence_min": 30, "minute_slots": [0, 30]}
+    "VHHH": {"cadence_min": 30, "minute_slots": [10, 40]},
+    "VILK": {"cadence_min": 30, "minute_slots": [0, 30]},
+    "WSSS": {"cadence_min": 30, "minute_slots": [15, 45]},
+    "ZSPD": {"cadence_min": 30, "minute_slots": [5, 35]}
   }
 }

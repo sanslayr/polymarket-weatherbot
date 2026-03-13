@@ -9,7 +9,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from report_render_service import _background_compact_clause, _natural_flow_chain_line, choose_section_text  # noqa: E402
+from report_render_service import _background_compact_clause, _format_local_clock, _natural_flow_chain_line, choose_section_text  # noqa: E402
 
 
 def _snapshot_template() -> dict:
@@ -54,6 +54,12 @@ def _snapshot_template() -> dict:
 
 
 class ReportRenderServiceTest(unittest.TestCase):
+    def test_format_local_clock_includes_date_for_non_current_local_day(self) -> None:
+        self.assertEqual(
+            _format_local_clock("2000-01-01T20:00:00+08:00"),
+            "2000/01/01 20:00 Local",
+        )
+
     def test_same_day_near_window_puts_background_first_and_keeps_original_metar_block(self) -> None:
         text = choose_section_text(
             primary_window={
@@ -110,6 +116,8 @@ class ReportRenderServiceTest(unittest.TestCase):
                 "station_icao": "RJTT",
                 "latest_report_local": "2026-03-09T20:00:00+00:00",
                 "latest_temp": 21.0,
+                "observed_max_temp_c": 22.0,
+                "observed_max_time_local": "2026-03-09T15:40:00+00:00",
                 "latest_wdir": 180,
                 "latest_wspd": 9,
                 "latest_cloud_tokens": ["SCT025"],
@@ -125,18 +133,133 @@ class ReportRenderServiceTest(unittest.TestCase):
         )
 
         first_block = text.split("\n\n", 1)[0]
-        self.assertTrue(first_block.startswith("🧭 环流："))
+        self.assertTrue(first_block.startswith("🧭 形势与路径："))
         self.assertNotIn("Tokyo当前", first_block)
         self.assertNotIn("当前主看", first_block)
         self.assertTrue(
             "低层混合仍在加深" in first_block
             or "风向切换时点" in first_block
         )
-        self.assertIn("站点历史上更常见的是偏早见顶", first_block)
+        self.assertIn("数值预报峰值约 30.0°C", first_block)
         self.assertNotIn("暂未识别到单独可追踪的近站系统", first_block)
+        self.assertNotIn("当前看", first_block)
         self.assertIn("📡 当前实况：", text)
+        self.assertIn("21°C", text)
+        self.assertNotIn("21.0°C", text)
+        self.assertIn("今日已观测最高温：22°C（2026/03/09 15:40 Local）", text)
         self.assertNotIn("升温转弱", text)
         self.assertLess(text.index("📈 **峰值窗口判断**"), text.index("📡 当前实况："))
+
+    def test_cross_day_far_synoptic_downgrades_obs_and_uses_forecast_rationale(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["posterior_feature_vector"]["time_phase"]["hours_to_peak"] = 12.0
+        snapshot["canonical_raw_state"] = {
+            "forecast": {
+                "meta": {
+                    "model": "ecmwf",
+                    "runtime": "2026031112Z",
+                },
+                "context": {
+                    "bottleneck_text": "925–850混合偏弱，低云破碎时点将决定上沿空间。",
+                },
+                "ensemble_factor": {
+                    "summary": {
+                        "dominant_path": "transition",
+                        "dominant_path_detail": "neutral_stable",
+                        "dominant_prob": 0.43,
+                        "transition_detail": "neutral_stable",
+                        "split_state": "split",
+                        "signal_dispersion_c": 2.1,
+                    },
+                    "probabilities": {
+                        "warm_support": 0.35,
+                        "transition": 0.43,
+                        "cold_suppression": 0.22,
+                    },
+                    "source": {
+                        "runtime_used": "2026031112Z",
+                    },
+                },
+                "h500": {
+                    "thermal_role": "cold_high_suppression",
+                    "tmax_bias_label": "明显压温支持",
+                },
+                "h850_review": {
+                    "advection_type": "cold",
+                    "surface_role": "background",
+                },
+                "sounding": {
+                    "thermo": {
+                        "layer_findings": [
+                            "925–850混合偏弱，升温更依赖低云何时真正破碎。",
+                        ],
+                    }
+                },
+            },
+            "window": {
+                "calc": {
+                    "start_local": "2026-03-10T13:00",
+                    "end_local": "2026-03-10T15:00",
+                    "peak_local": "2026-03-10T14:00",
+                    "peak_temp_c": 30.0,
+                }
+            },
+            "shape": {
+                "forecast": {
+                    "shape_type": "broad_plateau",
+                    "plateau_state": "broad",
+                    "day_range_c": 2.8,
+                    "global_peak_temp_c": 30.0,
+                }
+            },
+        }
+
+        with patch(
+            "report_render_service._build_polymarket_section",
+            return_value=(
+                "📈 **Polymarket 盘口与博弈**\n"
+                "**博弈区间**\n"
+                "  • **29°C（👍最有可能）：Bid 19¢ | Ask 20¢**"
+            ),
+        ):
+            text = choose_section_text(
+                primary_window={
+                    "peak_local": "2026-03-10T14:00",
+                    "start_local": "2026-03-10T13:00",
+                    "end_local": "2026-03-10T15:00",
+                    "peak_temp_c": 30.0,
+                },
+                metar_text="• **🌡️ 气温**：28.4°C（较上一报 +0.6°C）",
+                metar_diag={
+                    "station_icao": "NZWN",
+                    "latest_report_local": "2026-03-09T11:30:00+00:00",
+                    "latest_temp": 28.4,
+                    "observed_max_temp_c": 28.4,
+                    "observed_max_time_local": "2026-03-09T11:30:00+00:00",
+                    "latest_wdir": 180,
+                    "latest_wspd": 8,
+                    "latest_cloud_tokens": ["SCT025"],
+                    "temp_trend_1step_c": 0.6,
+                },
+                polymarket_event_url="https://polymarket.com/event/test",
+                compact_synoptic=True,
+                analysis_snapshot=snapshot,
+            )
+
+        first_block = text.split("\n\n", 1)[0]
+        self.assertTrue(first_block.startswith("🧭 形势与路径（ECMWF 2026031112Z）："))
+        self.assertIn("📡 当前实况：", text)
+        self.assertNotIn("📡 **最新实况分析（METAR）**", text)
+        self.assertNotIn("较上一报 +0.6°C", text)
+        self.assertNotIn("🔀 系集路径：", text)
+        self.assertNotIn("📈 单跑参考：", text)
+        self.assertIn("ECMWF ENS 仍有分歧", text)
+        self.assertIn("静稳维持", text)
+        self.assertIn("ECMWF 数值预报峰值约 30.0°C", text)
+        self.assertIn("今日已观测最高温：28.4°C（2026/03/09 11:30 Local）", text)
+        self.assertNotIn("目标峰值窗仍远，区间先按模式峰值和环流修正理解", text)
+        self.assertNotIn("最新报已经到", text)
+        self.assertNotIn("**判断依据**", text)
 
     def test_near_window_drops_generic_background_when_no_clear_signal(self) -> None:
         snapshot = _snapshot_template()
@@ -247,7 +370,7 @@ class ReportRenderServiceTest(unittest.TestCase):
             )
 
         self.assertIn("**判断依据**", text)
-        self.assertIn("最新报还在 16°C 一带横着走", text)
+        self.assertNotIn("最新报还在 16°C 一带横着走", text)
         self.assertIn("区间先放在 17.0~18.4°C，下沿留给偏冷回摆", text)
         self.assertIn("在锋后偏南气流持续维持的前提下", text)
         self.assertLess(text.index("**判断依据**"), text.index("📈 **Polymarket 盘口与博弈**"))
@@ -280,6 +403,279 @@ class ReportRenderServiceTest(unittest.TestCase):
 
         self.assertIn("📡 **最新实况分析（METAR）**", text)
         self.assertNotIn("📡 当前实况：", text)
+
+    def test_transition_rationale_prefers_targeted_synoptic_basis_when_peak_is_still_far(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["posterior_feature_vector"]["time_phase"]["hours_to_peak"] = 7.0
+        snapshot["synoptic_summary"]["summary"]["impact"] = "午后上沿更容易受压。"
+        snapshot["canonical_raw_state"] = {
+            "forecast": {
+                "h500": {
+                    "thermal_role": "cold_high_suppression",
+                    "tmax_bias_label": "明显压温支持",
+                },
+                "h850_review": {
+                    "advection_type": "cold",
+                    "surface_role": "background",
+                },
+                "sounding": {
+                    "thermo": {
+                        "layer_findings": [
+                            "925–850混合偏弱，升温更依赖低云何时真正破碎。",
+                        ],
+                    },
+                },
+            },
+        }
+        with patch(
+            "report_render_service._build_polymarket_section",
+            return_value=(
+                "📈 **Polymarket 盘口与博弈**\n"
+                "**博弈区间**\n"
+                "  • **11°C（👍最有可能）：Bid 19¢ | Ask 20¢**"
+            ),
+        ):
+            text = choose_section_text(
+                primary_window={
+                    "peak_local": "2026-03-09T18:00",
+                    "start_local": "2026-03-09T16:00",
+                    "end_local": "2026-03-09T20:00",
+                    "peak_temp_c": 12.0,
+                },
+                metar_text="• **🌡️ 气温**：7°C",
+                metar_diag={
+                    "station_icao": "RJTT",
+                    "latest_report_local": "2026-03-09T11:00:00+09:00",
+                    "latest_temp": 7.0,
+                    "temp_trend_1step_c": 0.0,
+                },
+                polymarket_event_url="https://polymarket.com/event/test",
+                analysis_snapshot=snapshot,
+            )
+
+        self.assertIn("**判断依据**", text)
+        self.assertNotIn("最新报还在 7°C 一带横着走", text)
+        self.assertTrue(
+            "若冷空气压制尚未解除" in text
+            or "混合层加深幅度" in text
+        )
+
+    def test_transition_rationale_can_reference_observed_path_vs_ensemble(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["posterior_feature_vector"] = {
+            "time_phase": {"hours_to_peak": 4.5},
+            "ensemble_path_state": {
+                "dominant_path": "transition",
+                "dominant_path_detail": "weak_warm_transition",
+                "dominant_prob": 0.68,
+                "transition_detail": "weak_warm_transition",
+                "observed_path": "transition",
+                "observed_path_detail": "weak_warm_transition",
+                "observed_alignment_match_state": "exact",
+                "observed_alignment_confidence": "high",
+                "observed_path_locked": True,
+            },
+        }
+        snapshot["canonical_raw_state"] = {
+            "forecast": {
+                "h850_review": {
+                    "advection_type": "warm",
+                    "surface_role": "background",
+                },
+            },
+        }
+        with patch(
+            "report_render_service._build_polymarket_section",
+            return_value=(
+                "📈 **Polymarket 盘口与博弈**\n"
+                "**博弈区间**\n"
+                "  • **11°C（👍最有可能）：Bid 19¢ | Ask 20¢**"
+            ),
+        ):
+            text = choose_section_text(
+                primary_window={
+                    "peak_local": "2026-03-09T16:30",
+                    "start_local": "2026-03-09T15:00",
+                    "end_local": "2026-03-09T18:00",
+                    "peak_temp_c": 12.0,
+                },
+                metar_text="• **🌡️ 气温**：10°C",
+                metar_diag={
+                    "station_icao": "RJTT",
+                    "latest_report_local": "2026-03-09T12:00:00+09:00",
+                    "latest_temp": 10.0,
+                    "temp_trend_1step_c": 0.1,
+                },
+                polymarket_event_url="https://polymarket.com/event/test",
+                analysis_snapshot=snapshot,
+            )
+
+        self.assertIn("**判断依据**", text)
+        self.assertIn("当前实况高度贴合系集主路径，正沿暖侧试探演进", text)
+        self.assertIn("主路径约 68%", text)
+
+    def test_transition_rationale_can_fallback_to_obs_vs_model_pace_hint(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["posterior_feature_vector"] = {
+            "unit": "C",
+            "time_phase": {"hours_to_peak": 4.0},
+            "observation_state": {
+                "temp_trend_c": 0.22,
+                "temp_accel_2step_c": 0.12,
+            },
+            "cloud_radiation_state": {
+                "radiation_eff": 0.71,
+                "cloud_trend": "clearing",
+            },
+            "transport_state": {
+                "transport_state": "warm",
+                "thermal_advection_state": "confirmed",
+                "surface_bias": "warm",
+            },
+            "quality_state": {
+                "metar_recent_interval_min": 30.0,
+                "metar_routine_cadence_min": 30.0,
+                "metar_speci_active": False,
+                "metar_speci_likely": False,
+            },
+        }
+        with patch(
+            "report_render_service._build_polymarket_section",
+            return_value=(
+                "📈 **Polymarket 盘口与博弈**\n"
+                "**博弈区间**\n"
+                "  • **12°C（👍最有可能）：Bid 19¢ | Ask 20¢**"
+            ),
+        ):
+            text = choose_section_text(
+                primary_window={
+                    "peak_local": "2026-03-09T16:00",
+                    "start_local": "2026-03-09T14:00",
+                    "end_local": "2026-03-09T18:00",
+                    "peak_temp_c": 12.0,
+                },
+                metar_text="• **🌡️ 气温**：10°C",
+                metar_diag={
+                    "station_icao": "ZSPD",
+                    "latest_report_local": "2026-03-09T12:00:00+08:00",
+                    "latest_temp": 10.0,
+                    "temp_trend_1step_c": 0.1,
+                },
+                polymarket_event_url="https://polymarket.com/event/test",
+                analysis_snapshot=snapshot,
+            )
+
+        self.assertIn("当前升温节奏和辐射条件更像暖侧路径在提前落地", text)
+        self.assertNotIn("最新报已经到", text)
+        self.assertNotIn("最新报还在", text)
+
+    def test_transition_rationale_does_not_fire_on_single_point_normal_variation(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["posterior_feature_vector"] = {
+            "unit": "C",
+            "time_phase": {"hours_to_peak": 4.0},
+            "observation_state": {
+                "temp_trend_c": 0.18,
+                "temp_accel_2step_c": 0.0,
+            },
+            "cloud_radiation_state": {
+                "radiation_eff": 0.56,
+                "cloud_trend": "steady",
+            },
+            "transport_state": {
+                "transport_state": "warm",
+                "thermal_advection_state": "probable",
+                "surface_bias": "warm",
+            },
+            "quality_state": {
+                "metar_recent_interval_min": 30.0,
+                "metar_routine_cadence_min": 30.0,
+                "metar_speci_active": False,
+                "metar_speci_likely": False,
+            },
+        }
+        with patch(
+            "report_render_service._build_polymarket_section",
+            return_value=(
+                "📈 **Polymarket 盘口与博弈**\n"
+                "**博弈区间**\n"
+                "  • **12°C（👍最有可能）：Bid 19¢ | Ask 20¢**"
+            ),
+        ):
+            text = choose_section_text(
+                primary_window={
+                    "peak_local": "2026-03-09T16:00",
+                    "start_local": "2026-03-09T14:00",
+                    "end_local": "2026-03-09T18:00",
+                    "peak_temp_c": 12.0,
+                },
+                metar_text="• **🌡️ 气温**：10°C",
+                metar_diag={
+                    "station_icao": "ZSPD",
+                    "latest_report_local": "2026-03-09T12:00:00+08:00",
+                    "latest_temp": 10.0,
+                    "temp_trend_1step_c": 0.1,
+                },
+                polymarket_event_url="https://polymarket.com/event/test",
+                analysis_snapshot=snapshot,
+            )
+
+        self.assertNotIn("更像暖侧路径在提前落地", text)
+        self.assertNotIn("比模式主路径略快", text)
+
+    def test_transition_rationale_ignores_two_step_signal_when_report_cadence_is_short(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["posterior_feature_vector"] = {
+            "unit": "C",
+            "time_phase": {"hours_to_peak": 4.0},
+            "observation_state": {
+                "temp_trend_c": 0.22,
+                "temp_accel_2step_c": 0.18,
+            },
+            "cloud_radiation_state": {
+                "radiation_eff": 0.74,
+                "cloud_trend": "clearing",
+            },
+            "transport_state": {
+                "transport_state": "warm",
+                "thermal_advection_state": "confirmed",
+                "surface_bias": "warm",
+            },
+            "quality_state": {
+                "metar_recent_interval_min": 10.0,
+                "metar_routine_cadence_min": 30.0,
+                "metar_speci_active": True,
+                "metar_speci_likely": False,
+            },
+        }
+        with patch(
+            "report_render_service._build_polymarket_section",
+            return_value=(
+                "📈 **Polymarket 盘口与博弈**\n"
+                "**博弈区间**\n"
+                "  • **12°C（👍最有可能）：Bid 19¢ | Ask 20¢**"
+            ),
+        ):
+            text = choose_section_text(
+                primary_window={
+                    "peak_local": "2026-03-09T16:00",
+                    "start_local": "2026-03-09T14:00",
+                    "end_local": "2026-03-09T18:00",
+                    "peak_temp_c": 12.0,
+                },
+                metar_text="• **🌡️ 气温**：10°C",
+                metar_diag={
+                    "station_icao": "ZSPD",
+                    "latest_report_local": "2026-03-09T12:00:00+08:00",
+                    "latest_temp": 10.0,
+                    "temp_trend_1step_c": 0.1,
+                },
+                polymarket_event_url="https://polymarket.com/event/test",
+                analysis_snapshot=snapshot,
+            )
+
+        self.assertNotIn("更像暖侧路径在提前落地", text)
+        self.assertNotIn("比模式主路径略快", text)
 
     def test_compact_spacing_keeps_reminder_and_focus_tight(self) -> None:
         snapshot = _snapshot_template()

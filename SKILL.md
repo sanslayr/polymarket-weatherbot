@@ -10,6 +10,8 @@ command-template: ./.venv_gfs/bin/python scripts/telegram_report_cli.py --comman
 
 Use the current weatherbot runtime only.
 
+When a user asks a weatherbot-covered station/date weather question that is not literally `/look`, still prefer weatherbot internal runtime/cache/analysis data first when it can answer the question.
+
 ## Entry point
 
 - Run `skills/polymarket-weatherbot/.venv_gfs/bin/python skills/polymarket-weatherbot/scripts/telegram_report_cli.py`.

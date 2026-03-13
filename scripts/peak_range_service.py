@@ -344,10 +344,18 @@ def build_peak_range_summary(
             spread_boost += 0.05
         half_range = min(1.55, half_range + spread_boost)
 
-    # center = model baseline + observed deviation (window-weighted) + excess-bias correction
+    # center = near-term prefers observed state; farther out keeps model baseline.
     center = float(peak_c)
     try:
-        tstep_src = metar_diag.get("temp_trend_smooth_c") if metar_diag.get("temp_trend_smooth_c") is not None else metar_diag.get("temp_trend_1step_c")
+        tstep_src = (
+            metar_diag.get("temp_trend_effective_c")
+            if metar_diag.get("temp_trend_effective_c") is not None
+            else (
+                metar_diag.get("temp_trend_smooth_c")
+                if metar_diag.get("temp_trend_smooth_c") is not None
+                else metar_diag.get("temp_trend_1step_c")
+            )
+        )
         tstep = float(tstep_src or 0.0)
     except Exception:
         tstep = 0.0
@@ -356,12 +364,39 @@ def build_peak_range_summary(
     # avoid using current absolute temp directly, which can understate rapid-rise regimes before peak.
     b_cap = max(-1.2, min(1.8, b))
     t_up = max(0.0, min(0.9, tstep))
-    obs_proj = float(peak_c) + 0.55 * b_cap + 0.35 * t_up
+    obs_anchor = obs_max if obs_max is not None else None
+    try:
+        latest_temp_anchor = float(metar_diag.get("latest_temp")) if metar_diag.get("latest_temp") is not None else None
+    except Exception:
+        latest_temp_anchor = None
+    if latest_temp_anchor is not None:
+        obs_anchor = latest_temp_anchor if obs_anchor is None else max(float(obs_anchor), latest_temp_anchor)
+
+    if phase_now in {"near_window", "in_window", "post"} and obs_anchor is not None:
+        gain_cap = {
+            "near_window": 1.00,
+            "in_window": 0.60,
+            "post": 0.25,
+        }.get(phase_now, 0.80)
+        horizon_gain = 0.0
+        if h_to_peak is not None and phase_now in {"near_window", "in_window"}:
+            horizon_gain = min(gain_cap, max(0.0, float(h_to_peak)) * (0.16 if phase_now == "near_window" else 0.08))
+        obs_gain = min(
+            gain_cap,
+            0.70 * t_up + 0.22 * max(0.0, b_cap) + horizon_gain,
+        )
+        if phase_now == "post":
+            obs_gain = min(gain_cap, 0.20 * t_up + 0.10 * max(0.0, b_cap))
+        obs_proj = float(obs_anchor) + obs_gain
+        obs_proj = min(obs_proj, float(peak_c) + (0.90 if phase_now == "near_window" else 0.60))
+    else:
+        obs_proj = float(peak_c) + 0.55 * b_cap + 0.35 * t_up
+
     w_center = {
         "far": 0.18,
-        "near_window": 0.26,
-        "in_window": 0.35,
-        "post": 0.45,
+        "near_window": 0.52,
+        "in_window": 0.68,
+        "post": 0.82,
     }.get(phase_now, 0.22)
     center = (1 - w_center) * center + w_center * obs_proj
 
@@ -397,11 +432,23 @@ def build_peak_range_summary(
     except Exception:
         b_cons = 0.0
     try:
-        t_cons = float((metar_diag.get("temp_trend_smooth_c") if metar_diag.get("temp_trend_smooth_c") is not None else metar_diag.get("temp_trend_1step_c")) or 0.0)
+        t_cons = float((
+            metar_diag.get("temp_trend_effective_c")
+            if metar_diag.get("temp_trend_effective_c") is not None
+            else (
+                metar_diag.get("temp_trend_smooth_c")
+                if metar_diag.get("temp_trend_smooth_c") is not None
+                else metar_diag.get("temp_trend_1step_c")
+            )
+        ) or 0.0)
     except Exception:
         t_cons = 0.0
     try:
-        t_acc = float(metar_diag.get("temp_accel_2step_c")) if metar_diag.get("temp_accel_2step_c") is not None else None
+        t_acc = (
+            float(metar_diag.get("temp_accel_effective_c"))
+            if metar_diag.get("temp_accel_effective_c") is not None
+            else (float(metar_diag.get("temp_accel_2step_c")) if metar_diag.get("temp_accel_2step_c") is not None else None)
+        )
     except Exception:
         t_acc = None
 

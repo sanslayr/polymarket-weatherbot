@@ -41,12 +41,24 @@ from hourly_data_service import (
     build_post_focus_window,
     detect_tmax_windows,
     fetch_hourly_openmeteo,
+    prune_runtime_cache,
     slice_hourly_local_day,
 )
 from metar_analysis_service import metar_observation_block
 from metar_utils import fetch_metar_24h
 from realtime_pipeline import classify_window_phase
-from station_catalog import DEFAULT_STATION_CSV, Station, station_timezone_name
+from forecast_analysis_cache import build_and_cache_forecast_analysis
+from historical_context_provider import build_historical_context, historical_context_enabled
+from historical_payload import attach_historical_payload
+from station_catalog import (
+    DEFAULT_STATION_CSV,
+    Station,
+    direction_factor_for,
+    factor_summary_for,
+    site_tag_for,
+    station_timezone_name,
+    terrain_tag_for,
+)
 from temperature_shape_analysis import analyze_temperature_shape
 from temperature_window_resolver import resolve_temperature_window
 
@@ -288,12 +300,37 @@ def _run_synoptic_for_worker(
     )
 
 
+def _attach_historical_context(
+    metar_diag: dict[str, Any],
+    *,
+    station_icao: str,
+    target_date: str,
+    forecast_decision: dict[str, Any] | None,
+    synoptic_context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not historical_context_enabled():
+        return None
+    historical_context = build_historical_context(
+        station_icao,
+        target_date,
+        metar_diag,
+        forecast_decision=forecast_decision,
+        synoptic_context=synoptic_context,
+        site_tag=site_tag_for(station_icao),
+        terrain_tag=terrain_tag_for(station_icao),
+        direction_factor=direction_factor_for(station_icao),
+        factor_summary=factor_summary_for(station_icao),
+    )
+    attach_historical_payload(metar_diag, historical_context)
+    return historical_context
+
+
 def _build_analysis_window(
     *,
     station: Station,
     target_date: str,
     tz_name: str,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], str]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], str, str]:
     model = "ecmwf"
     hourly_payload = fetch_hourly_openmeteo(station, target_date, model)
     hourly_day = slice_hourly_local_day(hourly_payload["hourly"], target_date)
@@ -340,7 +377,7 @@ def _build_analysis_window(
     except Exception:
         analysis_window = dict(primary)
 
-    return hourly_payload, hourly_day, metar_diag, analysis_window, model
+    return hourly_payload, hourly_day, metar_diag, primary, analysis_window, temp_shape_analysis, unit_pref, model
 
 
 def _prewarm_station_target(station: Station, target_date: str) -> dict[str, Any]:
@@ -349,7 +386,16 @@ def _prewarm_station_target(station: Station, target_date: str) -> dict[str, Any
 
     tz_name = station_timezone_name(station)
     tz = ZoneInfo(tz_name)
-    hourly_payload, hourly_day, metar_diag, analysis_window, model = _build_analysis_window(
+    (
+        hourly_payload,
+        hourly_day,
+        metar_diag,
+        primary_window,
+        analysis_window,
+        temp_shape_analysis,
+        unit_pref,
+        model,
+    ) = _build_analysis_window(
         station=station,
         target_date=target_date,
         tz_name=tz_name,
@@ -377,6 +423,39 @@ def _prewarm_station_target(station: Station, target_date: str) -> dict[str, Any
         forecast_decision=forecast_decision,
         synoptic=synoptic,
     )
+    historical_context = _attach_historical_context(
+        metar_diag,
+        station_icao=station.icao,
+        target_date=target_date,
+        forecast_decision=forecast_decision,
+        synoptic_context=synoptic,
+    )
+    runtime_pref = (
+        runtime_state.get("actual_runtime_tag")
+        or str((forecast_decision.get("meta") or {}).get("runtime") or "")
+        or _ecmwf_cycle_runtime_tag(now_utc)
+    )
+    analysis_cache_payload: dict[str, Any] | None = None
+    analysis_cache_error = ""
+    try:
+        analysis_cache_payload = build_and_cache_forecast_analysis(
+            station_icao=station.icao,
+            station_lat=float(station.lat),
+            station_lon=float(station.lon),
+            target_date=target_date,
+            model=model,
+            synoptic_provider=str(quality.get("synoptic_provider_used") or synoptic_provider),
+            runtime_tag=runtime_pref,
+            primary_window=primary_window,
+            synoptic_window=analysis_window,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            temp_shape_analysis=temp_shape_analysis,
+            temp_unit=unit_pref,
+            tz_name=tz_name,
+        )
+    except Exception as exc:
+        analysis_cache_error = str(exc)
     return {
         "station": station,
         "target_date": target_date,
@@ -390,6 +469,12 @@ def _prewarm_station_target(station: Station, target_date: str) -> dict[str, Any
         "analysis_peak_local": analysis_window.get("peak_local"),
         "hourly_points": len(hourly_day.get("time") or []),
         "observed_max_temp_c": metar_diag.get("observed_max_temp_c"),
+        "historical_context_available": bool((historical_context or {}).get("available", historical_context is not None)),
+        "forecast_analysis_cached": bool(analysis_cache_payload),
+        "analysis_snapshot_cached": bool((analysis_cache_payload or {}).get("analysis_snapshot")),
+        "ensemble_factor_cached": bool((analysis_cache_payload or {}).get("ensemble_factor")),
+        "analysis_cache_runtime": runtime_pref,
+        "analysis_cache_error": analysis_cache_error,
         "source_state": runtime_state.get("source_state") or quality.get("source_state"),
         "missing_layers": runtime_state.get("missing_layers"),
         "synoptic_complete": runtime_state.get("synoptic_complete"),
@@ -414,7 +499,7 @@ def _should_run(last_runs: dict[str, Any], run_key: str, interval_seconds: int) 
 
 
 def _purge_old_forecast_cache(*, station_icao: str, target_date: str, keep_runtime_tag: str) -> dict[str, int]:
-    removed = {"forecast_decision": 0, "forecast_3d_bundle": 0}
+    removed = {"forecast_decision": 0, "forecast_3d_bundle": 0, "forecast_analysis": 0}
     for path in CACHE_DIR.glob("forecast_decision_*.json"):
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
@@ -445,15 +530,30 @@ def _purge_old_forecast_cache(*, station_icao: str, target_date: str, keep_runti
             removed["forecast_3d_bundle"] += 1
         except Exception:
             continue
+    for path in CACHE_DIR.glob("forecast_analysis_*.json"):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            payload = doc.get("payload") if isinstance(doc.get("payload"), dict) else doc
+            if str(payload.get("station") or "") != station_icao:
+                continue
+            if str(payload.get("target_date") or "") != target_date:
+                continue
+            runtime_tag = str(payload.get("runtime_tag") or "")
+            if not runtime_tag or runtime_tag == keep_runtime_tag:
+                continue
+            path.unlink()
+            removed["forecast_analysis"] += 1
+        except Exception:
+            continue
     return removed
 
 
 def _purge_stale_forecast_cache(*, max_age_hours: int) -> dict[str, int]:
-    removed = {"forecast_decision": 0, "forecast_3d_bundle": 0}
+    removed = {"forecast_decision": 0, "forecast_3d_bundle": 0, "forecast_analysis": 0}
     if max_age_hours <= 0:
         return removed
     cutoff = _utc_now() - timedelta(hours=max_age_hours)
-    for prefix in ("forecast_decision", "forecast_3d_bundle"):
+    for prefix in ("forecast_decision", "forecast_3d_bundle", "forecast_analysis"):
         for path in CACHE_DIR.glob(f"{prefix}_*.json"):
             try:
                 modified_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
@@ -484,6 +584,7 @@ def main() -> None:
     with LOG_PATH.open("a", encoding="utf-8") as log:
         while True:
             now_utc = _utc_now()
+            prune_runtime_cache(max_age_hours=max_age_hours)
             stale_purged = _purge_stale_forecast_cache(max_age_hours=max_age_hours)
             if any(stale_purged.values()):
                 log.write(
@@ -541,7 +642,11 @@ def main() -> None:
                             station_icao=station.icao,
                             target_date=target_date,
                             keep_runtime_tag=actual_runtime_tag,
-                        ) if payload["target_cycle_ready"] and actual_runtime_tag else {"forecast_decision": 0, "forecast_3d_bundle": 0}
+                        ) if payload["target_cycle_ready"] and actual_runtime_tag else {
+                            "forecast_decision": 0,
+                            "forecast_3d_bundle": 0,
+                            "forecast_analysis": 0,
+                        }
                         payload["purged_cache"] = purged
                         state.setdefault("last_runs", {})[run_key] = {
                             "started_at_utc": started_at,

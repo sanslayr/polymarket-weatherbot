@@ -16,10 +16,17 @@ from report_synoptic_service import (
     _build_background_synoptic_line,
     _build_far_synoptic_block,
     _coastal_flow_mechanism,
+    _far_directional_take,
+    _far_future_setup_line,
+    _far_line_overlap,
+    _far_mechanism_focus,
+    _far_profile_lead_phrase,
+    _is_generic_far_text,
     _natural_flow_chain_line,
     _normalize_synoptic_text,
     _pick_background_basis,
     _pick_far_basis_text,
+    _rephrase_far_basis_text,
     _short_mechanism_text,
     _summarize_impact_text,
 )
@@ -80,12 +87,64 @@ def _hours_between(later: datetime | None, earlier: datetime | None) -> float | 
         return None
 
 
+def _normalized_temp_pace_signal(
+    *,
+    temp_trend_c: float | None,
+    temp_accel_c: float | None,
+    quality_state: dict[str, Any],
+) -> dict[str, float | bool | None]:
+    recent_interval_min = _safe_float(quality_state.get("metar_recent_interval_min"))
+    routine_cadence_min = _safe_float(quality_state.get("metar_routine_cadence_min"))
+    speci_active = bool(quality_state.get("metar_speci_active"))
+    speci_likely = bool(quality_state.get("metar_speci_likely"))
+
+    hourly_trend_c = temp_trend_c
+    cadence_regular = False
+    short_interval_active = False
+    if recent_interval_min is not None and recent_interval_min > 0.0:
+        hourly_trend_c = (temp_trend_c * 60.0 / recent_interval_min) if temp_trend_c is not None else None
+        if routine_cadence_min is not None and routine_cadence_min > 0.0:
+            cadence_regular = 0.80 * routine_cadence_min <= recent_interval_min <= 1.30 * routine_cadence_min
+            short_interval_active = recent_interval_min <= max(15.0, 0.70 * routine_cadence_min)
+        else:
+            cadence_regular = 20.0 <= recent_interval_min <= 70.0
+            short_interval_active = recent_interval_min <= 15.0
+
+    accel_effective_c = temp_accel_c
+    if speci_active or speci_likely or short_interval_active or not cadence_regular:
+        accel_effective_c = None
+
+    return {
+        "hourly_trend_c": hourly_trend_c,
+        "accel_effective_c": accel_effective_c,
+        "recent_interval_min": recent_interval_min,
+        "cadence_regular": cadence_regular,
+        "short_interval_active": short_interval_active,
+        "speci_active": speci_active,
+        "speci_likely": speci_likely,
+    }
+
+
 def _format_local_clock(value: Any) -> str:
     dt = _parse_iso_dt(value)
     if not dt:
         return ""
     try:
+        now_local = datetime.now(dt.tzinfo) if dt.tzinfo is not None else datetime.now()
+        if dt.date() != now_local.date():
+            return dt.strftime("%Y/%m/%d %H:%M Local")
         return dt.strftime("%H:%M Local")
+    except Exception:
+        return ""
+
+
+def _format_local_window_range(start_value: Any, end_value: Any) -> str:
+    start_dt = _parse_iso_dt(start_value)
+    end_dt = _parse_iso_dt(end_value)
+    if not start_dt or not end_dt:
+        return ""
+    try:
+        return f"{start_dt.strftime('%H:%M')}~{end_dt.strftime('%H:%M')} Local"
     except Exception:
         return ""
 
@@ -209,6 +268,19 @@ def _fmt_obs_temp(v_c: Any, unit: str) -> str:
     return f"{value:.1f}°{unit}"
 
 
+def _observed_max_text(metar_diag: dict[str, Any], unit: str) -> str:
+    observed_max = _safe_float(metar_diag.get("observed_max_temp_c"))
+    if observed_max is None:
+        return ""
+    observed_text = _fmt_obs_temp(observed_max, unit)
+    if not observed_text:
+        return ""
+    max_time = _format_local_clock(metar_diag.get("observed_max_time_local"))
+    if max_time:
+        return f"今日已观测最高温：{observed_text}（{max_time}）"
+    return f"今日已观测最高温：{observed_text}"
+
+
 def _build_obs_focus_metar_block(
     metar_diag: dict[str, Any],
     *,
@@ -218,23 +290,19 @@ def _build_obs_focus_metar_block(
     metar_analysis_lines: list[str] | None = None,
 ) -> str:
     latest_temp = _safe_float(metar_diag.get("latest_temp"))
-    observed_max = _safe_float(metar_diag.get("observed_max_temp_c"))
     latest_time = _format_local_clock(metar_diag.get("latest_report_local"))
-    max_time = _format_local_clock(metar_diag.get("observed_max_time_local"))
+    observed_max_text = _observed_max_text(metar_diag, unit)
 
-    if latest_temp is None and observed_max is None:
+    if latest_temp is None and not observed_max_text:
         return "📡 实况：" + str(fallback_text or "METAR 实况摘要缺失。").strip()
 
     parts: list[str] = ["📡 实况："]
     if latest_time:
         parts.append(f"{latest_time} ")
     if latest_temp is not None:
-        parts.append(fmt_temp(latest_temp))
-    if observed_max is not None:
-        if max_time and max_time != latest_time:
-            parts.append(f"，今日已到 {fmt_temp(observed_max)}（{max_time}）")
-        else:
-            parts.append(f"，今日已到 {fmt_temp(observed_max)}")
+        parts.append(_fmt_obs_temp(latest_temp, unit))
+    if observed_max_text:
+        parts.append(f"，{observed_max_text}")
     lead_line = "".join(parts).strip() + "。"
 
     detail_bits: list[str] = []
@@ -280,16 +348,16 @@ def _build_far_obs_reference(
     metar_diag: dict[str, Any],
     *,
     unit: str,
-    fmt_temp,
     fallback_text: str,
 ) -> str:
     latest_temp = _safe_float(metar_diag.get("latest_temp"))
     latest_time = _format_local_clock(metar_diag.get("latest_report_local"))
+    observed_max_text = _observed_max_text(metar_diag, unit)
     detail_bits: list[str] = []
     if latest_time:
         detail_bits.append(latest_time)
     if latest_temp is not None:
-        detail_bits.append(fmt_temp(latest_temp))
+        detail_bits.append(_fmt_obs_temp(latest_temp, unit))
     wind_dir = metar_diag.get("latest_wdir")
     wind_spd = _safe_float(metar_diag.get("latest_wspd"))
     try:
@@ -303,7 +371,13 @@ def _build_far_obs_reference(
     if cloud_text:
         detail_bits.append(f"云 {cloud_text}")
     if detail_bits:
-        return f"📡 当前实况：{' | '.join(detail_bits)}（仅作背景参考）。"
+        line = f"📡 当前实况：{' | '.join(detail_bits)}"
+        if observed_max_text:
+            line += f"；{observed_max_text}"
+        line += "（仅作背景参考）。"
+        return line
+    if observed_max_text:
+        return f"📡 当前实况：{observed_max_text}（仅作背景参考）。"
     fallback = str(fallback_text or "").strip()
     return f"📡 当前实况：{fallback}" if fallback else "📡 当前实况：METAR 实况摘要缺失。"
 
@@ -330,6 +404,571 @@ def _range_target_text(
     if core_hi < display_hi:
         return f"区间先放在 {_fmt_range(core_lo, core_hi)}，上沿留给临窗再抬"
     return f"区间先放在 {_fmt_range(core_lo, core_hi)}"
+
+
+def _model_curve_shape_text(shape_type: str, plateau_state: str, day_range_c: float | None, unit: str) -> str:
+    lead = ""
+    if plateau_state == "broad" or shape_type == "broad_plateau":
+        lead = "曲线偏平台型"
+    elif plateau_state == "narrow":
+        lead = "曲线接近窄平台"
+    elif shape_type == "single_peak":
+        lead = "曲线偏单峰"
+    elif shape_type == "multi_peak":
+        lead = "曲线存在多峰可能"
+
+    if day_range_c is None:
+        return lead
+
+    day_range = float(day_range_c)
+    if unit == "F":
+        day_range = day_range * 9.0 / 5.0
+    if abs(day_range - round(day_range)) < 0.05:
+        range_txt = f"日较差约 {day_range:.0f}°{unit}"
+    else:
+        range_txt = f"日较差约 {day_range:.1f}°{unit}"
+
+    tail = ""
+    if day_range_c <= 3.0:
+        tail = "模式自身没有给出明显冲高"
+    elif day_range_c >= 6.0:
+        tail = "模式保留了一定白天升温空间"
+
+    parts = [part for part in (lead, range_txt, tail) if part]
+    return "，".join(parts)
+
+
+def _format_prob_pct(value: Any) -> str:
+    prob = _safe_float(value)
+    if prob is None:
+        return ""
+    return f"{round(max(0.0, min(1.0, prob)) * 100.0):.0f}%"
+
+
+def _ensemble_transition_detail_label(detail_label: str) -> str:
+    return {
+        "neutral_stable": "静稳维持",
+        "weak_warm_transition": "暖侧试探",
+        "weak_cold_transition": "冷侧回摆",
+    }.get(str(detail_label or "").strip(), "")
+
+
+def _ensemble_path_trigger_text(path_label: str, bottleneck_text: str, *, path_detail: str = "") -> str:
+    bottleneck = str(bottleneck_text or "").strip()
+    if path_label == "warm_support":
+        if "混合层" in bottleneck or "低云" in bottleneck:
+            return "若低云更早破碎、混合层做深更快，上沿才有再抬条件"
+        if "风" in bottleneck:
+            return "若低层暖输送更早落地、风向更快转到暖侧，上沿才有再抬条件"
+        return "若低层暖输送更早落地，上沿才有再抬条件"
+    if path_label == "cold_suppression":
+        if "混合层" in bottleneck or "低云" in bottleneck:
+            return "若稳层和低云维持更久，冲高空间仍会受压"
+        if "风" in bottleneck:
+            return "若偏冷输送维持更久，温度仍会走偏受压路径"
+        return "若偏冷输送或稳定层维持更久，温度仍会偏受压"
+    if path_detail == "neutral_stable":
+        return "若低云和近地稳层变化不大，温度更易在中间区间窄幅摆动"
+    if path_detail == "weak_warm_transition":
+        return "若暖输送更早接地或低云提前松动，上沿有小幅上修空间"
+    if path_detail == "weak_cold_transition":
+        return "若偏冷输送维持更久或低云更慢破碎，区间更易贴近下沿"
+    return "若低层改造幅度一般，温度更容易落在中间路径附近"
+
+
+def _ensemble_path_label(path_label: str, *, summary: dict[str, Any] | None = None) -> str:
+    key = str(path_label or "").strip()
+    if key == "transition":
+        summary = summary if isinstance(summary, dict) else {}
+        transition_detail = str(summary.get("transition_detail") or summary.get("dominant_path_detail") or "").strip()
+        detail_label = _ensemble_transition_detail_label(transition_detail)
+        if detail_label:
+            return detail_label
+        return "中性过渡"
+    return {
+        "warm_support": "暖输送抬升",
+        "cold_suppression": "冷抑制",
+    }.get(key, key or "主路径")
+
+
+def _ensemble_convergence_text(
+    split_state: str,
+    dominant_prob: float | None,
+    *,
+    signal_dispersion_c: float | None = None,
+) -> str:
+    state = str(split_state or "").strip()
+    prob = _safe_float(dominant_prob)
+    dispersion = _safe_float(signal_dispersion_c)
+    dispersion_text = ""
+    if dispersion is not None:
+        if dispersion <= 0.8:
+            dispersion_text = "，路径振幅也偏集中"
+        elif dispersion >= 2.2:
+            dispersion_text = "，但振幅离散度仍偏大"
+    if state == "clustered":
+        if prob is not None:
+            return f"系集已较收敛（主路径约 {_format_prob_pct(prob)}）{dispersion_text}"
+        return "系集已较收敛"
+    if state == "mixed":
+        if prob is not None:
+            return f"系集有主次之分但未完全收敛（主路径约 {_format_prob_pct(prob)}）{dispersion_text}"
+        return "系集有主次之分但未完全收敛"
+    if prob is not None:
+        return f"系集分歧仍在（主路径仅约 {_format_prob_pct(prob)}）{dispersion_text}"
+    return "系集分歧仍在"
+
+
+def _build_far_single_run_reference_text(
+    snapshot: dict[str, Any],
+    primary_window: dict[str, Any],
+    metar_diag: dict[str, Any],
+    *,
+    unit: str,
+    fmt_temp,
+) -> str:
+    canonical = dict(snapshot.get("canonical_raw_state") or {})
+    forecast = dict(canonical.get("forecast") or {})
+    window = dict(canonical.get("window") or {})
+    calc_window = dict(window.get("calc") or {})
+    shape = dict(canonical.get("shape") or {})
+    shape_forecast = dict(shape.get("forecast") or {})
+    meta = dict(forecast.get("meta") or {})
+
+    peak_temp = (
+        _safe_float(calc_window.get("peak_temp_c"))
+        or _safe_float(shape_forecast.get("global_peak_temp_c"))
+        or _safe_float(primary_window.get("peak_temp_c"))
+    )
+    if peak_temp is None:
+        return ""
+
+    model_name = str(meta.get("model") or "").strip().upper()
+    peak_local = calc_window.get("peak_local") or primary_window.get("peak_local")
+    start_local = calc_window.get("start_local") or primary_window.get("start_local")
+    end_local = calc_window.get("end_local") or primary_window.get("end_local")
+    peak_clock = _format_local_clock(peak_local)
+    line = f"{model_name} 数值预报峰值约 {fmt_temp(peak_temp)}" if model_name else f"数值预报峰值约 {fmt_temp(peak_temp)}"
+    if peak_clock:
+        line += f"（{peak_clock}前后）"
+    window_range = _format_local_window_range(start_local, end_local)
+    if window_range:
+        line += f"；峰值窗 {window_range}"
+    return line
+
+
+def _strip_bullet_prefix(text: str) -> str:
+    out = str(text or "").strip()
+    if out.startswith("•"):
+        out = out[1:].strip()
+    return out.rstrip("。")
+
+
+def _far_model_runtime_text(snapshot: dict[str, Any]) -> str:
+    canonical = dict(snapshot.get("canonical_raw_state") or {})
+    forecast = dict(canonical.get("forecast") or {})
+    meta = dict(forecast.get("meta") or {})
+    model_name = str(meta.get("model") or "").strip().upper()
+    runtime = str(meta.get("runtime") or "").strip()
+    label = " ".join(part for part in (model_name, runtime) if part)
+    return label
+
+
+def _build_far_deterministic_line(
+    snapshot: dict[str, Any],
+    syn_lines: list[str],
+    metar_diag: dict[str, Any],
+) -> str:
+    signal_line = _strip_bullet_prefix(_build_far_signal_basis_line(snapshot))
+    if signal_line:
+        return signal_line
+
+    synoptic_summary = dict(snapshot.get("synoptic_summary") or {})
+    summary = dict(synoptic_summary.get("summary") or {})
+    basis_text = _pick_far_basis_text(snapshot, syn_lines)
+    mechanism = _rephrase_far_basis_text(basis_text) or _far_mechanism_focus(summary.get("pathway"))
+    if _is_generic_far_text(mechanism):
+        mechanism = _far_profile_lead_phrase(metar_diag)
+    impact_text = _summarize_impact_text(summary.get("impact"))
+    return _background_compact_clause(mechanism, _far_directional_take(mechanism, impact_text)).rstrip("。")
+
+
+def _build_far_ensemble_line(snapshot: dict[str, Any]) -> str:
+    canonical = dict(snapshot.get("canonical_raw_state") or {})
+    forecast = dict(canonical.get("forecast") or {})
+    ensemble = dict(forecast.get("ensemble_factor") or {})
+    summary = dict(ensemble.get("summary") or {})
+    probabilities = dict(ensemble.get("probabilities") or {})
+    context = dict(forecast.get("context") or {})
+    if not probabilities:
+        return ""
+
+    ordered = sorted(
+        ((key, _safe_float(value) or 0.0) for key, value in probabilities.items()),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    ordered = [item for item in ordered if item[1] > 0.0]
+    if not ordered:
+        return ""
+
+    dominant_path = str(summary.get("dominant_path") or ordered[0][0])
+    dominant_prob = _safe_float(summary.get("dominant_prob")) or ordered[0][1]
+    split_state = str(summary.get("split_state") or "")
+    dominant_detail = str(summary.get("dominant_path_detail") or summary.get("transition_detail") or "")
+    dominant_label = _ensemble_path_label(dominant_path, summary=summary)
+    trigger = _ensemble_path_trigger_text(
+        dominant_path,
+        str(context.get("bottleneck_text") or ""),
+        path_detail=dominant_detail,
+    )
+
+    line = "ECMWF ENS"
+    if split_state == "clustered":
+        line += f" 基本收敛到{dominant_label}路径（约 {_format_prob_pct(dominant_prob)}）"
+    elif split_state == "mixed":
+        line += f" 有主次分支，主路径为{dominant_label}（约 {_format_prob_pct(dominant_prob)}）"
+    else:
+        line += f" 仍有分歧，主路径为{dominant_label}（约 {_format_prob_pct(dominant_prob)}）"
+
+    secondary_parts: list[str] = []
+    for key, prob in ordered[1:3]:
+        label = _ensemble_path_label(key, summary=summary)
+        if label == dominant_label:
+            continue
+        secondary_parts.append(f"{label} {_format_prob_pct(prob)}")
+    if secondary_parts:
+        line += f"；次路径 { ' / '.join(secondary_parts) }"
+    if trigger:
+        line += f"；{trigger}"
+    return line
+
+
+def _build_live_path_reference_line(snapshot: dict[str, Any], *, report_mode: str) -> str:
+    if report_mode not in {"transition", "near_obs"}:
+        return ""
+    posterior = dict(snapshot.get("posterior_feature_vector") or {})
+    ensemble_state = dict(posterior.get("ensemble_path_state") or {})
+    dominant_path = str(ensemble_state.get("dominant_path") or "")
+    observed_path = str(ensemble_state.get("observed_path") or "")
+
+    if dominant_path and observed_path:
+        dominant_label = _ensemble_path_label(
+            dominant_path,
+            summary={
+                "transition_detail": ensemble_state.get("transition_detail"),
+                "dominant_path_detail": ensemble_state.get("dominant_path_detail"),
+            },
+        )
+        observed_label = _ensemble_path_label(
+            observed_path,
+            summary={
+                "transition_detail": ensemble_state.get("observed_path_detail"),
+                "dominant_path_detail": ensemble_state.get("observed_path_detail"),
+            },
+        )
+        if dominant_label and observed_label:
+            match_state = str(ensemble_state.get("observed_alignment_match_state") or "")
+            confidence = str(ensemble_state.get("observed_alignment_confidence") or "")
+            observed_locked = bool(ensemble_state.get("observed_path_locked"))
+            dominant_prob = _format_prob_pct(ensemble_state.get("dominant_prob"))
+
+            if match_state == "exact" and observed_locked:
+                line = f"当前实况高度贴合系集主路径，正沿{observed_label}演进"
+                if dominant_prob:
+                    line += f"（主路径约 {dominant_prob}）"
+                return line
+            if match_state in {"exact", "path"} and confidence in {"high", "partial"}:
+                line = f"当前实况更像在走{observed_label}路径，与系集主判断大体一致"
+                if dominant_prob:
+                    line += f"（主路径约 {dominant_prob}）"
+                return line
+            if confidence in {"high", "partial"} and observed_label != dominant_label:
+                line = f"当前实况更像在走{observed_label}路径，和系集主路径{dominant_label}并不完全一致"
+                if dominant_prob:
+                    line += f"（主路径约 {dominant_prob}）"
+                return line
+
+    observation_state = dict(posterior.get("observation_state") or {})
+    cloud_state = dict(posterior.get("cloud_radiation_state") or {})
+    transport_state = dict(posterior.get("transport_state") or {})
+    quality_state = dict(posterior.get("quality_state") or {})
+    temp_trend_c = _safe_float(observation_state.get("temp_trend_c"))
+    temp_accel_c = _safe_float(observation_state.get("temp_accel_2step_c"))
+    radiation_eff = _safe_float(cloud_state.get("radiation_eff"))
+    cloud_trend = str(cloud_state.get("cloud_trend") or "").strip().lower()
+    transport_key = str(transport_state.get("transport_state") or "").strip().lower()
+    thermal_key = str(transport_state.get("thermal_advection_state") or "").strip().lower()
+    surface_bias = str(transport_state.get("surface_bias") or "").strip().lower()
+    pace_signal = _normalized_temp_pace_signal(
+        temp_trend_c=temp_trend_c,
+        temp_accel_c=temp_accel_c,
+        quality_state=quality_state,
+    )
+    hourly_trend_c = _safe_float(pace_signal.get("hourly_trend_c"))
+    accel_effective_c = _safe_float(pace_signal.get("accel_effective_c"))
+    short_interval_active = bool(pace_signal.get("short_interval_active"))
+    speci_active = bool(pace_signal.get("speci_active"))
+    speci_likely = bool(pace_signal.get("speci_likely"))
+
+    cloud_clearing = any(token in cloud_trend for token in {"clearing", "break", "散", "减", "少"})
+    cloud_thickening = any(token in cloud_trend for token in {"thicken", "increase", "增", "厚", "多"})
+    env_warm_support = bool((radiation_eff is not None and radiation_eff >= 0.62) or cloud_clearing)
+    env_cold_support = bool((radiation_eff is not None and radiation_eff <= 0.50) or cloud_thickening)
+
+    warm_rate_support = False
+    cold_rate_support = False
+    if accel_effective_c is not None:
+        if accel_effective_c >= 0.10:
+            warm_rate_support = True
+        elif accel_effective_c <= -0.08:
+            cold_rate_support = True
+    trend_reference_c = hourly_trend_c if hourly_trend_c is not None else temp_trend_c
+    trend_signal_allowed = not (short_interval_active or speci_active or speci_likely)
+    if trend_reference_c is not None and trend_signal_allowed:
+        if trend_reference_c >= 0.40 and (
+            (accel_effective_c is not None and accel_effective_c >= 0.04)
+            or env_warm_support
+        ):
+            warm_rate_support = True
+        elif trend_reference_c <= -0.22 and (
+            (accel_effective_c is not None and accel_effective_c <= -0.04)
+            or env_cold_support
+        ):
+            cold_rate_support = True
+
+    warm_transport = transport_key == "warm" or thermal_key in {"confirmed", "probable"} or "warm" in surface_bias
+    cold_transport = transport_key == "cold" or "cold" in surface_bias
+
+    if warm_transport and warm_rate_support and env_warm_support:
+        if radiation_eff is not None and radiation_eff >= 0.62:
+            return "当前升温节奏和辐射条件更像暖侧路径在提前落地"
+        return "当前升温节奏更像暖侧路径在提前落地"
+    if cold_transport and cold_rate_support and env_cold_support:
+        if radiation_eff is not None and radiation_eff <= 0.50:
+            return "当前升温节奏和辐射条件更像冷抑制路径仍在持续"
+        return "当前升温节奏更像冷抑制路径仍在持续"
+    if warm_rate_support and env_warm_support:
+        return "当前升温节奏比模式主路径略快"
+    if cold_rate_support and env_cold_support:
+        return "当前升温节奏比模式主路径偏慢"
+    return ""
+
+
+def _build_far_ensemble_path_block(snapshot: dict[str, Any]) -> str:
+    canonical = dict(snapshot.get("canonical_raw_state") or {})
+    forecast = dict(canonical.get("forecast") or {})
+    ensemble = dict(forecast.get("ensemble_factor") or {})
+    summary = dict(ensemble.get("summary") or {})
+    probabilities = dict(ensemble.get("probabilities") or {})
+    source = dict(ensemble.get("source") or {})
+    context = dict(forecast.get("context") or {})
+
+    if not probabilities:
+        return ""
+
+    ordered = sorted(
+        ((key, _safe_float(value) or 0.0) for key, value in probabilities.items()),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    ordered = [item for item in ordered if item[1] > 0.0]
+    if not ordered:
+        return ""
+
+    dominant_path = str(summary.get("dominant_path") or ordered[0][0])
+    dominant_prob = _safe_float(summary.get("dominant_prob")) or ordered[0][1]
+    split_state = str(summary.get("split_state") or "")
+    runtime = str(source.get("runtime_used") or source.get("runtime_requested") or "").strip()
+
+    lead = "主导路径"
+    if split_state == "split":
+        lead = "路径分歧较大"
+    elif split_state == "mixed":
+        lead = "存在多条竞争路径"
+
+    header = "🔀 系集路径："
+    first_label = f"{_ensemble_path_label(dominant_path, summary=summary)}路径"
+    lines = [header]
+    first_line = f"• {lead}偏向{first_label}（约 {_format_prob_pct(dominant_prob)}）"
+    if runtime:
+        first_line += f"，参考 ECMWF ENS {runtime}"
+    first_line += "。"
+    lines.append(first_line)
+
+    bottleneck_text = str(context.get("bottleneck_text") or "")
+    for key, prob in ordered[:2]:
+        label = _ensemble_path_label(key, summary=summary)
+        trigger = _ensemble_path_trigger_text(
+            key,
+            bottleneck_text,
+            path_detail=str(summary.get("transition_detail") or ""),
+        )
+        lines.append(f"• {label}约 {_format_prob_pct(prob)}，{trigger}。")
+
+    return "\n".join(lines)
+
+
+def _build_far_outlook_block(
+    snapshot: dict[str, Any],
+    syn_lines: list[str],
+    metar_diag: dict[str, Any],
+    primary_window: dict[str, Any],
+    *,
+    unit: str,
+    fmt_temp,
+) -> str:
+    runtime_text = _far_model_runtime_text(snapshot)
+    header = "🧭 形势与路径："
+    if runtime_text:
+        header = f"🧭 形势与路径（{runtime_text}）："
+
+    lines = [header]
+    deterministic_line = _build_far_deterministic_line(snapshot, syn_lines, metar_diag)
+    if deterministic_line:
+        lines.append(f"• {deterministic_line}。")
+
+    ensemble_line = _build_far_ensemble_line(snapshot)
+    if ensemble_line:
+        lines.append(f"• {ensemble_line}。")
+
+    model_peak_line = _build_far_single_run_reference_text(
+        snapshot,
+        primary_window,
+        metar_diag,
+        unit=unit,
+        fmt_temp=fmt_temp,
+    )
+    if model_peak_line:
+        lines.append(f"• {model_peak_line}。")
+
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _build_far_model_forecast_block(
+    snapshot: dict[str, Any],
+    primary_window: dict[str, Any],
+    metar_diag: dict[str, Any],
+    *,
+    unit: str,
+    fmt_temp,
+) -> str:
+    canonical = dict(snapshot.get("canonical_raw_state") or {})
+    forecast = dict(canonical.get("forecast") or {})
+    window = dict(canonical.get("window") or {})
+    calc_window = dict(window.get("calc") or {})
+    shape = dict(canonical.get("shape") or {})
+    shape_forecast = dict(shape.get("forecast") or {})
+    meta = dict(forecast.get("meta") or {})
+    ensemble = dict(forecast.get("ensemble_factor") or {})
+
+    peak_temp = (
+        _safe_float(calc_window.get("peak_temp_c"))
+        or _safe_float(shape_forecast.get("global_peak_temp_c"))
+        or _safe_float(primary_window.get("peak_temp_c"))
+    )
+    peak_local = calc_window.get("peak_local") or primary_window.get("peak_local")
+    start_local = calc_window.get("start_local") or primary_window.get("start_local")
+    end_local = calc_window.get("end_local") or primary_window.get("end_local")
+    model_name = str(meta.get("model") or "").strip().upper()
+    runtime = str(meta.get("runtime") or "").strip()
+    model_label = " ".join(part for part in (model_name, runtime) if part) or "当前模型"
+
+    header = "📈 单跑参考：" if ensemble else "📈 模式温度："
+    lines = [header]
+    if peak_temp is not None:
+        prefix = "当前单跑原始 2m 峰值约" if ensemble else f"{model_label} 原始 2m 峰值约"
+        peak_line = f"{prefix} {fmt_temp(peak_temp)}"
+        peak_clock = _format_local_clock(peak_local)
+        if peak_clock:
+            peak_line += f"，{peak_clock}前后见顶"
+        window_range = _format_local_window_range(start_local, end_local)
+        if window_range:
+            peak_line += f"（峰值窗 {window_range}）"
+        if ensemble:
+            peak_line += "，仅作单跑参考"
+        lines.append(f"• {peak_line}。")
+
+    shape_line = _model_curve_shape_text(
+        str(shape_forecast.get("shape_type") or ""),
+        str(shape_forecast.get("plateau_state") or ""),
+        _safe_float(shape_forecast.get("day_range_c")) or _safe_float(metar_diag.get("model_day_range_c")),
+        unit,
+    )
+    if shape_line:
+        lines.append(f"• {shape_line}。")
+
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _build_far_ensemble_basis_line(snapshot: dict[str, Any]) -> str:
+    canonical = dict(snapshot.get("canonical_raw_state") or {})
+    forecast = dict(canonical.get("forecast") or {})
+    ensemble = dict(forecast.get("ensemble_factor") or {})
+    summary = dict(ensemble.get("summary") or {})
+    probabilities = dict(ensemble.get("probabilities") or {})
+    dominant_path = str(summary.get("dominant_path") or "")
+    dominant_prob = _safe_float(summary.get("dominant_prob"))
+    split_state = str(summary.get("split_state") or "")
+
+    if split_state == "split":
+        warm_prob = _format_prob_pct(probabilities.get("warm_support"))
+        cold_prob = _format_prob_pct(probabilities.get("cold_suppression"))
+        if warm_prob and cold_prob:
+            return f"• ECMWF 系集没有收敛到单一路径，暖输送约 {warm_prob}、冷抑制约 {cold_prob}。"
+        return "• ECMWF 系集没有收敛到单一路径，远期更该按多路径情景看待。"
+    if dominant_path and dominant_prob is not None:
+        return f"• ECMWF 系集当前更偏 {_ensemble_path_label(dominant_path, summary=summary)}路径（约 {_format_prob_pct(dominant_prob)}）。"
+    return ""
+
+
+def _build_far_signal_basis_line(snapshot: dict[str, Any]) -> str:
+    canonical = dict(snapshot.get("canonical_raw_state") or {})
+    forecast = dict(canonical.get("forecast") or {})
+    h500 = dict(forecast.get("h500") or {})
+    h850_review = dict(forecast.get("h850_review") or {})
+    sounding = dict(forecast.get("sounding") or {})
+    thermo = dict(sounding.get("thermo") or {})
+
+    factors: list[str] = []
+
+    thermal_role = str(h500.get("thermal_role") or "")
+    tmax_bias_label = str(h500.get("tmax_bias_label") or "")
+    if thermal_role == "cold_high_suppression" or "压温" in tmax_bias_label:
+        factors.append("500hPa 冷高压/脊后下沉对上沿有压制")
+    elif thermal_role == "warm_ridge_support" or "增温" in tmax_bias_label:
+        factors.append("500hPa 脊前增温背景对上沿有托举")
+
+    advection_type = str(h850_review.get("advection_type") or "")
+    surface_role = str(h850_review.get("surface_role") or "")
+    if advection_type == "cold":
+        if surface_role == "background":
+            factors.append("850hPa 偏冷输送更多作为背景约束存在")
+        else:
+            factors.append("850hPa 偏冷输送若继续落地，会继续压低上沿")
+    elif advection_type == "warm":
+        if surface_role == "background":
+            factors.append("850hPa 偏暖输送提供了偏暖背景")
+        else:
+            factors.append("850hPa 偏暖输送若继续落地，会给上沿更多托举")
+
+    layer_findings = [str(item).strip().rstrip("。") for item in (thermo.get("layer_findings") or sounding.get("layer_findings") or []) if str(item).strip()]
+    if layer_findings:
+        factors.append(layer_findings[0])
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for factor in factors:
+        if factor in seen:
+            continue
+        seen.add(factor)
+        deduped.append(factor)
+        if len(deduped) >= 3:
+            break
+
+    if not deduped:
+        return ""
+    return f"• {'；'.join(deduped)}。"
 
 
 def _obs_reasoning_line(latest_temp: float | None, trend: float | None, unit: str) -> str:
@@ -424,6 +1063,7 @@ def _build_range_rationale_block(
     metar_diag: dict[str, Any],
     poly_block: str,
     *,
+    report_mode: str,
     background_line: str = "",
     unit: str,
     fmt_temp,
@@ -434,19 +1074,26 @@ def _build_range_rationale_block(
 ) -> str:
     if not str(poly_block or "").strip():
         return ""
+    if report_mode == "far_synoptic":
+        return ""
 
     lines = ["**判断依据**"]
+    posterior = dict(snapshot.get("posterior_feature_vector") or {})
+    time_phase = dict(posterior.get("time_phase") or {})
+    hours_to_peak = _safe_float(time_phase.get("hours_to_peak"))
     latest_temp = _safe_float(metar_diag.get("latest_temp"))
     trend = _safe_float(metar_diag.get("temp_trend_1step_c"))
-    obs_line = _obs_reasoning_line(latest_temp, trend, unit)
-    if obs_line:
-        lines.append(f"• {obs_line}。")
+    temp_bias = _safe_float(metar_diag.get("temp_bias_c"))
 
     synoptic_summary = dict(snapshot.get("synoptic_summary") or {})
     summary = dict(synoptic_summary.get("summary") or {})
     syn_lines = [str(item) for item in (synoptic_summary.get("lines") or []) if str(item).strip()]
+    targeted_signal_basis = ""
+    if report_mode != "near_obs" and hours_to_peak is not None and hours_to_peak > 3.0:
+        targeted_signal_basis = _strip_bullet_prefix(_build_far_signal_basis_line(snapshot))
     mechanism_basis = (
-        _short_mechanism_text(summary.get("pathway"))
+        targeted_signal_basis
+        or _short_mechanism_text(summary.get("pathway"))
         or _pick_background_basis(snapshot, include_lines=False)
         or _short_mechanism_text(dict(snapshot.get("boundary_layer_regime") or {}).get("headline"))
         or _pick_far_basis_text(snapshot, syn_lines)
@@ -459,6 +1106,35 @@ def _build_range_rationale_block(
     background_txt = _normalize_synoptic_text(str(background_line or "").replace("🧭 背景：", ""))
     if coastal_mechanism and background_txt and coastal_mechanism in background_txt:
         mechanism = coastal_mechanism
+
+    live_path_line = _build_live_path_reference_line(snapshot, report_mode=report_mode)
+    if live_path_line:
+        lines.append(f"• {live_path_line}。")
+
+    obs_line = _obs_reasoning_line(latest_temp, trend, unit)
+    obs_signal_strong = bool(
+        (trend is not None and abs(trend) >= 0.35)
+        or (temp_bias is not None and abs(temp_bias) >= 0.8)
+        or bool(metar_diag.get("metar_speci_active"))
+        or bool(metar_diag.get("metar_speci_likely"))
+    )
+    has_targeted_basis = bool(mechanism or impact or live_path_line or targeted_signal_basis)
+    should_use_obs_line = bool(
+        obs_line
+        and (
+            (hours_to_peak is not None and hours_to_peak <= 1.75)
+            or (
+                obs_signal_strong
+                and hours_to_peak is not None
+                and hours_to_peak <= 2.0
+            )
+            or (
+                report_mode == "near_obs"
+                and not has_targeted_basis
+                and (hours_to_peak is None or hours_to_peak <= 2.75)
+            )
+        )
+    )
 
     range_target = _range_target_text(
         unit=unit,
@@ -485,6 +1161,9 @@ def _build_range_rationale_block(
         lines.append(f"• 从当前链路看，{impact}，所以{range_target}。")
     else:
         lines.append(f"• {range_target}。")
+
+    if should_use_obs_line:
+        lines.insert(1, f"• {obs_line}。")
 
     if len(lines) > 3:
         lines = lines[:3]
@@ -518,6 +1197,25 @@ def _compact_focus_block(lines: list[str], *, report_mode: str) -> str:
     return f"⚠️ 关注：{detail}。"
 
 
+def _snapshot_for_report_mode(snapshot: dict[str, Any], report_mode: str) -> dict[str, Any]:
+    if report_mode != "far_synoptic":
+        return snapshot
+
+    temp_phase = dict(snapshot.get("temp_phase_decision") or {})
+    peak_data = dict(snapshot.get("peak_data") or {})
+    peak_summary = dict(peak_data.get("summary") or {})
+    if temp_phase.get("display_phase") == "far" and peak_summary.get("phase_now") == "far":
+        return snapshot
+
+    adjusted = dict(snapshot)
+    temp_phase["display_phase"] = "far"
+    peak_summary["phase_now"] = "far"
+    peak_data["summary"] = peak_summary
+    adjusted["temp_phase_decision"] = temp_phase
+    adjusted["peak_data"] = peak_data
+    return adjusted
+
+
 def _build_metar_block(
     metar_diag: dict[str, Any],
     metar_text: str,
@@ -526,23 +1224,9 @@ def _build_metar_block(
 ) -> str:
     metar_prefix: list[str] = []
     try:
-        if metar_diag and metar_diag.get("observed_max_temp_c") is not None:
-            mx = float(metar_diag.get("observed_max_temp_c"))
-            if unit == "C":
-                mx_txt = f"{int(round(mx))}°C" if abs(mx - round(mx)) < 0.05 else f"{mx:.1f}°C"
-            else:
-                mx_txt = fmt_temp(mx)
-            tmax_local = str(metar_diag.get("observed_max_time_local") or "")
-            tmax_txt = ""
-            if tmax_local:
-                try:
-                    tmax_txt = datetime.fromisoformat(tmax_local).strftime("%H:%M Local")
-                except Exception:
-                    tmax_txt = ""
-            if tmax_txt:
-                metar_prefix.append(f"• 今日已观测最高温：{mx_txt}（{tmax_txt}）")
-            else:
-                metar_prefix.append(f"• 今日已观测最高温：{mx_txt}")
+        observed_max_text = _observed_max_text(metar_diag, unit)
+        if observed_max_text:
+            metar_prefix.append(f"• {observed_max_text}")
     except Exception:
         pass
     return "📡 **最新实况分析（METAR）**\n" + ("\n".join(metar_prefix + [metar_text]) if metar_prefix else metar_text)
@@ -658,14 +1342,15 @@ def choose_section_text(
     disp_hi = float(peak_display_range.get("hi"))
     core_lo = float(peak_core_range.get("lo"))
     core_hi = float(peak_core_range.get("hi"))
-    far_from_window = phase_now == "far"
     report_mode = _classify_report_mode(snapshot, primary_window, metar_diag, phase_now)
+    focus_snapshot = _snapshot_for_report_mode(snapshot, report_mode)
+    use_far_synoptic = report_mode == "far_synoptic"
 
-    metar_block = _build_far_metar_block(
+    metar_block = _build_far_obs_reference(
         metar_diag=metar_diag,
         unit=unit,
-        fmt_temp=_fmt_temp,
-    ) if far_from_window else _build_metar_block(
+        fallback_text=metar_text,
+    ) if use_far_synoptic else _build_metar_block(
         metar_diag=metar_diag,
         metar_text=metar_text,
         unit=unit,
@@ -675,7 +1360,7 @@ def choose_section_text(
     report_focus = build_report_focus_bundle(
         primary_window=primary_window,
         metar_diag=metar_diag,
-        analysis_snapshot=snapshot,
+        analysis_snapshot=focus_snapshot,
     )
     vars_block = [str(item) for item in (report_focus.get("vars_block") or []) if str(item).strip()]
     if not vars_block:
@@ -698,13 +1383,6 @@ def choose_section_text(
                     extra_lines.append(cleaned)
             if extra_lines:
                 metar_block = metar_block + "\n" + "\n".join(extra_lines)
-    elif far_from_window:
-        metar_block = _build_far_obs_reference(
-            metar_diag=metar_diag,
-            unit=unit,
-            fmt_temp=_fmt_temp,
-            fallback_text=metar_text,
-        )
 
     label_policy = dict(report_focus.get("market_label_policy") or {})
     range_hint = {
@@ -745,6 +1423,7 @@ def choose_section_text(
                     snapshot,
                     metar_diag,
                     poly_block,
+                    report_mode=report_mode,
                     background_line=background_line,
                     unit=unit,
                     fmt_temp=_fmt_temp,
@@ -759,11 +1438,18 @@ def choose_section_text(
 
     compact_after: set[int] = set()
     if report_mode == "far_synoptic":
-        synoptic_block = _build_far_synoptic_block(snapshot, syn_lines, metar_diag)
+        synoptic_block = _build_far_outlook_block(
+            snapshot,
+            syn_lines,
+            metar_diag,
+            primary_window,
+            unit=unit,
+            fmt_temp=_fmt_temp,
+        )
         parts = [
             synoptic_block,
-            "\n".join(peak_range_block),
         ]
+        parts.append("\n".join(peak_range_block))
         if focus_block:
             parts.append(focus_block)
             compact_after.add(len(parts) - 2)

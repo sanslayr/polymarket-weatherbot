@@ -16,6 +16,23 @@ from metar_utils import (
 )
 
 
+def _cadence_regular(interval_min: float | None, routine_cadence_min: float | None) -> bool:
+    if interval_min is None or interval_min <= 0.0:
+        return False
+    if routine_cadence_min is not None and routine_cadence_min > 0.0:
+        return bool((0.80 * routine_cadence_min) <= interval_min <= (1.30 * routine_cadence_min))
+    return bool(20.0 <= interval_min <= 70.0)
+
+
+def _short_interval_damping(interval_min: float | None, routine_cadence_min: float | None) -> float:
+    if interval_min is None or interval_min <= 0.0:
+        return 1.0
+    ref = routine_cadence_min if routine_cadence_min is not None and routine_cadence_min > 0.0 else 30.0
+    if interval_min >= 0.85 * ref:
+        return 1.0
+    return max(0.35, min(1.0, float(interval_min) / float(ref)))
+
+
 def metar_observation_block(
     metar24: list[dict[str, Any]],
     hourly_local: dict[str, Any],
@@ -189,6 +206,15 @@ def metar_observation_block(
 
     unit = "F" if str(temp_unit).upper() == "F" else "C"
 
+    def _format_local_obs_time(dt_local: datetime) -> str:
+        try:
+            now_local = datetime.now(tz)
+            if dt_local.date() != now_local.date():
+                return dt_local.strftime("%Y/%m/%d %H:%M")
+            return dt_local.strftime("%H:%M")
+        except Exception:
+            return dt_local.strftime("%H:%M")
+
     lp = load_tmax_learning_params() or {}
     lp_rad = (lp.get("metar_radiation") or {}) if isinstance(lp, dict) else {}
     cloud_cover_map = (lp_rad.get("cloud_cover_map") or {}) if isinstance(lp_rad, dict) else {}
@@ -316,6 +342,13 @@ def metar_observation_block(
         if not t or t == "无降水天气现象":
             return ""
 
+        if "VCSH" in t:
+            if t.startswith("+"):
+                return "附近强阵雨"
+            if t.startswith("-"):
+                return "附近小阵雨"
+            return "附近阵雨"
+
         parts: list[str] = []
 
         intensity = ""
@@ -357,6 +390,8 @@ def metar_observation_block(
         elif "FZDZ" in t:
             parts.append(_i("冻毛毛雨"))
         else:
+            if "SH" in t and not any(k in t for k in ["DZ", "RA", "SN", "SG", "PL", "GR", "GS", "UP"]):
+                parts.append(_i("阵雨"))
             if "DZ" in t:
                 parts.append(_i("毛毛雨"))
             if "RA" in t:
@@ -589,10 +624,13 @@ def metar_observation_block(
             except Exception:
                 pass
 
-        latest_hdr = f"**最新报：{local.strftime('%H:%M')} {time_label}**"
+        latest_hdr = f"**最新报：{_format_local_obs_time(local)} {time_label}**"
         if prev_x:
             prev_local = _metar_obs_time_utc(prev_x).astimezone(tz)
-            latest_hdr = f"**最新报：{local.strftime('%H:%M')} {time_label}**（上一报 {prev_local.strftime('%H:%M')}）"
+            latest_hdr = (
+                f"**最新报：{_format_local_obs_time(local)} {time_label}**"
+                f"（上一报 {_format_local_obs_time(prev_local)}）"
+            )
 
         wind_line = fmt_wind(x)
         wind_cmp = _wind_change_text(x, prev_x)
@@ -1109,6 +1147,7 @@ def metar_observation_block(
 
     routine_cadence_min = None
     recent_interval_min = None
+    prev_interval_min = None
     speci_active = False
     speci_count_24h = 0
     report_count_24h = 0
@@ -1172,6 +1211,8 @@ def metar_observation_block(
 
         if len(obs_local) >= 2:
             recent_interval_min = round((obs_local[-1][0] - obs_local[-2][0]).total_seconds() / 60.0, 1)
+        if len(obs_local) >= 3:
+            prev_interval_min = round((obs_local[-2][0] - obs_local[-3][0]).total_seconds() / 60.0, 1)
 
         raw_speci = any(str(raw).upper().startswith("SPECI ") for _dt, raw in obs_local[-3:])
         short_interval = False
@@ -1184,6 +1225,7 @@ def metar_observation_block(
     except Exception:
         routine_cadence_min = None
         recent_interval_min = None
+        prev_interval_min = None
         speci_active = False
         speci_count_24h = 0
         report_count_24h = 0
@@ -1265,6 +1307,36 @@ def metar_observation_block(
 
     speci_likely = bool((not speci_active) and (speci_likely_score >= speci_likely_threshold))
 
+    trend_effective = None
+    trend_effective_factor = 1.0
+    trend_source = t_trend_smooth if t_trend_smooth is not None else t_trend
+    if trend_source is not None:
+        trend_effective_factor = _short_interval_damping(recent_interval_min, routine_cadence_min)
+        if speci_active or speci_likely:
+            trend_effective_factor = min(trend_effective_factor, 0.55)
+        trend_effective = float(trend_source) * float(trend_effective_factor)
+
+    accel_effective = None
+    recent_regular = _cadence_regular(recent_interval_min, routine_cadence_min)
+    prev_regular = _cadence_regular(prev_interval_min, routine_cadence_min)
+    if (
+        temp_accel_2step is not None
+        and recent_regular
+        and prev_regular
+        and not speci_active
+        and not speci_likely
+        and recent_interval_min is not None
+        and prev_interval_min is not None
+    ):
+        cadence_ref = routine_cadence_min if routine_cadence_min is not None and routine_cadence_min > 0.0 else max(recent_interval_min, prev_interval_min, 30.0)
+        interval_gap_min = abs(float(recent_interval_min) - float(prev_interval_min))
+        if interval_gap_min <= max(8.0, 0.30 * float(cadence_ref)):
+            accel_factor = min(
+                _short_interval_damping(recent_interval_min, routine_cadence_min),
+                _short_interval_damping(prev_interval_min, routine_cadence_min),
+            )
+            accel_effective = float(temp_accel_2step) * float(accel_factor)
+
     return "\n".join(lines), {
         "latest_report_utc": _metar_obs_time_utc(latest).isoformat().replace('+00:00', 'Z'),
         "latest_report_local": latest_dt_local.isoformat(),
@@ -1294,13 +1366,17 @@ def metar_observation_block(
         "radiation_eff_trend_1step": rad_eff_trend,
         "temp_trend_1step_c": t_trend,
         "temp_trend_smooth_c": t_trend_smooth,
+        "temp_trend_effective_c": trend_effective,
+        "temp_trend_effective_factor": round(float(trend_effective_factor), 3),
         "temp_accel_2step_c": temp_accel_2step,
+        "temp_accel_effective_c": accel_effective,
         "metar_temp_quantized": _is_intish(latest.get("temp")) and (prev is None or _is_intish(prev.get("temp"))),
         "pressure_trend_1step_hpa": pressure_step,
         "wind_dir_change_deg": wind_dir_change,
         "wind_speed_trend_1step_kt": wind_speed_step,
         "metar_routine_cadence_min": routine_cadence_min,
         "metar_recent_interval_min": recent_interval_min,
+        "metar_prev_interval_min": prev_interval_min,
         "metar_speci_active": speci_active,
         "metar_speci_likely": speci_likely,
         "metar_speci_likely_score": round(speci_likely_score, 2),

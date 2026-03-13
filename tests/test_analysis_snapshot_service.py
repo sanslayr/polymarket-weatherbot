@@ -120,12 +120,13 @@ class AnalysisSnapshotServiceTest(unittest.TestCase):
         self.assertIn("posterior_feature_vector", snapshot)
         self.assertIn("quality_snapshot", snapshot)
         self.assertIn("weather_posterior", snapshot)
+        self.assertIn("ensemble_factor", snapshot)
         self.assertIn("summary", snapshot["peak_data"])
         self.assertIn("block", snapshot["peak_data"])
         self.assertTrue(any("相关链路" in line for line in snapshot["synoptic_summary"]["lines"]))
-        self.assertEqual(snapshot["schema_version"], "analysis-snapshot.v6")
-        self.assertEqual(snapshot["canonical_raw_state"]["schema_version"], "canonical-raw-state.v2")
-        self.assertEqual(snapshot["posterior_feature_vector"]["schema_version"], "posterior-feature-vector.v2")
+        self.assertEqual(snapshot["schema_version"], "analysis-snapshot.v7")
+        self.assertEqual(snapshot["canonical_raw_state"]["schema_version"], "canonical-raw-state.v3")
+        self.assertEqual(snapshot["posterior_feature_vector"]["schema_version"], "posterior-feature-vector.v3")
         self.assertEqual(snapshot["quality_snapshot"]["schema_version"], "quality-snapshot.v2")
         self.assertEqual(snapshot["weather_posterior"]["schema_version"], "weather-posterior.v1")
         self.assertNotIn("headline", snapshot["posterior_feature_vector"].get("regime_state", {}))
@@ -143,7 +144,7 @@ class AnalysisSnapshotServiceTest(unittest.TestCase):
             analysis_snapshot=snapshot,
         )
 
-        self.assertIn("🧭 环流：", rendered)
+        self.assertIn("🧭 形势与路径：", rendered)
 
     def test_market_range_hint_uses_peak_block_ranges(self) -> None:
         primary_window, metar_diag, forecast_decision = self._sample_inputs()

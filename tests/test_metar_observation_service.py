@@ -10,6 +10,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+from metar_analysis_service import metar_observation_block  # noqa: E402
 from metar_utils import extract_observed_max_for_local_day, fetch_metar_24h, is_routine_metar_report, metar_obs_time_utc, metar_raw_ob_time_utc  # noqa: E402
 
 
@@ -61,6 +62,102 @@ class MetarObservationServiceTest(unittest.TestCase):
         self.assertEqual(extracted["observed_max_temp_c"], 18.0)
         self.assertEqual(extracted["observed_max_time_local"], "2026-03-11T00:30:00+13:00")
         self.assertTrue(extracted["observed_max_temp_quantized"])
+
+    def test_weather_phenomenon_vcsh_renders_as_vicinity_showers(self) -> None:
+        metar24 = [
+            {
+                "reportTime": "2026-03-11T12:00:00Z",
+                "rawOb": "METAR TEST 111200Z 18008KT 9999 VCSH SCT025 18/12 Q1012",
+                "temp": "18",
+                "dewp": "12",
+                "altim": "1012",
+                "wdir": 180,
+                "wspd": 8,
+                "wxString": "VCSH",
+                "clouds": [{"cover": "SCT", "base": 2500}],
+            }
+        ]
+        hourly_local = {
+            "time": ["2026-03-11T12:00"],
+            "temperature_2m": [18.0],
+            "pressure_msl": [1012.0],
+        }
+
+        block, _diag = metar_observation_block(metar24, hourly_local, "UTC")
+
+        self.assertIn("VCSH（附近阵雨）", block)
+
+    def test_latest_obs_header_includes_local_date_when_not_current_local_day(self) -> None:
+        metar24 = [
+            {
+                "reportTime": "2000-01-01T12:00:00Z",
+                "rawOb": "METAR TEST 011200Z 18008KT 9999 SCT025 18/12 Q1012",
+                "temp": "18",
+                "dewp": "12",
+                "altim": "1012",
+                "wdir": 180,
+                "wspd": 8,
+                "clouds": [{"cover": "SCT", "base": 2500}],
+            }
+        ]
+        hourly_local = {
+            "time": ["2000-01-01T20:00"],
+            "temperature_2m": [18.0],
+            "pressure_msl": [1012.0],
+        }
+
+        block, _diag = metar_observation_block(metar24, hourly_local, "Asia/Shanghai")
+
+        self.assertIn("**最新报：2000/01/01 20:00 Local**", block)
+
+    def test_short_interval_reports_damp_trend_and_disable_two_step_accel(self) -> None:
+        metar24 = [
+            {
+                "reportTime": "2026-03-11T10:20:00Z",
+                "rawOb": "METAR TEST 111020Z 18008KT 9999 SCT025 9/4 Q1012",
+                "temp": "9",
+                "dewp": "4",
+                "altim": "1012",
+                "wdir": 180,
+                "wspd": 8,
+                "clouds": [{"cover": "SCT", "base": 2500}],
+            },
+            {
+                "reportTime": "2026-03-11T10:50:00Z",
+                "rawOb": "METAR TEST 111050Z 18008KT 9999 SCT025 10/4 Q1012",
+                "temp": "10",
+                "dewp": "4",
+                "altim": "1012",
+                "wdir": 180,
+                "wspd": 8,
+                "clouds": [{"cover": "SCT", "base": 2500}],
+            },
+            {
+                "reportTime": "2026-03-11T11:00:00Z",
+                "rawOb": "SPECI TEST 111100Z 18008KT 9999 SCT025 11/4 Q1012",
+                "temp": "11",
+                "dewp": "4",
+                "altim": "1012",
+                "wdir": 180,
+                "wspd": 8,
+                "clouds": [{"cover": "SCT", "base": 2500}],
+            },
+        ]
+        hourly_local = {
+            "time": ["2026-03-11T10:00", "2026-03-11T11:00"],
+            "temperature_2m": [9.0, 11.0],
+            "pressure_msl": [1012.0, 1012.0],
+        }
+
+        _block, diag = metar_observation_block(metar24, hourly_local, "UTC")
+
+        self.assertEqual(diag["metar_recent_interval_min"], 10.0)
+        self.assertEqual(diag["metar_prev_interval_min"], 30.0)
+        self.assertTrue(diag["metar_speci_active"])
+        self.assertIsNone(diag["temp_accel_effective_c"])
+        self.assertIsNotNone(diag["temp_trend_smooth_c"])
+        self.assertIsNotNone(diag["temp_trend_effective_c"])
+        self.assertLess(abs(diag["temp_trend_effective_c"]), abs(diag["temp_trend_smooth_c"]))
 
 
 if __name__ == "__main__":

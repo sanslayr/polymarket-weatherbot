@@ -179,8 +179,8 @@ class PosteriorFeatureServiceTest(unittest.TestCase):
             },
         )
 
-        self.assertEqual(canonical["schema_version"], "canonical-raw-state.v2")
-        self.assertEqual(features["schema_version"], "posterior-feature-vector.v2")
+        self.assertEqual(canonical["schema_version"], "canonical-raw-state.v3")
+        self.assertEqual(features["schema_version"], "posterior-feature-vector.v3")
         self.assertEqual(features["meta"]["station"], "LTAC")
         self.assertEqual(features["transport_state"]["thermal_advection_state"], "probable")
         self.assertEqual(features["vertical_structure_state"]["coverage_density"], "moderate")
@@ -188,8 +188,128 @@ class PosteriorFeatureServiceTest(unittest.TestCase):
         self.assertEqual(features["forecast_shape_state"]["observed_plateau_state"], "holding")
         self.assertEqual(features["track_state"]["main_track_evolution"], "approaching")
         self.assertEqual(features["regime_state"]["dominant_mechanism"], "混合加深")
+        self.assertEqual(features["ensemble_path_state"]["dominant_path"], "")
         self.assertNotIn("legacy_text", canonical["forecast"])
         self.assertNotIn("headline", features["regime_state"])
+
+    def test_detects_live_alignment_with_dominant_ensemble_path(self) -> None:
+        primary_window = {
+            "start_local": "2026-03-09T12:00",
+            "peak_local": "2026-03-09T16:00",
+            "end_local": "2026-03-09T18:00",
+            "peak_temp_c": 25.2,
+            "low_cloud_pct": 16.0,
+            "w850_kmh": 28.0,
+        }
+        metar_diag = {
+            "latest_report_local": "2026-03-09T12:00:00+00:00",
+            "latest_temp": 20.2,
+            "latest_dewpoint": 7.8,
+            "latest_rh": 44.0,
+            "latest_wspd": 8.0,
+            "latest_wdir": 180.0,
+            "latest_cloud_code": "FEW",
+            "latest_cloud_lowest_base_ft": 4800,
+            "latest_wx": "",
+            "cloud_effective_cover_smooth": 0.18,
+            "radiation_eff_smooth": 0.86,
+            "cloud_trend": "cloud thinning",
+            "latest_precip_state": "none",
+            "precip_trend": "none",
+            "temp_trend_smooth_c": 0.32,
+            "temp_bias_smooth_c": 0.24,
+            "temp_accel_2step_c": 0.02,
+            "observed_max_temp_c": 20.2,
+            "observed_max_time_local": "2026-03-09T12:00:00+00:00",
+            "observed_max_interval_lo_c": 20.0,
+            "observed_max_interval_hi_c": 20.5,
+            "metar_temp_quantized": False,
+            "metar_routine_cadence_min": 30,
+            "metar_recent_interval_min": 30,
+        }
+        forecast_decision = {
+            "meta": {
+                "station": "KATL",
+                "date": "2026-03-09",
+                "model": "ecmwf",
+                "synoptic_provider": "ecmwf-open-data",
+                "runtime": "2026030900Z",
+                "window": dict(primary_window),
+            },
+            "quality": {
+                "source_state": "fresh",
+                "missing_layers": [],
+                "synoptic_coverage": 1.0,
+                "synoptic_provider_requested": "ecmwf-open-data",
+                "synoptic_provider_used": "ecmwf-open-data",
+            },
+            "features": {
+                "objects_3d": {"tracks": [], "count": 0, "anchors_count": 0},
+                "h850": {
+                    "review": {
+                        "thermal_advection_state": "probable",
+                        "transport_state": "warm",
+                        "surface_coupling_state": "partial",
+                        "surface_bias": "warm",
+                    }
+                },
+                "sounding": {"thermo": {"coverage": {"density_class": "moderate"}}},
+            },
+        }
+
+        canonical = build_canonical_raw_state(
+            primary_window=primary_window,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            ensemble_factor={
+                "summary": {
+                    "dominant_path": "warm_support",
+                    "dominant_path_detail": "warm_support",
+                    "dominant_prob": 0.74,
+                    "dominant_detail_prob": 0.74,
+                    "dominant_margin_prob": 0.29,
+                    "split_state": "clustered",
+                },
+                "probabilities": {
+                    "warm_support": 0.74,
+                    "transition": 0.20,
+                    "cold_suppression": 0.06,
+                },
+                "diagnostics": {
+                    "delta_t850_p10_c": 0.4,
+                    "delta_t850_p50_c": 0.8,
+                    "delta_t850_p90_c": 1.2,
+                    "wind850_p50_kmh": 25.0,
+                    "neutral_stable_prob": 0.08,
+                    "weak_warm_transition_prob": 0.12,
+                    "weak_cold_transition_prob": 0.0,
+                },
+                "source": {"provider": "ecmwf-ens-open-data"},
+            },
+            temp_unit="C",
+        )
+        features = build_posterior_feature_vector(
+            canonical_raw_state=canonical,
+            temp_phase_decision={
+                "phase": "near_window",
+                "display_phase": "near_window",
+                "short_term_state": "holding",
+                "daily_peak_state": "open",
+                "second_peak_potential": "none",
+                "rebound_mode": "none",
+                "dominant_shape": "single_peak",
+                "plateau_hold_state": "none",
+            },
+        )
+
+        ensemble_state = features["ensemble_path_state"]
+        self.assertEqual(ensemble_state["dominant_path_detail"], "warm_support")
+        self.assertEqual(ensemble_state["observed_path"], "warm_support")
+        self.assertEqual(ensemble_state["observed_alignment_match_state"], "exact")
+        self.assertEqual(ensemble_state["observed_alignment_confidence"], "high")
+        self.assertTrue(ensemble_state["observed_path_locked"])
+        self.assertGreater(ensemble_state["observed_alignment_score"], 0.75)
+        self.assertGreater(ensemble_state["observed_warm_signal"], ensemble_state["observed_cold_signal"])
 
 
 if __name__ == "__main__":

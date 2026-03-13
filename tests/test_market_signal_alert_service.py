@@ -36,12 +36,12 @@ class MarketSignalAlertServiceTest(unittest.TestCase):
             local_tz_label="Local",
             polymarket_event_url="https://polymarket.com/event/highest-temperature-in-ankara-on-march-9-2026",
         )
-        self.assertIn("⚠️ *盘口归零异动 | Ankara @ 2026/03/09*", text)
+        self.assertIn("⚠️ *盘口归零异动 | Ankara*", text)
         self.assertIn("• *推测最新报最高温：7°C*", text)
-        self.assertIn("• 已记录METAR最高温：6.7°C @ 14:20 Local", text)
+        self.assertIn("• 已知METAR最高温：6.7°C（14:20）；", text)
         self.assertIn("• 盘口观察：6°C Yes 由 6¢ 短时间跌至接近归零。", text)
-        self.assertIn("2026/03/09 08:31:15 UTC | 11:31:15 Local", text)
-        self.assertIn("\n\n*当前市场盘口价格：*", text)
+        self.assertIn("2026/03/09 11:31:15 Local（UTC+3）", text)
+        self.assertIn("\n\n*当前市场盘口：*", text)
         self.assertIn("• 7°C：Bid 14¢ | Ask N/A", text)
         self.assertIn("（基于盘口异动推测，不代表官方实况）", text)
         self.assertIn("🔗 [Polymarket 市场](https://polymarket.com/event/highest-temperature-in-ankara-on-march-9-2026)", text)
@@ -71,7 +71,7 @@ class MarketSignalAlertServiceTest(unittest.TestCase):
         self.assertIn("• 市场隐含最新报下界：>= 7°C", text)
         self.assertIn("• 盘口观察：6°C 买盘接近归零，卖盘压到 1¢ 或更低。", text)
 
-    def test_omits_local_when_same_as_utc(self) -> None:
+    def test_formats_local_time_when_same_as_utc(self) -> None:
         text = format_market_signal_alert(
             city="London",
             signal={
@@ -82,8 +82,7 @@ class MarketSignalAlertServiceTest(unittest.TestCase):
             observed_at_local="2026-03-09T09:22:00+00:00",
             local_tz_label="Local",
         )
-        self.assertIn("2026/03/09 09:22:00 UTC", text)
-        self.assertNotIn("2026/03/09 09:22:00 UTC | ", text)
+        self.assertIn("2026/03/09 09:22:00 Local（UTC+0）", text)
 
     def test_formats_thousandth_precision_as_tenth_cent(self) -> None:
         text = format_market_signal_alert(
@@ -152,14 +151,14 @@ class MarketSignalAlertServiceTest(unittest.TestCase):
             observed_max_time_local="2026-03-11T14:20:00+02:00",
             polymarket_event_url="https://polymarket.com/event/highest-temperature-in-tel-aviv-on-march-11-2026",
         )
-        self.assertIn("⚠️ *盘口归零异动 | Tel Aviv @ 2026/03/11*", text)
+        self.assertIn("⚠️ *盘口归零异动 | Tel Aviv*", text)
         self.assertIn("• *推测最新报最高温：20°C*", text)
-        self.assertIn("• 已记录METAR最高温：10°C @ 14:20 Local", text)
+        self.assertIn("• 已知METAR最高温：10°C（14:20）；", text)
         self.assertIn(
             "• 盘口观察：17°C Yes 盘口短时归零（卖盘压到 1¢ 或更低）；18°C Yes 盘口短时归零（卖盘压到 1¢ 或更低）；19°C Yes 盘口短时归零（卖盘压到 1¢ 或更低）。",
             text,
         )
-        self.assertIn("\n*当前市场盘口价格：*", text)
+        self.assertIn("\n*当前市场盘口：*", text)
         self.assertIn("• 20°C：Bid 5¢ | Ask N/A", text)
 
     def test_observed_max_temp_uses_integer_c_when_metar_is_quantized(self) -> None:
@@ -174,7 +173,7 @@ class MarketSignalAlertServiceTest(unittest.TestCase):
             observed_max_temp_c=10.0,
             observed_max_temp_quantized=True,
         )
-        self.assertIn("已记录METAR最高温：10°C", text)
+        self.assertIn("已知METAR最高温：10°C；", text)
         self.assertNotIn("10.0°C", text)
 
     def test_observed_max_temp_uses_fahrenheit_for_us_markets(self) -> None:
@@ -189,7 +188,7 @@ class MarketSignalAlertServiceTest(unittest.TestCase):
             observed_max_temp_c=10.0,
             observed_max_temp_quantized=True,
         )
-        self.assertIn("已记录METAR最高温：50°F", text)
+        self.assertIn("已知METAR最高温：50°F；", text)
         self.assertNotIn("50.0°F", text)
 
     def test_scan_floor_stop_prefers_bucket_label_for_range_market_output(self) -> None:
@@ -205,6 +204,27 @@ class MarketSignalAlertServiceTest(unittest.TestCase):
             },
         )
         self.assertIn("• *推测最新报最高温：50-51°F*", text)
+        self.assertNotIn("• *推测最新报最高温：51°F*", text)
+
+    def test_scan_floor_stop_preserves_first_live_range_label_in_alert_output(self) -> None:
+        text = format_market_signal_alert(
+            city="Dallas",
+            signal={
+                "signal_type": "report_temp_scan_floor_stop",
+                "target_bucket_threshold_native": 51,
+                "temperature_unit": "F",
+                "observed_at_utc": "2026-03-10T22:53:30Z",
+                "evidence": {
+                    "first_live_bucket_label": "50–51°F",
+                    "first_live_bucket_bid": 0.25,
+                    "first_live_bucket_ask": 0.31,
+                    "collapsed_prefix_labels": ["48–49°F"],
+                    "collapsed_prefix_prev_bids": {"48–49°F": 0.04},
+                },
+            },
+        )
+        self.assertIn("• *推测最新报最高温：50–51°F*", text)
+        self.assertIn("• 50–51°F：Bid 25¢ | Ask 31¢", text)
         self.assertNotIn("• *推测最新报最高温：51°F*", text)
 
     def test_scan_floor_stop_includes_first_live_ask_when_available(self) -> None:
@@ -231,9 +251,9 @@ class MarketSignalAlertServiceTest(unittest.TestCase):
             polymarket_event_url="https://polymarket.com/event/highest-temperature-in-tokyo-on-march-11-2026",
         )
         self.assertIn("• *推测最新报最高温：10°C*", text)
-        self.assertIn("• 已记录METAR最高温：9°C @ 13:30 Local", text)
+        self.assertIn("• 已知METAR最高温：9°C（13:30）；", text)
         self.assertIn("• 盘口观察：9°C Yes 由 13¢ 短时间跌至接近归零。", text)
-        self.assertIn("\n*当前市场盘口价格：*", text)
+        self.assertIn("\n*当前市场盘口：*", text)
         self.assertIn("• 10°C：Bid 45¢ | Ask 47¢", text)
         self.assertIn("🔗 [Polymarket 市场](https://polymarket.com/event/highest-temperature-in-tokyo-on-march-11-2026)", text)
 

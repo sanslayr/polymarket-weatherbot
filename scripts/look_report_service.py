@@ -14,6 +14,12 @@ from zoneinfo import ZoneInfo
 
 import build_station_links as BSL
 from analysis_snapshot_service import build_analysis_snapshot
+from ecmwf_ensemble_factor_service import build_ecmwf_ensemble_factor
+from forecast_analysis_cache import (
+    build_and_cache_forecast_analysis,
+    read_cached_forecast_analysis,
+    should_build_ecmwf_ensemble_factor,
+)
 from forecast_pipeline import load_or_build_forecast_decision
 from historical_context_provider import build_historical_context, historical_context_enabled
 from historical_payload import attach_historical_payload
@@ -158,7 +164,8 @@ def _render_footer(links: dict[str, Any]) -> str:
         f"🔗[Polymarket]({links['polymarket_event']}) | "
         f"[METAR]({links['metar_24h']}) | "
         f"[Wunderground]({links['wunderground']}) | "
-        f"[探空图（Tropicaltidbits）]({links['sounding_tropicaltidbits']})"
+        f"[天气图]({links['weather_map']}) | "
+        f"[探空图]({links['sounding_tropicaltidbits']})"
     )
 
 
@@ -180,6 +187,18 @@ def _should_use_compact_header(primary_window: dict[str, Any], metar_diag: dict[
     except Exception:
         pass
     return False
+
+
+def _parse_iso_dt(value: Any) -> datetime | None:
+    try:
+        text = str(value or "").strip()
+        return datetime.fromisoformat(text) if text else None
+    except Exception:
+        return None
+
+
+def _should_build_ensemble_factor(primary_window: dict[str, Any], metar_diag: dict[str, Any]) -> bool:
+    return should_build_ecmwf_ensemble_factor(primary_window, metar_diag)
 
 
 def _build_metar_only_bundle(
@@ -511,14 +530,75 @@ def build_look_report_bundle(
         forecast_decision=forecast_decision,
     )
 
-    analysis_snapshot = build_analysis_snapshot(
-        primary_window=primary,
-        metar_diag=metar_diag,
-        forecast_decision=forecast_decision,
-        temp_unit=unit_pref,
-        synoptic_window=analysis_window,
-        temp_shape_analysis=temp_shape_analysis,
+    runtime_pref = (
+        synoptic_runtime_used
+        or str((forecast_decision.get("meta") or {}).get("runtime") or "")
+        or now_utc.strftime("%Y%m%d%H") + "Z"
     )
+    analysis_peak_local = str(analysis_window.get("peak_local") or primary.get("peak_local") or "")
+    cached_analysis = read_cached_forecast_analysis(
+        station_icao=station.icao,
+        target_date=target_date,
+        model=model,
+        synoptic_provider=synoptic_provider_used,
+        runtime_tag=runtime_pref,
+        latest_report_local=str(metar_diag.get("latest_report_local") or ""),
+        analysis_peak_local=analysis_peak_local,
+    ) if model.lower() == "ecmwf" else None
+
+    ensemble_factor: dict[str, Any] | None = None
+    analysis_snapshot: dict[str, Any] | None = None
+    if isinstance(cached_analysis, dict):
+        ensemble_factor = dict(cached_analysis.get("ensemble_factor") or {})
+        if bool(cached_analysis.get("analysis_snapshot_fresh")):
+            analysis_snapshot = dict(cached_analysis.get("analysis_snapshot") or {})
+    elif model.lower() == "ecmwf":
+        try:
+            analysis_cache_payload = build_and_cache_forecast_analysis(
+                station_icao=station.icao,
+                station_lat=float(station.lat),
+                station_lon=float(station.lon),
+                target_date=target_date,
+                model=model,
+                synoptic_provider=synoptic_provider_used,
+                runtime_tag=runtime_pref,
+                primary_window=primary,
+                synoptic_window=analysis_window,
+                metar_diag=metar_diag,
+                forecast_decision=forecast_decision,
+                temp_shape_analysis=temp_shape_analysis,
+                temp_unit=unit_pref,
+                tz_name=tz_name,
+            )
+            ensemble_factor = dict(analysis_cache_payload.get("ensemble_factor") or {})
+            analysis_snapshot = dict(analysis_cache_payload.get("analysis_snapshot") or {})
+        except Exception:
+            ensemble_factor = None
+            analysis_snapshot = None
+
+    if not isinstance(analysis_snapshot, dict) or not analysis_snapshot:
+        if ensemble_factor is None and _should_build_ensemble_factor(analysis_window, metar_diag):
+            try:
+                ensemble_factor = build_ecmwf_ensemble_factor(
+                    station_icao=station.icao,
+                    station_lat=float(station.lat),
+                    station_lon=float(station.lon),
+                    peak_local=analysis_peak_local,
+                    tz_name=tz_name,
+                    preferred_runtime_tag=runtime_pref,
+                    root=ROOT,
+                )
+            except Exception:
+                ensemble_factor = None
+        analysis_snapshot = build_analysis_snapshot(
+            primary_window=primary,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            ensemble_factor=ensemble_factor,
+            temp_unit=unit_pref,
+            synoptic_window=analysis_window,
+            temp_shape_analysis=temp_shape_analysis,
+        )
 
     t0 = time.perf_counter()
     body = choose_section_text(

@@ -74,15 +74,22 @@ class ForecastCacheReuseTests(unittest.TestCase):
         self.assertEqual(provider, "openmeteo-prev-cache")
         self.assertEqual(cached, payload)
 
-    def test_fetch_hourly_router_reuses_openmeteo_cache_across_model_labels(self) -> None:
+    def test_fetch_hourly_router_keeps_openmeteo_cache_separate_per_model(self) -> None:
         station = SimpleNamespace(city="Munich", icao="EDDM", lat=48.35, lon=11.79)
         target_date = "2026-03-10"
         now_utc = _FixedHourlyDateTime.now(timezone.utc)
         cycle_tag = hourly_data_service.model_cycle_tag("ecmwf", now_utc)
-        payload = {
+        ecmwf_payload = {
             "hourly": {
                 "time": ["2026-03-10T12:00"],
                 "temperature_2m": [11.0],
+            },
+            "timezone": "Europe/Berlin",
+        }
+        gfs_payload = {
+            "hourly": {
+                "time": ["2026-03-10T12:00"],
+                "temperature_2m": [13.0],
             },
             "timezone": "Europe/Berlin",
         }
@@ -94,14 +101,14 @@ class ForecastCacheReuseTests(unittest.TestCase):
                 patch("hourly_data_service.datetime", _FixedHourlyDateTime):
                 hourly_data_service._write_cache(
                     "hourly",
-                    payload,
+                    ecmwf_payload,
                     station.icao,
                     target_date,
                     hourly_data_service._hourly_cache_model_key("hourly", "ecmwf"),
                     cycle_tag,
                 )
 
-                with patch("hourly_data_service.requests.get", side_effect=AssertionError("network should not be used")):
+                with patch("hourly_data_service.fetch_hourly_openmeteo", return_value=gfs_payload) as mock_fetch:
                     cached, provider = hourly_data_service.fetch_hourly_router(
                         station,
                         target_date,
@@ -111,7 +118,8 @@ class ForecastCacheReuseTests(unittest.TestCase):
                     )
 
         self.assertEqual(provider, "openmeteo")
-        self.assertEqual(cached, payload)
+        self.assertEqual(cached, gfs_payload)
+        mock_fetch.assert_called_once_with(station, target_date, "gfs")
 
     def test_load_or_build_forecast_decision_reuses_cached_runtime_bundle(self) -> None:
         now_utc = _FixedForecastDateTime.now(timezone.utc)

@@ -41,6 +41,12 @@ class ModelConfig:
     max_fh_hours: int
 
 
+@dataclass(frozen=True)
+class WeatherMapLink:
+    label: str
+    url: str
+
+
 MODEL_CONFIGS: dict[str, ModelConfig] = {
     "gfs": ModelConfig(cycle_hours=6, availability_lag_hours=5, fh_step_hours=3, max_fh_hours=384),
     # 实盘口径：ECMWF按6小时周期看可用时次，通常有3-5小时发布延迟。
@@ -126,6 +132,90 @@ def maybe_nws_link(row: dict[str, str]) -> str | None:
     return template.format(wfo=wfo)
 
 
+def weather_map_link(row: dict[str, str]) -> WeatherMapLink:
+    icao = row["icao"].strip().upper()
+
+    if icao in {"KMIA", "KATL"}:
+        return WeatherMapLink(
+            label="WPC East South",
+            url="https://www.wpc.ncep.noaa.gov/sfc/namsesfcwbg.gif",
+        )
+    if icao in {"KLGA", "CYYZ"}:
+        return WeatherMapLink(
+            label="WPC East North",
+            url="https://www.wpc.ncep.noaa.gov/sfc/namnesfcwbg.gif",
+        )
+    if icao == "KORD":
+        return WeatherMapLink(
+            label="WPC Central North",
+            url="https://www.wpc.ncep.noaa.gov/sfc/namncsfcwbg.gif",
+        )
+    if icao == "KDAL":
+        return WeatherMapLink(
+            label="WPC Central South",
+            url="https://www.wpc.ncep.noaa.gov/sfc/namscsfcwbg.gif",
+        )
+    if icao == "KSEA":
+        return WeatherMapLink(
+            label="WPC West North",
+            url="https://www.wpc.ncep.noaa.gov/sfc/namnwsfcwbg.gif",
+        )
+    if icao.startswith("K"):
+        return WeatherMapLink(
+            label="WPC North America",
+            url="https://www.wpc.ncep.noaa.gov/html/sfctxt.html",
+        )
+    if icao in {"EGLC", "LFPG", "EDDM"}:
+        return WeatherMapLink(
+            label="Met Office",
+            url="https://weather.metoffice.gov.uk/maps-and-charts/surface-pressure",
+        )
+    if icao == "LTAC":
+        return WeatherMapLink(
+            label="MGM",
+            url="https://www.mgm.gov.tr/eng/actualmaps.aspx",
+        )
+    if icao == "LLBG":
+        return WeatherMapLink(
+            label="IMS",
+            url="https://ims.gov.il/en/analyzedSynopticMaps",
+        )
+    if icao.startswith("Z"):
+        return WeatherMapLink(
+            label="NMC",
+            url="http://nmc.cn/publish/observations/china/dm/weatherchart-h000.htm",
+        )
+    if icao in {"RJTT", "RKSI", "WSSS"}:
+        return WeatherMapLink(
+            label="JMA",
+            url="https://www.jma.go.jp/bosai/weather_map/",
+        )
+    if icao == "VHHH":
+        return WeatherMapLink(
+            label="HKO",
+            url="https://www.weather.gov.hk/en/wxinfo/currwx/wxcht.htm",
+        )
+    if icao == "NZWN":
+        return WeatherMapLink(
+            label="MetService",
+            url="https://www.metservice.com/maps-radar/weather-maps/isobars",
+        )
+    if icao in {"SAEZ", "SBGR"}:
+        return WeatherMapLink(
+            label="CHM",
+            url="https://www.marinha.mil.br/chm/dados-do-smm-cartas-sinoticas/cartas-sinoticas",
+        )
+    if icao == "VILK":
+        return WeatherMapLink(
+            label="IMD",
+            url="https://rsmcnewdelhi.imd.gov.in/surface_chart00.php",
+        )
+    return WeatherMapLink(
+        label="NOAA Unified",
+        url="https://ocean.weather.gov/unified_analysis.php",
+    )
+
+
 def build_links(
     row: dict[str, str],
     model: str,
@@ -168,6 +258,7 @@ def build_links(
         city_slug=row["polymarket_city_slug"].strip(),
         date_slug=date_slug,
     )
+    weather_map = weather_map_link(row)
 
     return {
         "city": row["city"].strip(),
@@ -181,6 +272,8 @@ def build_links(
         "target_valid_utc": target_valid_utc.isoformat().replace("+00:00", "Z"),
         "date_slug": date_slug,
         "links": {
+            "weather_map": weather_map.url,
+            "weather_map_label": weather_map.label,
             "sounding_tropicaltidbits": tropical_url,
             "metar_latest": row["metar_api_latest"].strip(),
             "metar_24h": row["metar_api_24h"].strip(),

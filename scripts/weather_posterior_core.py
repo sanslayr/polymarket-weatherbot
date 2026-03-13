@@ -49,6 +49,75 @@ def _advection_signed_adjustment(transport_state: str, thermal_state: str) -> fl
     return 0.0
 
 
+def _near_term_model_weight(hours_to_peak: float | None) -> float:
+    if hours_to_peak is None:
+        return 1.0
+    hours = float(hours_to_peak)
+    if hours <= 1.0:
+        return 0.18
+    if hours <= 2.0:
+        return 0.30
+    if hours <= 4.0:
+        return 0.45
+    if hours <= 6.0:
+        return 0.60
+    return 1.0
+
+
+def _ensemble_uncertainty_active(hours_to_peak: float | None) -> bool:
+    return hours_to_peak is not None and float(hours_to_peak) >= 3.0
+
+
+def _ensemble_center_adjust_active(hours_to_peak: float | None) -> bool:
+    return hours_to_peak is not None and float(hours_to_peak) >= 6.0
+
+
+def _ensemble_live_spread_adjustment(
+    *,
+    hours_to_peak: float | None,
+    ensemble_split_state: str,
+    ensemble_dominant_prob: float | None,
+    alignment_match_state: str,
+    alignment_confidence: str,
+    alignment_score: float | None,
+    observed_path_locked: bool,
+) -> float:
+    if hours_to_peak is None or float(hours_to_peak) < 0.0 or float(hours_to_peak) > 6.0:
+        return 0.0
+    if alignment_confidence == "none" or alignment_match_state not in {"exact", "path"}:
+        return 0.0
+
+    reduction = 0.0
+    if alignment_confidence == "high":
+        reduction = 0.22 if observed_path_locked else 0.18
+    elif alignment_confidence == "partial":
+        reduction = 0.10
+
+    if alignment_match_state == "path":
+        reduction *= 0.75
+
+    if ensemble_split_state == "mixed":
+        reduction *= 0.85
+    elif ensemble_split_state == "split":
+        reduction *= 0.65
+
+    if ensemble_dominant_prob is not None:
+        if ensemble_dominant_prob >= 0.72:
+            reduction += 0.02
+        elif ensemble_dominant_prob < 0.50:
+            reduction *= 0.75
+
+    if alignment_score is not None:
+        if alignment_score >= 0.82:
+            reduction += 0.02
+        elif alignment_score < 0.62:
+            reduction *= 0.80
+
+    if reduction <= 0.0:
+        return 0.0
+    return -round(reduction, 2)
+
+
 def _spread_from_state(
     *,
     daily_peak_state: str,
@@ -60,6 +129,9 @@ def _spread_from_state(
     plateau_hold_state: str,
     hours_to_window_end: float | None,
     main_track_confidence: str,
+    hours_to_peak: float | None,
+    ensemble_split_state: str,
+    ensemble_dominant_prob: float | None,
 ) -> float:
     spread = 0.95
     if daily_peak_state == "open":
@@ -99,6 +171,18 @@ def _spread_from_state(
     elif main_track_confidence == "low":
         spread += 0.08
 
+    if _ensemble_uncertainty_active(hours_to_peak):
+        spread += {
+            "clustered": -0.04,
+            "mixed": 0.16,
+            "split": 0.32,
+        }.get(ensemble_split_state, 0.0)
+        if ensemble_dominant_prob is not None:
+            if ensemble_dominant_prob < 0.45:
+                spread += 0.08
+            elif ensemble_dominant_prob >= 0.72:
+                spread -= 0.04
+
     if daily_peak_state == "locked":
         spread = min(spread, 0.45)
     return _clamp(spread, 0.30, 2.40)
@@ -128,6 +212,7 @@ def build_weather_posterior_core(
     peak_state = dict(feat.get("peak_phase_state") or {})
     track_state = dict(feat.get("track_state") or {})
     quality_state = dict(feat.get("quality_state") or {})
+    ensemble_state = dict(feat.get("ensemble_path_state") or {})
 
     latest_temp_c = _safe_float(obs_state.get("latest_temp_c"))
     observed_max_temp_c = _safe_float(obs_state.get("observed_max_temp_c"))
@@ -143,7 +228,10 @@ def build_weather_posterior_core(
     second_peak_potential = str(peak_state.get("second_peak_potential") or "none")
     plateau_hold_state = str(peak_state.get("plateau_hold_state") or "none")
 
-    temp_trend_c = _safe_float(obs_state.get("temp_trend_c")) or 0.0
+    temp_trend_c = _safe_float(obs_state.get("temp_trend_effective_c"))
+    if temp_trend_c is None:
+        temp_trend_c = _safe_float(obs_state.get("temp_trend_c"))
+    temp_trend_c = temp_trend_c or 0.0
     temp_bias_c = _safe_float(obs_state.get("temp_bias_c")) or 0.0
     cloud_cover = _safe_float(cloud_state.get("cloud_effective_cover"))
     radiation_eff = _safe_float(cloud_state.get("radiation_eff"))
@@ -155,6 +243,14 @@ def build_weather_posterior_core(
     multi_peak_state = str(shape_state.get("multi_peak_state") or "none")
     coverage_density = str(vertical_state.get("coverage_density") or "")
     main_track_confidence = str(track_state.get("main_track_confidence") or "")
+    ensemble_dominant_path = str(ensemble_state.get("dominant_path") or "")
+    ensemble_split_state = str(ensemble_state.get("split_state") or "")
+    ensemble_dominant_prob = _safe_float(ensemble_state.get("dominant_prob"))
+    ensemble_alignment_match_state = str(ensemble_state.get("observed_alignment_match_state") or "")
+    ensemble_alignment_confidence = str(ensemble_state.get("observed_alignment_confidence") or "")
+    ensemble_alignment_score = _safe_float(ensemble_state.get("observed_alignment_score"))
+    ensemble_observed_path = str(ensemble_state.get("observed_path") or "")
+    ensemble_observed_path_locked = bool(ensemble_state.get("observed_path_locked"))
 
     floor_c = observed_floor_c
     if floor_c is None:
@@ -171,15 +267,22 @@ def build_weather_posterior_core(
         reason_codes.append("lean_locked_blend")
     elif modeled_peak_c is not None:
         median_c = modeled_peak_c
-        reason_codes.append("modeled_peak_anchor")
+        if hours_to_peak is not None and hours_to_peak >= 6.0:
+            reason_codes.append("far_modeled_peak_soft_anchor")
+        else:
+            reason_codes.append("modeled_peak_anchor")
         ref_obs = observed_max_temp_c if observed_max_temp_c is not None else latest_temp_c
         if ref_obs is not None and hours_to_peak is not None:
-            if hours_to_peak <= 2.0:
-                median_c = 0.66 * modeled_peak_c + 0.34 * ref_obs
-                reason_codes.append("near_peak_obs_blend")
-            elif hours_to_peak <= 4.0:
-                median_c = 0.80 * modeled_peak_c + 0.20 * ref_obs
-                reason_codes.append("mid_window_obs_blend")
+            model_weight = _near_term_model_weight(hours_to_peak)
+            if model_weight < 1.0:
+                obs_weight = 1.0 - model_weight
+                median_c = model_weight * modeled_peak_c + obs_weight * ref_obs
+                if hours_to_peak <= 2.0:
+                    reason_codes.append("near_peak_obs_anchor")
+                elif hours_to_peak <= 4.0:
+                    reason_codes.append("mid_window_obs_anchor")
+                else:
+                    reason_codes.append("near_window_obs_anchor")
     elif observed_max_temp_c is not None:
         median_c = observed_max_temp_c
         reason_codes.append("observed_max_anchor")
@@ -220,6 +323,15 @@ def build_weather_posterior_core(
     elif second_peak_potential == "high":
         adjustment_c += 0.24
         reason_codes.append("second_peak_high")
+    if _ensemble_center_adjust_active(hours_to_peak) and ensemble_dominant_prob is not None and ensemble_dominant_prob >= 0.58:
+        if ensemble_dominant_path == "warm_support":
+            adjustment_c += 0.14
+            reason_codes.append("ensemble_warm_support")
+        elif ensemble_dominant_path == "cold_suppression":
+            adjustment_c -= 0.14
+            reason_codes.append("ensemble_cold_suppression")
+    elif _ensemble_uncertainty_active(hours_to_peak) and ensemble_split_state in {"mixed", "split"}:
+        reason_codes.append("ensemble_path_split")
 
     median_c += adjustment_c
 
@@ -240,7 +352,24 @@ def build_weather_posterior_core(
         plateau_hold_state=plateau_hold_state,
         hours_to_window_end=hours_to_window_end,
         main_track_confidence=main_track_confidence,
+        hours_to_peak=hours_to_peak,
+        ensemble_split_state=ensemble_split_state,
+        ensemble_dominant_prob=ensemble_dominant_prob,
     )
+    live_alignment_spread_adjustment = _ensemble_live_spread_adjustment(
+        hours_to_peak=hours_to_peak,
+        ensemble_split_state=ensemble_split_state,
+        ensemble_dominant_prob=ensemble_dominant_prob,
+        alignment_match_state=ensemble_alignment_match_state,
+        alignment_confidence=ensemble_alignment_confidence,
+        alignment_score=ensemble_alignment_score,
+        observed_path_locked=ensemble_observed_path_locked,
+    )
+    spread_c = _clamp(spread_c + live_alignment_spread_adjustment, 0.30, 2.40)
+    if live_alignment_spread_adjustment < 0.0 and ensemble_alignment_confidence == "high" and ensemble_observed_path_locked:
+        reason_codes.append("ensemble_path_alignment_locked")
+    elif live_alignment_spread_adjustment < 0.0 and ensemble_alignment_confidence in {"high", "partial"} and ensemble_alignment_match_state in {"exact", "path"}:
+        reason_codes.append("ensemble_path_live_confirmed")
 
     quantile_values = _ensure_monotonic(
         [
@@ -331,7 +460,7 @@ def build_weather_posterior_core(
     return {
         "schema_version": WEATHER_POSTERIOR_CORE_SCHEMA_VERSION,
         "unit": str(raw.get("unit") or "C"),
-        "source": "heuristic-core.v1",
+        "source": "heuristic-core.v2",
         "anchor": {
             "modeled_peak_c": modeled_peak_c,
             "latest_temp_c": latest_temp_c,
@@ -339,6 +468,10 @@ def build_weather_posterior_core(
             "observed_floor_c": floor_c,
             "posterior_median_c": round(median_c, 2),
             "spread_c": round(spread_c, 2),
+            "ensemble_dominant_path": ensemble_dominant_path,
+            "ensemble_dominant_prob": ensemble_dominant_prob,
+            "ensemble_observed_path": ensemble_observed_path,
+            "ensemble_alignment_confidence": ensemble_alignment_confidence,
         },
         "quantiles": {
             "p10_c": p10,

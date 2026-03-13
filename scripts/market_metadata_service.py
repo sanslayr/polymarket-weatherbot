@@ -58,7 +58,63 @@ def _bucket_meta(
 
 def _bucket_meta_from_slug(slug: str, question: str = "") -> dict[str, Any]:
     q = str(question or "")
-    s = str(slug or "").lower()
+    slug_text = str(slug or "")
+    if slug_text.startswith("-"):
+        bucket_slug = slug_text
+    else:
+        direct_suffix_match = re.search(
+            r"(-\d{1,3}(?:-\d{1,3})?(?:f|c|forbelow|forhigher|corbelow|corhigher))$",
+            slug_text,
+            flags=re.IGNORECASE,
+        )
+        if direct_suffix_match:
+            bucket_slug = direct_suffix_match.group(1)
+        else:
+            suffix_match = re.search(r"-\d{4}-(.+)$", slug_text)
+            bucket_suffix = suffix_match.group(1) if suffix_match else slug_text.split("-")[-1]
+            bucket_slug = f"-{bucket_suffix}"
+
+    interval = parse_slug_interval(bucket_slug)
+    if interval is not None:
+        label = pretty_label_from_slug(bucket_slug)
+        if interval.lo == float("-inf"):
+            threshold_native = float(int(interval.hi + 0.01))
+            return _bucket_meta(
+                bucket_label=label,
+                bucket_kind="at_or_below",
+                temperature_unit=interval.unit,
+                threshold_native=threshold_native,
+                lower_bound_native=None,
+                upper_bound_native=interval.hi,
+            )
+        if interval.hi == float("inf"):
+            threshold_native = float(int(interval.lo + 0.5))
+            return _bucket_meta(
+                bucket_label=label,
+                bucket_kind="at_or_above",
+                temperature_unit=interval.unit,
+                threshold_native=threshold_native,
+                lower_bound_native=interval.lo,
+                upper_bound_native=None,
+            )
+        if "–" in label:
+            return _bucket_meta(
+                bucket_label=label,
+                bucket_kind="range",
+                temperature_unit=interval.unit,
+                threshold_native=None,
+                lower_bound_native=interval.lo,
+                upper_bound_native=interval.hi,
+            )
+        threshold_native = float(int(interval.lo + 0.5))
+        return _bucket_meta(
+            bucket_label=label,
+            bucket_kind="exact",
+            temperature_unit=interval.unit,
+            threshold_native=threshold_native,
+            lower_bound_native=interval.lo,
+            upper_bound_native=interval.hi,
+        )
 
     m = re.search(r"be\s+(\d+)[°º]([cf])\s+or\s+below", q, flags=re.IGNORECASE)
     if m:
@@ -99,125 +155,13 @@ def _bucket_meta_from_slug(slug: str, question: str = "") -> dict[str, Any]:
             upper_bound_native=n + 0.49,
         )
 
-    tail = re.search(r"-(\d+)forbelow$", s)
-    if tail:
-        n = int(tail.group(1))
-        return _bucket_meta(
-            bucket_label=f"{n}°F or below",
-            bucket_kind="at_or_below",
-            temperature_unit="F",
-            threshold_native=float(n),
-            lower_bound_native=None,
-            upper_bound_native=n + 0.49,
-        )
-
-    tail = re.search(r"-(\d+)forhigher$", s)
-    if tail:
-        n = int(tail.group(1))
-        return _bucket_meta(
-            bucket_label=f"{n}°F or higher",
-            bucket_kind="at_or_above",
-            temperature_unit="F",
-            threshold_native=float(n),
-            lower_bound_native=n - 0.5,
-            upper_bound_native=None,
-        )
-
-    tail = re.search(r"-(\d+)f$", s)
-    if tail:
-        n = int(tail.group(1))
-        return _bucket_meta(
-            bucket_label=f"{n}°F",
-            bucket_kind="exact",
-            temperature_unit="F",
-            threshold_native=float(n),
-            lower_bound_native=n - 0.5,
-            upper_bound_native=n + 0.49,
-        )
-
-    tail = re.search(r"-(\d+)corbelow$", s)
-    if tail:
-        n = int(tail.group(1))
-        return _bucket_meta(
-            bucket_label=f"{n}°C or below",
-            bucket_kind="at_or_below",
-            temperature_unit="C",
-            threshold_native=float(n),
-            lower_bound_native=None,
-            upper_bound_native=n + 0.49,
-        )
-
-    tail = re.search(r"-(\d+)corhigher$", s)
-    if tail:
-        n = int(tail.group(1))
-        return _bucket_meta(
-            bucket_label=f"{n}°C or higher",
-            bucket_kind="at_or_above",
-            temperature_unit="C",
-            threshold_native=float(n),
-            lower_bound_native=n - 0.5,
-            upper_bound_native=None,
-        )
-
-    tail = re.search(r"-(\d+)c$", s)
-    if tail:
-        n = int(tail.group(1))
-        return _bucket_meta(
-            bucket_label=f"{n}°C",
-            bucket_kind="exact",
-            temperature_unit="C",
-            threshold_native=float(n),
-            lower_bound_native=n - 0.5,
-            upper_bound_native=n + 0.49,
-        )
-
-    interval = parse_slug_interval(slug)
-    if interval is None:
-        return _bucket_meta(
-            bucket_label=pretty_label_from_slug(slug),
-            bucket_kind="unknown",
-            temperature_unit=None,
-            threshold_native=None,
-            lower_bound_native=None,
-            upper_bound_native=None,
-        )
-    if interval.lo == float("-inf"):
-        threshold_native = float(int(interval.hi + 0.01))
-        return _bucket_meta(
-            bucket_label=pretty_label_from_slug(slug),
-            bucket_kind="at_or_below",
-            temperature_unit=interval.unit,
-            threshold_native=threshold_native,
-            lower_bound_native=None,
-            upper_bound_native=interval.hi,
-        )
-    if interval.hi == float("inf"):
-        threshold_native = float(int(interval.lo + 0.5))
-        return _bucket_meta(
-            bucket_label=pretty_label_from_slug(slug),
-            bucket_kind="at_or_above",
-            temperature_unit=interval.unit,
-            threshold_native=threshold_native,
-            lower_bound_native=interval.lo,
-            upper_bound_native=None,
-        )
-    if abs(interval.hi - interval.lo - 0.99) < 0.02:
-        threshold_native = float(int(interval.lo + 0.5))
-        return _bucket_meta(
-            bucket_label=pretty_label_from_slug(slug),
-            bucket_kind="exact",
-            temperature_unit=interval.unit,
-            threshold_native=threshold_native,
-            lower_bound_native=interval.lo,
-            upper_bound_native=interval.hi,
-        )
     return _bucket_meta(
-        bucket_label=pretty_label_from_slug(slug),
-        bucket_kind="range",
-        temperature_unit=interval.unit,
+        bucket_label=pretty_label_from_slug(bucket_slug),
+        bucket_kind="unknown",
+        temperature_unit=None,
         threshold_native=None,
-        lower_bound_native=interval.lo,
-        upper_bound_native=interval.hi,
+        lower_bound_native=None,
+        upper_bound_native=None,
     )
 
 

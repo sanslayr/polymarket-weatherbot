@@ -396,7 +396,9 @@ def analyze_temperature_shape(
         and observed_peak_dt is not None
         and abs((latest_local_dt - observed_peak_dt).total_seconds()) <= 3600.0
     )
-    temp_trend_c = _safe_float((metar_diag or {}).get("temp_trend_smooth_c"))
+    temp_trend_c = _safe_float((metar_diag or {}).get("temp_trend_effective_c"))
+    if temp_trend_c is None:
+        temp_trend_c = _safe_float((metar_diag or {}).get("temp_trend_smooth_c"))
     if temp_trend_c is None:
         temp_trend_c = _safe_float((metar_diag or {}).get("temp_trend_1step_c"))
     flat_trend = bool(temp_trend_c is not None and abs(temp_trend_c) <= 0.15)

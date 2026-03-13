@@ -46,11 +46,9 @@ _reexec_into_skill_venv()
 PROCESS_T0 = time.perf_counter()
 TRACE_LOG_PATH = Path(__file__).resolve().parents[4] / "logs" / "look-cli-latency.jsonl"
 
-def _format_local_header_time(now_utc: datetime, now_local: datetime) -> str:
-    local_time = now_local.strftime("%H:%M")
-    if now_local.date() != now_utc.date():
-        local_time = f"{now_local.month}/{now_local.day} {local_time}"
-    return f"{local_time} Local ({format_utc_offset(now_local)})"
+
+def _format_local_header_time(now_local: datetime) -> str:
+    return f"{now_local.strftime('%Y/%m/%d %H:%M:%S')} Local ({format_utc_offset(now_local)})"
 
 from look_change_guard import build_unchanged_notice
 from look_command import parse_telegram_command, render_look_help
@@ -106,7 +104,7 @@ def _render_report_header(st: Station, bundle: LookReportBundle) -> str:
 
     header_lines = [
         f"📍 **{st.icao} ({st.city}) | {head_geo}**",
-        f"生成时间: {bundle.now_utc.strftime('%Y/%m/%d %H:%M')} UTC | {_format_local_header_time(bundle.now_utc, bundle.now_local)}",
+        f"生成时间: {_format_local_header_time(bundle.now_local)}",
     ]
 
     if bundle.mode == "metar_only":

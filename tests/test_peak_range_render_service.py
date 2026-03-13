@@ -39,6 +39,42 @@ class PeakRangeRenderServiceTest(unittest.TestCase):
         self.assertNotIn("2022/03/09", joined)
         self.assertNotIn("历史上修提示", joined)
 
+    def test_render_hides_core_range_when_only_small_upper_tail_diff(self) -> None:
+        block = render_peak_range_block(
+            {
+                "ranges": {
+                    "display": {"lo": 10.8, "hi": 12.2},
+                    "core": {"lo": 10.8, "hi": 11.8},
+                    "window": {"label": "峰值窗", "text": "12:00~15:00 Local"},
+                },
+            },
+            unit="C",
+            fmt_range_fn=lambda lo, hi: f"{lo:.1f}~{hi:.1f}°C",
+        )
+
+        self.assertEqual(
+            block[1],
+            "• **10.8~12.2°C**（峰值窗 12:00~15:00 Local）",
+        )
+
+    def test_render_keeps_core_range_when_gap_is_material(self) -> None:
+        block = render_peak_range_block(
+            {
+                "ranges": {
+                    "display": {"lo": 17.5, "hi": 18.8},
+                    "core": {"lo": 17.5, "hi": 18.3},
+                    "window": {"label": "峰值窗", "text": "16:00~20:00 Local"},
+                },
+            },
+            unit="C",
+            fmt_range_fn=lambda lo, hi: f"{lo:.1f}~{hi:.1f}°C",
+        )
+
+        self.assertEqual(
+            block[1],
+            "• **17.5~18.8°C**（主看 17.5~18.3°C；峰值窗 16:00~20:00 Local）",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

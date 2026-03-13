@@ -48,6 +48,7 @@ SOUNDING_STATION_MAP: dict[str, SoundingStation] = {
     "NZWN": SoundingStation("93439", -40.90, 174.98, "coastal", "Paraparaumu"),
     "SAEZ": SoundingStation("87576", -34.82, -58.54, "inland", "Ezeiza"),
     "SBGR": SoundingStation("83779", -23.50, -46.61, "inland", "Sao Paulo"),
+    "VHHH": SoundingStation("45004", 22.31, 114.17, "coastal", "Kowloon"),
     "VILK": SoundingStation("42369", 26.76, 80.88, "inland", "Lucknow"),
 }
 

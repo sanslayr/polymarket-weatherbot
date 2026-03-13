@@ -1,6 +1,6 @@
 # Telegram Commands
 
-Last updated: 2026-03-10
+Last updated: 2026-03-11
 
 ## 1) OpenClaw native
 
@@ -37,6 +37,7 @@ Last updated: 2026-03-10
 - Buenos Aires (SAEZ)
 - Chicago (KORD)
 - Dallas (KDAL)
+- Hong Kong (VHHH)
 - London (EGLC)
 - Lucknow (VILK)
 - Miami (KMIA)
@@ -46,6 +47,8 @@ Last updated: 2026-03-10
 - Sao Paulo (SBGR)
 - Seattle (KSEA)
 - Seoul (RKSI)
+- Shanghai (ZSPD)
+- Singapore (WSSS)
 - Tel Aviv (LLBG)
 - Tokyo (RJTT)
 - Toronto (CYYZ)
@@ -70,6 +73,9 @@ Last updated: 2026-03-10
 - `atl` -> Atlanta
 - `dal` -> Dallas
 - `chi` -> Chicago
+- `hkg` / `hk` -> Hong Kong
+- `sha` / `pvg` -> Shanghai
+- `sin` / `sg` -> Singapore
 - `wel` -> Wellington
 
 #### 说明

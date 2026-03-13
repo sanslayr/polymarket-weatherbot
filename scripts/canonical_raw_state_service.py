@@ -46,6 +46,7 @@ def build_canonical_raw_state(
     primary_window: dict[str, Any],
     metar_diag: dict[str, Any],
     forecast_decision: dict[str, Any] | None = None,
+    ensemble_factor: dict[str, Any] | None = None,
     synoptic_window: dict[str, Any] | None = None,
     temp_shape_analysis: dict[str, Any] | None = None,
     temp_unit: str = "C",
@@ -96,8 +97,14 @@ def build_canonical_raw_state(
         "precip_state": str(signals.get("precip_state") or "none"),
         "precip_trend": str(signals.get("precip_trend") or "none"),
         "temp_trend_c": safe_float(signals.get("temp_trend_c")),
+        "temp_trend_effective_c": safe_float(metar_diag.get("temp_trend_effective_c")),
         "temp_bias_c": safe_float(signals.get("temp_bias_c")),
-        "temp_accel_2step_c": safe_float(metar_diag.get("temp_accel_2step_c")),
+        "temp_accel_2step_c": (
+            safe_float(metar_diag.get("temp_accel_effective_c"))
+            if safe_float(metar_diag.get("temp_accel_effective_c")) is not None
+            else safe_float(metar_diag.get("temp_accel_2step_c"))
+        ),
+        "temp_accel_raw_2step_c": safe_float(metar_diag.get("temp_accel_2step_c")),
         "observed_max_temp_c": safe_float(metar_diag.get("observed_max_temp_c")),
         "observed_max_time_local": str(metar_diag.get("observed_max_time_local") or ""),
         "observed_max_interval_lo_c": safe_float(metar_diag.get("observed_max_interval_lo_c")),
@@ -105,6 +112,7 @@ def build_canonical_raw_state(
         "metar_temp_quantized": bool(metar_diag.get("metar_temp_quantized")),
         "metar_routine_cadence_min": safe_float(metar_diag.get("metar_routine_cadence_min")),
         "metar_recent_interval_min": safe_float(metar_diag.get("metar_recent_interval_min")),
+        "metar_prev_interval_min": safe_float(metar_diag.get("metar_prev_interval_min")),
         "metar_speci_active": bool(metar_diag.get("metar_speci_active")),
         "metar_speci_likely": bool(metar_diag.get("metar_speci_likely")),
         "peak_lock_confirmed": bool(metar_diag.get("peak_lock_confirmed")),
@@ -148,6 +156,7 @@ def build_canonical_raw_state(
         "sounding": sounding,
         "objects_3d": objects_3d,
         "track_summary": _track_summary(objects_3d),
+        "ensemble_factor": dict(ensemble_factor or {}),
     }
 
     return {

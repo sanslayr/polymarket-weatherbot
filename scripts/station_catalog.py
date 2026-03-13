@@ -18,6 +18,9 @@ CITY_ALIASES = {
     "buenosaires": "buenos aires",
     "chi": "chicago",
     "dal": "dallas",
+    "hkg": "hong kong",
+    "hk": "hong kong",
+    "hongkong": "hong kong",
     "lon": "london",
     "lko": "lucknow",
     "mia": "miami",
@@ -31,6 +34,12 @@ CITY_ALIASES = {
     "seo": "seoul",
     "sel": "seoul",
     "seoul": "seoul",
+    "sg": "singapore",
+    "sha": "shanghai",
+    "shanghai": "shanghai",
+    "sin": "singapore",
+    "singapore": "singapore",
+    "pvg": "shanghai",
     "telaviv": "tel aviv",
     "tlv": "tel aviv",
     "tok": "tokyo",
@@ -48,6 +57,7 @@ STATION_TZ = {
     "LFPG": "Europe/Paris",
     "NZWN": "Pacific/Auckland",
     "CYYZ": "America/Toronto",
+    "VHHH": "Asia/Hong_Kong",
     "LLBG": "Asia/Jerusalem",
     "KATL": "America/New_York",
     "KJFK": "America/New_York",
@@ -63,7 +73,9 @@ STATION_TZ = {
     "RKSI": "Asia/Seoul",
     "SAEZ": "America/Argentina/Buenos_Aires",
     "VILK": "Asia/Kolkata",
+    "WSSS": "Asia/Singapore",
     "EDDM": "Europe/Berlin",
+    "ZSPD": "Asia/Shanghai",
 }
 
 _STATION_META_MAP: dict[str, dict[str, dict[str, str]]] = {}
@@ -163,6 +175,9 @@ def common_alias_examples(station_csv: Path = DEFAULT_STATION_CSV) -> list[str]:
         "atl",
         "dal",
         "chi",
+        "hkg",
+        "sha",
+        "sin",
         "wel",
     ]
     aliases: list[str] = []

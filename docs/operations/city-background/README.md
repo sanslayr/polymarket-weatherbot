@@ -24,7 +24,10 @@
 - `docs/operations/city-background/profiles/RKSI_seoul.md`
 - `docs/operations/city-background/profiles/SAEZ_buenos_aires.md`
 - `docs/operations/city-background/profiles/SBGR_sao_paulo.md`
+- `docs/operations/city-background/profiles/VHHH_hong_kong.md`
 - `docs/operations/city-background/profiles/VILK_lucknow.md`
+- `docs/operations/city-background/profiles/WSSS_singapore.md`
+- `docs/operations/city-background/profiles/ZSPD_shanghai.md`
 
 ## 既有人工研究
 

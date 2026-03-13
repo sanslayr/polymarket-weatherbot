@@ -117,6 +117,16 @@ Reactions are lightweight social signals. Humans use them constantly — they sa
 
 Skills provide your tools. When you need one, check its `SKILL.md`. Keep local notes (camera names, SSH details, voice preferences) in `TOOLS.md`.
 
+### Weatherbot Data Priority (Hard Rule)
+
+For user questions that are highly related to Weatherbot-covered weather data or analysis, prefer Weatherbot internal data first.
+
+- First check Weatherbot runtime/cache/analysis outputs before giving a generic answer.
+- Prefer internal station data, cached forecast analysis, METAR parsing, `/look` runtime results, and Weatherbot-derived diagnostics over ad hoc external summaries when they can answer the question.
+- Use external web sources mainly for supplemental verification, missing data, or explicitly requested external comparison.
+- This applies even when the user does not send a literal `/look` command, as long as the question is clearly about Weatherbot-covered station/date weather analysis.
+- If internal Weatherbot data and external sources disagree, state that explicitly and treat Weatherbot runtime output as the primary reference unless there is clear evidence it is stale or broken.
+
 ### Telegram `/look` Consistency (Hard Rule)
 
 For Telegram messages that start with `/look`:

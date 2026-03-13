@@ -9,7 +9,7 @@ def render_look_help() -> str:
     return (
         "📘 /look 用法\n"
         "- /look <城市或机场代码> [YYYY-MM-DD 或 YYYYMMDD]\n"
-        "- 示例：/look ank | /look tlv | /look tok | /look Tel Aviv 20260307\n"
+        "- 示例：/look ank | /look tlv | /look tok | /look hkg | /look Singapore 20260307\n"
         f"- 常用别名：{alias_text}\n"
         f"- 支持站点：{station_text}"
     )

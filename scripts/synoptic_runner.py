@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
+import math
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -12,12 +14,26 @@ from zoneinfo import ZoneInfo
 from contracts import SYNOPTIC_CACHE_SCHEMA_VERSION
 from cache_envelope import extract_payload, make_cache_doc
 from runtime_cache_policy import runtime_cache_enabled
-from synoptic_2d_detector import analyze as analyze_synoptic_2d
 from synoptic_provider_router import (
     DEFAULT_SYNOPTIC_PROVIDER,
     build_synoptic_grid_payload,
     provider_candidates,
 )
+
+
+def analyze_synoptic_2d(payload: dict[str, Any], mode: str = "full") -> dict[str, Any]:
+    try:
+        detector = importlib.import_module("synoptic_2d_detector")
+    except ModuleNotFoundError as exc:
+        missing = str(getattr(exc, "name", "") or "").strip() or "unknown"
+        raise RuntimeError(f"synoptic detector dependency missing: {missing}") from exc
+    except ImportError as exc:
+        raise RuntimeError(f"synoptic detector import failed: {exc}") from exc
+
+    analyze_fn = getattr(detector, "analyze", None)
+    if not callable(analyze_fn):
+        raise RuntimeError("synoptic detector import failed: analyze() missing")
+    return dict(analyze_fn(payload, mode=mode) or {})
 
 
 def _cache_key(*parts: str) -> str:
@@ -205,6 +221,38 @@ def _clear_provider_failure_memo(cache_dir: Path, provider: str, *scopes: str) -
             pass
 
 
+def _shared_grid_enabled() -> bool:
+    raw = str(os.getenv("FORECAST_SHARED_GRID_ENABLED", "1") or "1").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _shared_grid_quantize_ratio() -> float:
+    try:
+        return max(0.1, min(1.0, float(os.getenv("FORECAST_SHARED_GRID_QUANTIZE_RATIO", "0.5") or "0.5")))
+    except Exception:
+        return 0.5
+
+
+def _shared_grid_axis_bounds(center: float, span: float, step: float) -> tuple[float, float]:
+    if not _shared_grid_enabled():
+        return float(center - span), float(center + span)
+
+    ratio = _shared_grid_quantize_ratio()
+    quantum = max(float(step), min(float(span), float(span) * ratio))
+    min_bound = math.floor((float(center) - float(span)) / quantum) * quantum
+    max_bound = min_bound + 2.0 * float(span)
+    return round(min_bound, 6), round(max_bound, 6)
+
+
+def _shared_request_bbox(st: Any, cfg: dict[str, Any]) -> tuple[float, float, float, float]:
+    lat_span = float(cfg.get("lat_span") or 0.0)
+    lon_span = float(cfg.get("lon_span") or 0.0)
+    step = float(cfg.get("step") or 1.0)
+    lat_min, lat_max = _shared_grid_axis_bounds(float(st.lat), lat_span, step)
+    lon_min, lon_max = _shared_grid_axis_bounds(float(st.lon), lon_span, step)
+    return lat_min, lat_max, lon_min, lon_max
+
+
 def run_synoptic_section(
     *,
     st: Any,
@@ -318,15 +366,16 @@ def run_synoptic_section(
                     )
                     continue
                 try:
+                    lat_min, lat_max, lon_min, lon_max = _shared_request_bbox(st, cfg)
                     payload = build_synoptic_grid_payload(
                         candidate_provider,
                         station_icao=st.icao,
                         station_lat=float(st.lat),
                         station_lon=float(st.lon),
-                        lat_min=float(st.lat - cfg["lat_span"]),
-                        lat_max=float(st.lat + cfg["lat_span"]),
-                        lon_min=float(st.lon - cfg["lon_span"]),
-                        lon_max=float(st.lon + cfg["lon_span"]),
+                        lat_min=lat_min,
+                        lat_max=lat_max,
+                        lon_min=lon_min,
+                        lon_max=lon_max,
                         analysis_time_local=peak_local_dt.strftime("%Y-%m-%dT%H:%M"),
                         previous_time_local=prev_local_dt.strftime("%Y-%m-%dT%H:%M"),
                         tz_name=tz_name,
