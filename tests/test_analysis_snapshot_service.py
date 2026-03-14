@@ -9,7 +9,8 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from analysis_snapshot_service import build_analysis_snapshot  # noqa: E402
+from analysis_snapshot_service import _apply_posterior_range_truth_source, build_analysis_snapshot  # noqa: E402
+from analysis_snapshot_view import snapshot_branch_outlook  # noqa: E402
 from report_render_service import choose_section_text  # noqa: E402
 
 
@@ -124,13 +125,16 @@ class AnalysisSnapshotServiceTest(unittest.TestCase):
         self.assertIn("summary", snapshot["peak_data"])
         self.assertIn("block", snapshot["peak_data"])
         self.assertTrue(any("相关链路" in line for line in snapshot["synoptic_summary"]["lines"]))
-        self.assertEqual(snapshot["schema_version"], "analysis-snapshot.v7")
+        self.assertEqual(snapshot["schema_version"], "analysis-snapshot.v10")
         self.assertEqual(snapshot["canonical_raw_state"]["schema_version"], "canonical-raw-state.v3")
-        self.assertEqual(snapshot["posterior_feature_vector"]["schema_version"], "posterior-feature-vector.v3")
+        self.assertEqual(snapshot["posterior_feature_vector"]["schema_version"], "posterior-feature-vector.v4")
         self.assertEqual(snapshot["quality_snapshot"]["schema_version"], "quality-snapshot.v2")
         self.assertEqual(snapshot["weather_posterior"]["schema_version"], "weather-posterior.v1")
         self.assertNotIn("headline", snapshot["posterior_feature_vector"].get("regime_state", {}))
         self.assertIn("observation_state", snapshot["posterior_feature_vector"])
+        self.assertIn("matched_branch_outlook_state", snapshot["posterior_feature_vector"])
+        self.assertNotIn("matched_branch_outlook", snapshot)
+        self.assertIsInstance(snapshot_branch_outlook(snapshot), dict)
         self.assertIn("quantiles", snapshot["weather_posterior"])
 
         snapshot["boundary_layer_regime"]["headline"] = "测试主导机制"
@@ -198,15 +202,54 @@ class AnalysisSnapshotServiceTest(unittest.TestCase):
         peak_ranges = snapshot["peak_data"]["summary"]["ranges"]
         posterior_hint = snapshot["weather_posterior"]["range_hint"]
         self.assertEqual(snapshot["peak_data"]["summary"]["range_truth_source"], "weather_posterior")
-        self.assertEqual(peak_ranges["source"], "posterior_quantiles")
+        self.assertEqual(
+            peak_ranges["source"],
+            snapshot["weather_posterior"]["range_hint_meta"]["source"],
+        )
         self.assertAlmostEqual(peak_ranges["core"]["lo"], posterior_hint["core"]["lo_c"], places=2)
         self.assertAlmostEqual(peak_ranges["core"]["hi"], posterior_hint["core"]["hi_c"], places=2)
-        self.assertGreaterEqual(peak_ranges["display"]["lo"], posterior_hint["display"]["lo_c"])
-        self.assertLessEqual(peak_ranges["display"]["hi"], posterior_hint["display"]["hi_c"])
+        self.assertAlmostEqual(peak_ranges["display"]["lo"], posterior_hint["display"]["lo_c"], places=2)
+        self.assertAlmostEqual(peak_ranges["display"]["hi"], posterior_hint["display"]["hi_c"], places=2)
         self.assertAlmostEqual(peak_ranges["display"]["lo"], peak_ranges["core"]["lo"], places=2)
         self.assertAlmostEqual(peak_ranges["display"]["hi"], peak_ranges["core"]["hi"], places=2)
         self.assertGreaterEqual(peak_ranges["posterior_tail_weight"], 0.0)
         self.assertLessEqual(peak_ranges["posterior_tail_weight"], 1.0)
+
+    def test_snapshot_range_truth_source_does_not_recap_old_peak_ranges(self) -> None:
+        primary_window, metar_diag, forecast_decision = self._sample_inputs()
+
+        snapshot = build_analysis_snapshot(
+            primary_window=primary_window,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            temp_unit="C",
+        )
+
+        peak_summary = dict(snapshot["peak_data"]["summary"])
+        peak_summary["ranges"] = {
+            **dict(peak_summary.get("ranges") or {}),
+            "display": {"lo": 99.0, "hi": 101.0},
+            "core": {"lo": 99.2, "hi": 100.8},
+        }
+        rewritten = _apply_posterior_range_truth_source(
+            peak_summary,
+            snapshot["weather_posterior"],
+        )
+
+        self.assertEqual(
+            rewritten["ranges"]["source"],
+            snapshot["weather_posterior"]["range_hint_meta"]["source"],
+        )
+        self.assertAlmostEqual(
+            rewritten["ranges"]["display"]["lo"],
+            snapshot["weather_posterior"]["range_hint"]["display"]["lo_c"],
+            places=2,
+        )
+        self.assertAlmostEqual(
+            rewritten["ranges"]["display"]["hi"],
+            snapshot["weather_posterior"]["range_hint"]["display"]["hi_c"],
+            places=2,
+        )
 
     def test_post_window_snapshot_keeps_settled_obs_anchor_range(self) -> None:
         primary_window = {
@@ -345,12 +388,13 @@ class AnalysisSnapshotServiceTest(unittest.TestCase):
 
         peak_ranges = snapshot["peak_data"]["summary"]["ranges"]
         posterior_hint = snapshot["weather_posterior"]["range_hint"]
-        self.assertIn(
+        self.assertEqual(peak_ranges["source"], "posterior_quantiles_progress_capped")
+        self.assertEqual(
             peak_ranges["source"],
-            {"posterior_quantiles", "posterior_quantiles_path_capped"},
+            snapshot["weather_posterior"]["range_hint_meta"]["source"],
         )
         self.assertLess(snapshot["weather_posterior"]["calibration"]["progress_spread_multiplier"], 1.0)
-        self.assertLessEqual(peak_ranges["display"]["hi"], posterior_hint["core"]["hi_c"])
+        self.assertAlmostEqual(peak_ranges["display"]["hi"], posterior_hint["display"]["hi_c"], places=2)
         self.assertLessEqual(peak_ranges["display"]["hi"], 23.8)
         self.assertGreaterEqual(peak_ranges["display"]["lo"], 23.4)
 

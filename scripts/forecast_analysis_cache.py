@@ -9,13 +9,14 @@ from typing import Any
 
 from analysis_snapshot_service import build_analysis_snapshot
 from cache_envelope import extract_payload, make_cache_doc
+from contracts import ANALYSIS_SNAPSHOT_SCHEMA_VERSION
 from ecmwf_ensemble_factor_service import build_ecmwf_ensemble_factor
 from runtime_cache_policy import runtime_cache_enabled
 
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = ROOT / "cache" / "runtime"
-SCHEMA_VERSION = "forecast-analysis-cache.v1"
+SCHEMA_VERSION = "forecast-analysis-cache.v3"
 _SAME_DAY_MIN_HOURS = 3.0
 _OBS_DRIVEN_MIN_HOURS = 1.0
 
@@ -31,6 +32,7 @@ def _compact_ensemble_factor(payload: dict[str, Any] | None) -> dict[str, Any]:
         "probabilities",
         "detail_probabilities",
         "diagnostics",
+        "members",
         "source",
         "selection",
     )
@@ -186,6 +188,10 @@ def read_cached_forecast_analysis(
         if analysis_peak_local and str(payload.get("analysis_peak_local") or "") != str(analysis_peak_local):
             return None
         cached = dict(payload)
+        snapshot_payload = dict(cached.get("analysis_snapshot") or {})
+        snapshot_schema = str(snapshot_payload.get("schema_version") or "")
+        if snapshot_payload and snapshot_schema != ANALYSIS_SNAPSHOT_SCHEMA_VERSION:
+            snapshot_fresh = False
         cached["analysis_snapshot_fresh"] = snapshot_fresh
         if not snapshot_fresh:
             cached["analysis_snapshot"] = {}

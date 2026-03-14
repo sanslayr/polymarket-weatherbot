@@ -205,6 +205,41 @@ class ReportFocusAndSynopticSummaryTest(unittest.TestCase):
 
         self.assertEqual(bundle["vars_block"], ["⚠️ **关注变量**（窗口内）"])
 
+    def test_report_focus_prefers_path_context_detail_over_generic_rebreak_focus(self) -> None:
+        bundle = build_report_focus_bundle(
+            primary_window={"peak_local": "2026-03-09T16:00"},
+            metar_diag={"metar_routine_cadence_min": 30},
+            analysis_snapshot={
+                "temp_phase_decision": {
+                    "display_phase": "near_window",
+                    "daily_peak_state": "open",
+                    "short_term_state": "holding",
+                    "timing": {"before_typical_peak": True, "overnight_carryover_high": True},
+                    "shape": {"future_candidate_role": "primary_remaining_peak"},
+                },
+                "weather_posterior": {
+                    "event_probs": {
+                        "new_high_next_60m": 0.79,
+                        "lock_by_window_end": 0.28,
+                    },
+                    "core": {
+                        "path_context": {
+                            "significant_forecast_detail_text": "当前匹配的是暖输送待接地这支，下一步主看低层耦合；若接上，更可能转到暖输送兑现，若接不上，更容易转成平台过渡",
+                            "significant_forecast_detail_score": 0.88,
+                        }
+                    },
+                },
+                "quality_snapshot": {"scores": {"confidence_label": "high"}},
+                "peak_data": {"summary": {"consistency": {}, "confidence": {}, "phase_now": "near_window"}},
+                "boundary_layer_regime": {"tracking_line": "", "regime_key": "synoptic", "thermo": {"vertical_regime": "dry_clear_mixed"}},
+                "condition_state": {},
+            },
+        )
+
+        joined = "\n".join(bundle["vars_block"])
+        self.assertIn("当前匹配的是暖输送待接地这支", joined)
+        self.assertNotIn("综合判断仍保留再创新高路径", joined)
+
     def test_report_focus_can_surface_second_peak_watch(self) -> None:
         bundle = build_report_focus_bundle(
             primary_window={"peak_local": "2026-03-09T16:00"},

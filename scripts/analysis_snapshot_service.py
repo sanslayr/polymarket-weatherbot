@@ -124,37 +124,18 @@ def _apply_posterior_range_truth_source(
 ) -> dict[str, Any]:
     summary = dict(peak_summary or {})
     posterior = dict(weather_posterior or {})
-    quantiles = dict(posterior.get("quantiles") or {})
-    p10 = _safe_float(quantiles.get("p10_c"))
-    p25 = _safe_float(quantiles.get("p25_c"))
-    p75 = _safe_float(quantiles.get("p75_c"))
-    p90 = _safe_float(quantiles.get("p90_c"))
-    if None in {p10, p25, p75, p90}:
+    range_hint = dict(posterior.get("range_hint") or {})
+    range_hint_meta = dict(posterior.get("range_hint_meta") or {})
+    display_hint = dict(range_hint.get("display") or {})
+    core_hint = dict(range_hint.get("core") or {})
+    disp_lo = _safe_float(display_hint.get("lo_c"))
+    disp_hi = _safe_float(display_hint.get("hi_c"))
+    core_lo = _safe_float(core_hint.get("lo_c"))
+    core_hi = _safe_float(core_hint.get("hi_c"))
+    if None in {disp_lo, disp_hi, core_lo, core_hi}:
         return summary
 
-    phase_now = str(summary.get("phase_now") or "")
-    confidence_label = str((posterior.get("quality_snapshot_ref") or {}).get("confidence_label") or "")
-    tail_weight = {
-        "far": 0.55,
-        "same_day": 0.35,
-        "near_window": 0.0,
-        "in_window": 0.0,
-        "post": 0.0,
-    }.get(phase_now, 0.25)
-    if confidence_label == "high":
-        tail_weight -= 0.10
-    elif confidence_label == "low":
-        tail_weight += 0.10
-    tail_weight = _clamp(tail_weight, 0.0, 1.0)
-
-    disp_lo = float(p25) - tail_weight * float(p25 - p10)
-    disp_hi = float(p75) + tail_weight * float(p90 - p75)
-    core_lo = float(p25)
-    core_hi = float(p75)
-
     ranges = dict(summary.get("ranges") or {})
-    pre_display = dict(ranges.get("display") or {})
-    pre_core = dict(ranges.get("core") or {})
     annotations = [str(item) for item in (summary.get("annotations") or []) if str(item).strip()]
     settled = dict(ranges.get("settled") or {})
     if bool(settled.get("active")):
@@ -164,49 +145,13 @@ def _apply_posterior_range_truth_source(
         if settle_line not in annotations:
             annotations.append(settle_line)
 
-    def _valid_range(node: dict[str, Any]) -> tuple[float, float] | None:
-        lo = _safe_float(node.get("lo"))
-        hi = _safe_float(node.get("hi"))
-        if lo is None or hi is None or hi < lo:
-            return None
-        return float(lo), float(hi)
-
-    source_label = "posterior_quantiles"
-    pre_display_range = _valid_range(pre_display)
-    pre_core_range = _valid_range(pre_core)
-    if (
-        phase_now in {"near_window", "in_window", "post"}
-        and pre_display_range is not None
-        and pre_core_range is not None
-    ):
-        pre_disp_lo, pre_disp_hi = pre_display_range
-        pre_core_lo, pre_core_hi = pre_core_range
-        posterior_width = max(0.0, float(disp_hi) - float(disp_lo))
-        pre_width = max(0.0, float(pre_disp_hi) - float(pre_disp_lo))
-        path_cap_active = (
-            bool(settled.get("active"))
-            or (posterior_width - pre_width) >= 0.35
-        )
-        if path_cap_active:
-            disp_lo = max(float(disp_lo), pre_disp_lo)
-            disp_hi = min(float(disp_hi), pre_disp_hi)
-            core_lo = max(float(core_lo), pre_core_lo)
-            core_hi = min(float(core_hi), pre_core_hi)
-
-            if disp_hi < disp_lo:
-                disp_lo, disp_hi = pre_disp_lo, pre_disp_hi
-            if core_hi < core_lo:
-                core_lo, core_hi = pre_core_lo, pre_core_hi
-
-            disp_lo = min(float(disp_lo), float(core_lo))
-            disp_hi = max(float(disp_hi), float(core_hi))
-            source_label = "posterior_quantiles_path_capped"
-
     ranges["display"] = {"lo": float(disp_lo), "hi": float(disp_hi)}
     ranges["core"] = {"lo": float(core_lo), "hi": float(core_hi)}
     ranges["settled"] = settled if bool(settled.get("active")) else {"active": False}
-    ranges["source"] = source_label
-    ranges["posterior_tail_weight"] = round(tail_weight, 2)
+    ranges["source"] = str(range_hint_meta.get("source") or "posterior_quantiles")
+    tail_weight = _safe_float(range_hint_meta.get("tail_weight"))
+    if tail_weight is not None:
+        ranges["posterior_tail_weight"] = round(float(tail_weight), 2)
     summary["ranges"] = ranges
     summary["annotations"] = annotations
     summary["range_truth_source"] = "weather_posterior"

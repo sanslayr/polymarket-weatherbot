@@ -185,6 +185,39 @@ def _cap_upper_tail(
     return out
 
 
+def _apply_cold_tail_allowance(
+    quantiles: dict[str, float],
+    *,
+    allowance_c: float | None,
+    floor: float | None,
+) -> dict[str, float]:
+    if allowance_c is None or abs(float(allowance_c)) < 0.01:
+        return dict(quantiles)
+
+    out = dict(quantiles)
+    p10 = _safe_float(out.get("p10_c"))
+    p25 = _safe_float(out.get("p25_c"))
+    p50 = _safe_float(out.get("p50_c"))
+    if None in {p10, p25, p50}:
+        return out
+
+    shift = float(allowance_c)
+    out["p10_c"] = round(float(p10) - shift, 2)
+    out["p25_c"] = round(float(p25) - 0.65 * shift, 2)
+
+    ordered_keys = ["p10_c", "p25_c", "p50_c", "p75_c", "p90_c"]
+    running = floor
+    for key in ordered_keys:
+        value = _safe_float(out.get(key))
+        if value is None:
+            continue
+        if running is not None:
+            value = max(float(value), float(running))
+        out[key] = round(value, 2)
+        running = value
+    return out
+
+
 def _progress_upper_tail_cap(
     *,
     posterior_core: dict[str, Any],
@@ -211,6 +244,7 @@ def _progress_upper_tail_cap(
     analysis_window_mode = str(progress.get("analysis_window_mode") or "")
     second_peak_potential = str(progress.get("second_peak_potential") or "")
     multi_peak_state = str(progress.get("multi_peak_state") or "")
+    path_context = dict(core.get("path_context") or {})
 
     if (
         new_high_prob is not None
@@ -275,11 +309,187 @@ def _progress_upper_tail_cap(
     elif second_peak_potential == "weak" or multi_peak_state == "possible":
         allowance += 0.08
 
+    allowance += _safe_float(path_context.get("upper_tail_allowance_adjust_c")) or 0.0
     allowance = _clamp(allowance, 0.15, 1.20)
     cap_hi = observed_anchor_c + allowance
     if latest_temp_c is not None:
         cap_hi = max(cap_hi, latest_temp_c + 0.12)
     return round(cap_hi, 2)
+
+
+def _progress_cold_tail_allowance(
+    *,
+    posterior_core: dict[str, Any],
+    event_probs: dict[str, Any],
+) -> float:
+    core = dict(posterior_core or {})
+    progress = dict(core.get("progress") or {})
+    phase = str(progress.get("phase") or "")
+    if phase not in {"near_window", "in_window", "post"}:
+        return 0.0
+
+    path_context = dict(core.get("path_context") or {})
+    allowance = _safe_float(path_context.get("cold_tail_allowance_c")) or 0.0
+    if abs(allowance) < 0.01:
+        return 0.0
+
+    lock_prob = _safe_float(event_probs.get("lock_by_window_end"))
+    new_high_prob = _safe_float(event_probs.get("new_high_next_60m"))
+    second_peak_potential = str(progress.get("second_peak_potential") or "")
+    multi_peak_state = str(progress.get("multi_peak_state") or "")
+
+    if allowance > 0.0 and lock_prob is not None and new_high_prob is not None:
+        if lock_prob >= 0.70 and new_high_prob <= 0.30:
+            allowance += 0.04
+        elif new_high_prob >= 0.55:
+            allowance -= 0.05
+
+    if allowance > 0.0 and (second_peak_potential in {"moderate", "high"} or multi_peak_state == "likely"):
+        allowance *= 0.75
+
+    return round(_clamp(allowance, -0.18, 0.55), 2)
+
+
+def _display_tail_weight(
+    *,
+    posterior_core: dict[str, Any],
+    confidence_label: str,
+) -> float:
+    phase = str(((posterior_core.get("progress") or {}).get("phase")) or "")
+    tail_weight = {
+        "far": 0.55,
+        "same_day": 0.35,
+        "near_window": 0.0,
+        "in_window": 0.0,
+        "post": 0.0,
+    }.get(phase, 0.25)
+    if confidence_label == "high":
+        tail_weight -= 0.10
+    elif confidence_label == "low":
+        tail_weight += 0.10
+    return round(_clamp(tail_weight, 0.0, 1.0), 2)
+
+
+def _progress_display_cap_active(
+    *,
+    posterior_core: dict[str, Any],
+    event_probs: dict[str, Any],
+) -> bool:
+    core = dict(posterior_core or {})
+    progress = dict(core.get("progress") or {})
+    anchor = dict(core.get("anchor") or {})
+    phase = str(progress.get("phase") or "")
+    if phase not in {"near_window", "in_window", "post"}:
+        return False
+
+    observed_floor_c = _safe_float(anchor.get("observed_floor_c"))
+    observed_ceiling_c = _safe_float(anchor.get("observed_ceiling_c"))
+    if observed_floor_c is None and observed_ceiling_c is None:
+        return False
+
+    second_peak_potential = str(progress.get("second_peak_potential") or "")
+    multi_peak_state = str(progress.get("multi_peak_state") or "")
+    if second_peak_potential in {"moderate", "high"} or multi_peak_state == "likely":
+        return False
+
+    analysis_window_mode = str(progress.get("analysis_window_mode") or "")
+    if analysis_window_mode in {"obs_plateau_reanchor", "obs_peak_reanchor"}:
+        return True
+
+    lock_prob = _safe_float(event_probs.get("lock_by_window_end"))
+    new_high_prob = _safe_float(event_probs.get("new_high_next_60m"))
+    if (
+        lock_prob is not None
+        and new_high_prob is not None
+        and lock_prob >= 0.72
+        and new_high_prob <= 0.28
+    ):
+        return True
+
+    observed_peak_age_h = _safe_float(progress.get("observed_peak_age_h"))
+    latest_gap_below_observed_c = _safe_float(progress.get("latest_gap_below_observed_c"))
+    reports_since_observed_peak = _safe_float(progress.get("reports_since_observed_peak"))
+    if (
+        observed_peak_age_h is not None
+        and observed_peak_age_h >= 0.50
+        and latest_gap_below_observed_c is not None
+        and latest_gap_below_observed_c >= 0.15
+    ):
+        return True
+    if (
+        reports_since_observed_peak is not None
+        and reports_since_observed_peak >= 2.0
+        and latest_gap_below_observed_c is not None
+        and latest_gap_below_observed_c >= 0.10
+    ):
+        return True
+    if phase == "post" and latest_gap_below_observed_c is not None and latest_gap_below_observed_c >= 0.10:
+        return True
+    return False
+
+
+def _integrated_range_hint(
+    *,
+    quantiles: dict[str, float],
+    posterior_core: dict[str, Any],
+    event_probs: dict[str, Any],
+    confidence_label: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    p10 = _safe_float(quantiles.get("p10_c"))
+    p25 = _safe_float(quantiles.get("p25_c"))
+    p75 = _safe_float(quantiles.get("p75_c"))
+    p90 = _safe_float(quantiles.get("p90_c"))
+    tail_weight = _display_tail_weight(
+        posterior_core=posterior_core,
+        confidence_label=confidence_label,
+    )
+    if None in {p10, p25, p75, p90}:
+        return {
+            "display": {"lo_c": p10, "hi_c": p90},
+            "core": {"lo_c": p25, "hi_c": p75},
+        }, {
+            "source": "posterior_quantiles",
+            "tail_weight": tail_weight,
+        }
+
+    disp_lo = float(p25) - float(tail_weight) * float(p25 - p10)
+    disp_hi = float(p75) + float(tail_weight) * float(p90 - p75)
+    core_lo = float(p25)
+    core_hi = float(p75)
+    source = "posterior_quantiles"
+
+    core = dict(posterior_core or {})
+    anchor = dict(core.get("anchor") or {})
+    observed_floor_c = _safe_float(anchor.get("observed_floor_c"))
+    observed_ceiling_c = _safe_float(anchor.get("observed_ceiling_c"))
+    if _progress_display_cap_active(
+        posterior_core=posterior_core,
+        event_probs=event_probs,
+    ):
+        if observed_floor_c is not None:
+            disp_lo = max(float(disp_lo), float(observed_floor_c))
+            core_lo = max(float(core_lo), float(observed_floor_c))
+        if observed_ceiling_c is not None:
+            disp_hi = min(float(disp_hi), float(observed_ceiling_c))
+            core_hi = min(float(core_hi), float(observed_ceiling_c))
+
+        fallback_lo = float(observed_floor_c) if observed_floor_c is not None else min(float(disp_lo), float(core_lo))
+        fallback_hi = float(observed_ceiling_c) if observed_ceiling_c is not None else max(float(disp_hi), float(core_hi))
+        if core_hi < core_lo:
+            core_lo, core_hi = fallback_lo, fallback_hi
+        if disp_hi < disp_lo:
+            disp_lo, disp_hi = fallback_lo, fallback_hi
+        disp_lo = min(float(disp_lo), float(core_lo))
+        disp_hi = max(float(disp_hi), float(core_hi))
+        source = "posterior_quantiles_progress_capped"
+
+    return {
+        "display": {"lo_c": round(float(disp_lo), 2), "hi_c": round(float(disp_hi), 2)},
+        "core": {"lo_c": round(float(core_lo), 2), "hi_c": round(float(core_hi), 2)},
+    }, {
+        "source": source,
+        "tail_weight": tail_weight,
+    }
 
 
 def apply_weather_posterior_calibration(
@@ -324,6 +534,15 @@ def apply_weather_posterior_calibration(
         multiplier=progress_spread_multiplier,
         floor=floor,
     )
+    cold_tail_allowance_c = _progress_cold_tail_allowance(
+        posterior_core=core,
+        event_probs=calibrated_event_probs,
+    )
+    calibrated_quantiles = _apply_cold_tail_allowance(
+        calibrated_quantiles,
+        allowance_c=cold_tail_allowance_c,
+        floor=floor,
+    )
     upper_tail_cap_c = _progress_upper_tail_cap(
         posterior_core=core,
         event_probs=calibrated_event_probs,
@@ -339,10 +558,12 @@ def apply_weather_posterior_calibration(
     if timing_cap and timing_confidence not in {"", timing_cap, "low"}:
         timing_confidence = timing_cap
 
-    p10 = calibrated_quantiles.get("p10_c")
-    p25 = calibrated_quantiles.get("p25_c")
-    p75 = calibrated_quantiles.get("p75_c")
-    p90 = calibrated_quantiles.get("p90_c")
+    range_hint, range_hint_meta = _integrated_range_hint(
+        quantiles=calibrated_quantiles,
+        posterior_core=core,
+        event_probs=calibrated_event_probs,
+        confidence_label=confidence_label,
+    )
 
     return {
         "schema_version": WEATHER_POSTERIOR_SCHEMA_VERSION,
@@ -357,10 +578,8 @@ def apply_weather_posterior_calibration(
         },
         "anchor": anchor,
         "quantiles": calibrated_quantiles,
-        "range_hint": {
-            "display": {"lo_c": p10, "hi_c": p90},
-            "core": {"lo_c": p25, "hi_c": p75},
-        },
+        "range_hint": range_hint,
+        "range_hint_meta": range_hint_meta,
         "event_probs": calibrated_event_probs,
         "peak_time": {
             **peak_time,
@@ -371,6 +590,7 @@ def apply_weather_posterior_calibration(
             "confidence_label": confidence_label,
             "quality_spread_multiplier": round(spread_multiplier, 3),
             "progress_spread_multiplier": round(progress_spread_multiplier, 3),
+            "cold_tail_allowance_c": cold_tail_allowance_c,
             "upper_tail_cap_c": upper_tail_cap_c,
         },
         "regimes": dict(core.get("regimes") or {}),

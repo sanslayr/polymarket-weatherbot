@@ -6,6 +6,16 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from analysis_snapshot_view import (
+    snapshot_boundary_layer_regime,
+    snapshot_condition_state,
+    snapshot_peak_data,
+    snapshot_posterior_feature_vector,
+    snapshot_quality_snapshot,
+    snapshot_temp_phase_decision,
+    snapshot_weather_posterior,
+    snapshot_weather_posterior_event_probs,
+)
 from contracts import REPORT_FOCUS_SCHEMA_VERSION
 from market_label_policy import build_market_label_policy
 from param_store import load_tmax_learning_params
@@ -207,6 +217,7 @@ def _posterior_focus_line(
     core = dict(posterior.get("core") or {})
     progress = dict(core.get("progress") or {})
     anchor = dict(posterior.get("anchor") or {})
+    path_context = dict(core.get("path_context") or {})
 
     lock_prob = _safe_float(event_probs.get("lock_by_window_end"))
     new_high_prob = _safe_float(event_probs.get("new_high_next_60m"))
@@ -214,6 +225,9 @@ def _posterior_focus_line(
     observed_anchor_c = _safe_float(progress.get("observed_anchor_c"))
     modeled_headroom_c = _safe_float(progress.get("modeled_headroom_c"))
     regime_shift_c = _safe_float(anchor.get("regime_median_shift_c"))
+    significant_detail_text = str(path_context.get("significant_forecast_detail_text") or "").strip()
+    significant_detail_score = _safe_float(path_context.get("significant_forecast_detail_score")) or 0.0
+    strong_path_detail = bool(significant_detail_text and significant_detail_score >= 0.82)
 
     if display_phase in {"near_window", "in_window", "post", "early_peak_watch"}:
         if (
@@ -234,6 +248,8 @@ def _posterior_focus_line(
             and new_high_prob >= 0.68
             and (lock_prob is None or lock_prob <= 0.45)
         ):
+            if strong_path_detail:
+                return 0.0, ""
             if modeled_headroom_c is not None and modeled_headroom_c <= 0.55:
                 return 0.88, "综合判断仍保留再创新高路径，但剩余上冲空间已经不大，重点看下一报温度斜率能否续正。"
             return 0.90, "综合判断仍保留再创新高路径，重点看下一报温度斜率能否续正。"
@@ -244,6 +260,23 @@ def _posterior_focus_line(
         return 0.76, "站点特征和天气型修正仍把中值压在冷侧一档，重点看压制信号会不会继续维持。"
 
     return 0.0, ""
+
+
+def _path_context_focus_line(
+    *,
+    display_phase: str,
+    weather_posterior: dict[str, Any],
+) -> tuple[float, str]:
+    if display_phase not in {"near_window", "in_window", "post", "early_peak_watch"}:
+        return 0.0, ""
+    posterior = dict(weather_posterior or {})
+    core = dict(posterior.get("core") or {})
+    path_context = dict(core.get("path_context") or {})
+    significant_detail_text = str(path_context.get("significant_forecast_detail_text") or "").strip()
+    significant_detail_score = _safe_float(path_context.get("significant_forecast_detail_score")) or 0.0
+    if not significant_detail_text or significant_detail_score < 0.82:
+        return 0.0, ""
+    return max(0.86, float(significant_detail_score)), significant_detail_text
 
 
 def _phase_structure_focus_line(temp_phase: dict[str, Any], *, display_phase: str) -> tuple[float, str]:
@@ -274,7 +307,7 @@ def _phase_structure_focus_line(temp_phase: dict[str, Any], *, display_phase: st
         if future_gap_vs_current is not None and future_gap_vs_current >= 0.45:
             return 0.90, "后段仍留着一段补涨窗口，重点看升温会不会重新提速回到前高附近。"
         if rebound_mode == "second_peak":
-            return 0.88, "当前更像早峰后的二峰观察段，还不能按已经见顶处理。"
+            return 0.88, "当前处在早峰后二峰观察段，还不能按已见顶处理。"
 
     if (
         display_phase in {"far", "near_window", "in_window", "post", "early_peak_watch"}
@@ -285,9 +318,9 @@ def _phase_structure_focus_line(temp_phase: dict[str, Any], *, display_phase: st
     ):
         peak_clock = _format_hour_label(warm_peak_hour_median)
         if very_late_peak_share >= 0.35 and peak_clock:
-            return 0.84, f"这个站常见拖到 {peak_clock} 前后才更像见顶，眼前高点别急着当终点。"
+            return 0.84, f"这个站常见拖到 {peak_clock} 前后见顶，眼前高点别急着当终点。"
         if peak_clock:
-            return 0.80, f"这个站常见高点偏晚，通常要到 {peak_clock} 前后才更像见顶，眼前高点别急着当终点。"
+            return 0.80, f"这个站常见高点偏晚，常拖到 {peak_clock} 前后见顶，眼前高点别急着当终点。"
         return 0.78, "这个站常见偏晚见顶，眼前高点别急着当终点。"
 
     return 0.0, ""
@@ -344,17 +377,17 @@ def build_report_focus_bundle(
     analysis_snapshot: dict[str, Any],
 ) -> dict[str, Any]:
     snapshot = analysis_snapshot if isinstance(analysis_snapshot, dict) else {}
-    temp_phase = dict(snapshot.get("temp_phase_decision") or {})
-    weather_posterior = dict(snapshot.get("weather_posterior") or {})
-    posterior_feature_vector = dict(snapshot.get("posterior_feature_vector") or {})
-    quality_snapshot = dict(snapshot.get("quality_snapshot") or {})
-    peak_data = dict(snapshot.get("peak_data") or {})
+    temp_phase = snapshot_temp_phase_decision(snapshot)
+    weather_posterior = snapshot_weather_posterior(snapshot)
+    posterior_feature_vector = snapshot_posterior_feature_vector(snapshot)
+    quality_snapshot = snapshot_quality_snapshot(snapshot)
+    peak_data = snapshot_peak_data(snapshot)
     peak_summary = dict(peak_data.get("summary") or {})
     consistency = dict(peak_summary.get("consistency") or {})
     confidence = dict(peak_summary.get("confidence") or {})
-    boundary_layer_regime = dict(snapshot.get("boundary_layer_regime") or {})
+    boundary_layer_regime = snapshot_boundary_layer_regime(snapshot)
     thermo = dict(boundary_layer_regime.get("thermo") or {})
-    state = dict(snapshot.get("condition_state") or {})
+    state = snapshot_condition_state(snapshot)
 
     display_phase = str(temp_phase.get("display_phase") or peak_summary.get("phase_now") or "unknown")
     daily_peak_state = str(temp_phase.get("daily_peak_state") or "open")
@@ -366,8 +399,9 @@ def build_report_focus_bundle(
     future_candidate_role = str(shape.get("future_candidate_role") or "")
     regime_key = str(boundary_layer_regime.get("regime_key") or "")
     vertical_regime = str(thermo.get("vertical_regime") or "")
-    new_high_prob = _safe_float((weather_posterior.get("event_probs") or {}).get("new_high_next_60m")) or 0.0
-    lock_prob = _safe_float((weather_posterior.get("event_probs") or {}).get("lock_by_window_end")) or 0.0
+    event_probs = snapshot_weather_posterior_event_probs(snapshot)
+    new_high_prob = _safe_float(event_probs.get("new_high_next_60m")) or 0.0
+    lock_prob = _safe_float(event_probs.get("lock_by_window_end")) or 0.0
     temp_trend_step = _safe_float(metar_diag.get("temp_trend_1step_c")) or 0.0
 
     vars_block = [f"⚠️ **关注变量**（{PHASE_LABELS.get(display_phase, PHASE_LABELS['unknown'])}）"]
@@ -378,6 +412,13 @@ def build_report_focus_bundle(
         is_specific_tracking = any(token in tracking_line for token in DECISIVE_FOCUS_TOKENS)
         score = 0.95 if regime_key in {"boundary_layer_clearing", "static_stable", "mixing_depth", "advection"} else (0.84 if is_specific_tracking else 0.58)
         _push_focus_candidate(focus_candidates, score, tracking_line)
+
+    path_context_focus_score, path_context_focus_text = _path_context_focus_line(
+        display_phase=display_phase,
+        weather_posterior=weather_posterior,
+    )
+    if path_context_focus_text:
+        _push_focus_candidate(focus_candidates, path_context_focus_score, path_context_focus_text)
 
     posterior_focus_score, posterior_focus_line = _posterior_focus_line(
         display_phase=display_phase,
@@ -474,9 +515,9 @@ def build_report_focus_bundle(
 
     obs_analysis_lines: list[str] = []
     if bool(temp_phase.get("should_use_early_peak_wording")) and lock_prob < 0.70:
-        obs_analysis_lines.append("• 当前更像已先出现早峰，短线动能转弱；全天是否锁定仍待后续实况确认。")
+        obs_analysis_lines.append("• 当前已先出现早峰，短线动能转弱；全天是否锁定仍待后续实况确认。")
     elif daily_peak_state == "lean_locked":
-        obs_analysis_lines.append("• 当前更偏向已接近全天高点，但仍需下一关键报确认是否真正锁定。")
+        obs_analysis_lines.append("• 当前已接近全天高点，但仍需下一关键报确认是否真正锁定。")
     elif daily_peak_state == "locked":
         obs_analysis_lines.append("• 当前路径更接近高点已锁定，后续再创新高难度明显上升。")
 

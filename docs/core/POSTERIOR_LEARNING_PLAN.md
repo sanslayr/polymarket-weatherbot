@@ -183,7 +183,7 @@ posterior learning 不应试图“学习天气本身”，而应学习：
 
 ### B. 持续学习需要的 offline 实体还没有真正存在
 
-当前文档里已经提出这些模块：
+当前文档里原先提出这些模块：
 
 - `posterior_factor_service.py`
 - `posterior_training_log_service.py`
@@ -192,7 +192,14 @@ posterior learning 不应试图“学习天气本身”，而应学习：
 - `posterior_artifact_registry.py`
 - `posterior_case_index_service.py`
 
-但当前代码里它们尚未落地。
+其中这批接口现在已经部分落地：
+
+- `analysis_snapshot_view.py`
+- `posterior_learning_sample_service.py`
+- `posterior_case_index_service.py`
+- `posterior_training_log_service.py`
+
+但它们目前还是“积木层”，还没有全面接入 runtime entrypoint、label 回填和 artifact 发布链路。
 
 所以系统虽然有 learning 的插槽，却还没有 learning 的生产线。
 
@@ -403,6 +410,14 @@ posterior learning 不应试图“学习天气本身”，而应学习：
 - `range_truth_source`
 - `sampling_reason`
 - `schema versions`
+
+当前 runtime 已经可以直接通过这些接口生成标准化样本：
+
+- `build_posterior_learning_sample(...)`
+- `build_posterior_case_index(...)`
+- `append_posterior_learning_sample(...)`
+
+建议 research / worker / cron 都通过这层取样，而不是各自从 `analysis_snapshot` 手工拼字段。
 
 ## 6.4 sampling reason
 
@@ -777,7 +792,7 @@ runtime 必须支持多级 fallback：
 
 ## 12.1 近阶段：2 周内可落地
 
-1. 落 `posterior_training_log_service.py`
+1. 在 runtime entrypoint 接 `posterior_training_log_service.py`
 2. 记录 append-only posterior samples
 3. 明确 `posterior raw output` 与 `final displayed range` 双留档
 4. 新增 `artifact manifest` 读取层

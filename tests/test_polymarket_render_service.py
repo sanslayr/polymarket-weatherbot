@@ -17,6 +17,7 @@ class PolymarketRenderServiceTest(unittest.TestCase):
             "https://polymarket.com/event/highest-temperature-in-ankara-on-march-9-2026",
             {"peak_temp_c": 7.4},
             weather_anchor={"observed_max_temp_c": 6.0},
+            label_policy={"best_weather_min": 0.30, "best_lead_min": 0.05, "min_display_rows": 3},
             prefetched_event=(
                 True,
                 [
@@ -34,6 +35,7 @@ class PolymarketRenderServiceTest(unittest.TestCase):
             "https://polymarket.com/event/highest-temperature-in-ankara-on-march-9-2026",
             {"peak_temp_c": 7.4},
             weather_anchor={"observed_max_temp_c": 6.0},
+            label_policy={"best_weather_min": 0.30, "best_lead_min": 0.05, "min_display_rows": 3},
             prefetched_event=(
                 True,
                 [
@@ -50,6 +52,7 @@ class PolymarketRenderServiceTest(unittest.TestCase):
             "https://polymarket.com/event/highest-temperature-in-ankara-on-march-9-2026",
             {"peak_temp_c": 7.4},
             weather_anchor={"observed_max_temp_c": 6.0},
+            label_policy={"best_weather_min": 0.30, "best_lead_min": 0.05, "min_display_rows": 3},
             prefetched_event=(
                 True,
                 [
@@ -150,6 +153,47 @@ class PolymarketRenderServiceTest(unittest.TestCase):
         ladder_rows = [line for line in text.splitlines() if line.startswith("• ")]
         self.assertGreaterEqual(len(ladder_rows), 3)
         self.assertNotIn("👍最可能", text)
+
+    def test_far_phase_broad_distribution_avoids_best_and_alpha_tags_under_strict_policy(self) -> None:
+        text = _build_polymarket_section(
+            "https://polymarket.com/event/highest-temperature-in-ankara-on-march-9-2026",
+            {"peak_temp_c": 13.0},
+            weather_anchor={"latest_temp_c": 10.0, "observed_max_temp_c": 10.0},
+            weather_posterior={
+                "quantiles": {
+                    "p10_c": 12.14,
+                    "p25_c": 12.65,
+                    "p50_c": 13.01,
+                    "p75_c": 13.9,
+                    "p90_c": 14.5,
+                }
+            },
+            prefetched_event=(
+                True,
+                [
+                    {"slug": "highest-temperature-in-ankara-on-march-9-2026-12c", "bestBid": "0.053", "bestAsk": "0.059"},
+                    {"slug": "highest-temperature-in-ankara-on-march-9-2026-13c", "bestBid": "0.33", "bestAsk": "0.36"},
+                    {"slug": "highest-temperature-in-ankara-on-march-9-2026-14c", "bestBid": "0.44", "bestAsk": "0.48"},
+                    {"slug": "highest-temperature-in-ankara-on-march-9-2026-15c", "bestBid": "0.10", "bestAsk": "0.13"},
+                    {"slug": "highest-temperature-in-ankara-on-march-9-2026-16corhigher", "bestBid": "0.012", "bestAsk": "0.013"},
+                ],
+            ),
+            label_policy={
+                "phase_now": "far",
+                "best_weather_min": 0.54,
+                "best_lead_min": 0.30,
+                "alpha_cheap_weather_min": 0.22,
+                "alpha_cheap_score_min": 0.28,
+                "alpha_cheap_edge_min": 0.20,
+                "alpha_mid_weather_min": 0.48,
+                "alpha_mid_score_min": 0.36,
+                "alpha_mid_edge_min": 0.23,
+                "min_display_rows": 3,
+            },
+        )
+
+        self.assertNotIn("👍最可能", text)
+        self.assertNotIn("😇潜在Alpha", text)
 
 
 if __name__ == "__main__":

@@ -308,17 +308,8 @@ def _classify_member_path(
     )
 
 
-def summarize_member_paths(
-    current_payload: dict[str, Any],
-    previous_payload: dict[str, Any],
-) -> dict[str, Any]:
-    current_members = _member_map(current_payload)
-    previous_members = _member_map(previous_payload)
-    shared_numbers = sorted(set(current_members).intersection(previous_members))
-    if not shared_numbers:
-        raise RuntimeError("ecmwf ensemble point payload has no overlapping members")
-
-    rows: list[dict[str, Any]] = []
+def summarize_member_path_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    valid_rows: list[dict[str, Any]] = []
     counts = {
         "warm_support": 0,
         "transition": 0,
@@ -332,37 +323,38 @@ def summarize_member_paths(
         "cold_suppression": 0,
     }
 
-    for number in shared_numbers:
-        current = current_members[number]
-        previous = previous_members[number]
-        t850_now = _safe_float(current.get("t850_c"))
-        t850_prev = _safe_float(previous.get("t850_c"))
-        delta_t850_c = None if t850_now is None or t850_prev is None else round(t850_now - t850_prev, 2)
-        wind_speed_850_kmh = _safe_float(current.get("wind_speed_850_kmh"))
-        label, detail = _classify_member_path(
-            t850_delta_c=delta_t850_c,
-            wind_speed_850_kmh=wind_speed_850_kmh,
-        )
+    for raw in rows:
+        label = str(raw.get("path_label") or "").strip()
+        detail = str(raw.get("path_detail") or "").strip()
+        if label not in counts:
+            continue
         counts[label] += 1
         if detail in detail_counts:
             detail_counts[detail] += 1
-        rows.append(
+        try:
+            number = int(raw.get("number"))
+        except Exception:
+            number = len(valid_rows)
+        valid_rows.append(
             {
                 "number": number,
                 "path_label": label,
                 "path_detail": detail,
-                "delta_t850_c": delta_t850_c,
-                "wind_speed_850_kmh": wind_speed_850_kmh,
+                "delta_t850_c": _safe_float(raw.get("delta_t850_c")),
+                "wind_speed_850_kmh": _safe_float(raw.get("wind_speed_850_kmh")),
             }
         )
 
-    total = float(len(rows))
+    if not valid_rows:
+        raise RuntimeError("member path rows are empty")
+
+    total = float(len(valid_rows))
     probabilities = {
         key: _normalize_percent(value / total)
         for key, value in counts.items()
     }
-    delta_values = [float(row["delta_t850_c"]) for row in rows if row.get("delta_t850_c") is not None]
-    speed_values = [float(row["wind_speed_850_kmh"]) for row in rows if row.get("wind_speed_850_kmh") is not None]
+    delta_values = [float(row["delta_t850_c"]) for row in valid_rows if row.get("delta_t850_c") is not None]
+    speed_values = [float(row["wind_speed_850_kmh"]) for row in valid_rows if row.get("wind_speed_850_kmh") is not None]
     dominant_path, dominant_prob = max(probabilities.items(), key=lambda item: item[1])
     sorted_probs = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
     dominant_margin_prob = round(sorted_probs[0][1] - sorted_probs[1][1], 3) if len(sorted_probs) >= 2 else round(sorted_probs[0][1], 3)
@@ -409,8 +401,43 @@ def summarize_member_paths(
             "weak_warm_transition_prob": detail_probabilities.get("weak_warm_transition"),
             "weak_cold_transition_prob": detail_probabilities.get("weak_cold_transition"),
         },
-        "members": rows,
+        "members": valid_rows,
     }
+
+
+def summarize_member_paths(
+    current_payload: dict[str, Any],
+    previous_payload: dict[str, Any],
+) -> dict[str, Any]:
+    current_members = _member_map(current_payload)
+    previous_members = _member_map(previous_payload)
+    shared_numbers = sorted(set(current_members).intersection(previous_members))
+    if not shared_numbers:
+        raise RuntimeError("ecmwf ensemble point payload has no overlapping members")
+
+    rows: list[dict[str, Any]] = []
+    for number in shared_numbers:
+        current = current_members[number]
+        previous = previous_members[number]
+        t850_now = _safe_float(current.get("t850_c"))
+        t850_prev = _safe_float(previous.get("t850_c"))
+        delta_t850_c = None if t850_now is None or t850_prev is None else round(t850_now - t850_prev, 2)
+        wind_speed_850_kmh = _safe_float(current.get("wind_speed_850_kmh"))
+        label, detail = _classify_member_path(
+            t850_delta_c=delta_t850_c,
+            wind_speed_850_kmh=wind_speed_850_kmh,
+        )
+        rows.append(
+            {
+                "number": number,
+                "path_label": label,
+                "path_detail": detail,
+                "delta_t850_c": delta_t850_c,
+                "wind_speed_850_kmh": wind_speed_850_kmh,
+            }
+        )
+
+    return summarize_member_path_rows(rows)
 
 
 def build_ecmwf_ensemble_factor(

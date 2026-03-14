@@ -102,7 +102,7 @@ class PeakRangeRenderServiceTest(unittest.TestCase):
                     "display": {"lo": 23.4, "hi": 23.8},
                     "core": {"lo": 23.4, "hi": 23.8},
                     "window": {"label": "峰值窗", "text": "14:00~16:00 Local"},
-                    "source": "posterior_quantiles_path_capped",
+                    "source": "posterior_quantiles_progress_capped",
                     "posterior_tail_weight": 0.0,
                 },
             },

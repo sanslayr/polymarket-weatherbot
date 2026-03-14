@@ -11,7 +11,7 @@ def _posterior_band_text(
     ranges: dict[str, Any],
 ) -> str:
     source = str(ranges.get("source") or "")
-    if source == "posterior_quantiles_path_capped":
+    if source.endswith("_capped"):
         return "已按实况路径收紧"
     return ""
 

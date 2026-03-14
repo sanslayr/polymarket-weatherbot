@@ -52,6 +52,182 @@ def _advection_signed_adjustment(transport_state: str, thermal_state: str) -> fl
     return 0.0
 
 
+def _path_side(path_label: str, *, path_detail: str = "") -> str:
+    key = path_detail if str(path_label or "") == "transition" and str(path_detail or "") else str(path_label or "")
+    mapping = {
+        "warm_support": "warm",
+        "weak_warm_transition": "warm",
+        "cold_suppression": "cold",
+        "weak_cold_transition": "cold",
+        "transition": "neutral",
+        "neutral_stable": "neutral",
+    }
+    return mapping.get(key, "")
+
+
+def _branch_family_label(value: str) -> str:
+    return {
+        "warm_landing_watch": "暖输送待接地",
+        "warm_support_track": "暖输送兑现",
+        "warm_transition_probe": "暖侧试探",
+        "cold_suppression_track": "压温持续",
+        "cold_transition_probe": "冷侧试探",
+        "convective_interrupt_risk": "对流打断风险",
+        "convective_cold_hold": "对流压温延续",
+        "cloud_release_watch": "低云待松动",
+        "neutral_plateau": "平台过渡",
+        "volatile_split": "高波动分支",
+        "second_peak_retest": "后段二峰观察",
+        "mixed_transition": "过渡分支",
+    }.get(str(value or ""), str(value or "当前分支"))
+
+
+def _branch_gate_label(value: str) -> str:
+    return {
+        "low_level_coupling": "低层耦合",
+        "cloud_release": "低云破碎",
+        "convective_intrusion": "对流是否压进峰值窗",
+        "convective_persistence": "对流压温能否继续维持",
+        "cold_advection_hold": "冷抑制是否继续落地",
+        "rebreak_signal": "是否再破前高",
+        "branch_resolution": "分支何时收敛",
+        "reacceleration": "升温能否重新提速",
+        "follow_through": "后段能否继续兑现",
+    }.get(str(value or ""), str(value or "后续门槛"))
+
+
+def _build_path_context(
+    *,
+    branch_outlook_state: dict[str, Any],
+) -> dict[str, Any]:
+    branch = dict(branch_outlook_state or {})
+    active_path_source = str(branch.get("branch_source") or "")
+    active_path = str(branch.get("branch_path") or "")
+    active_path_detail = str(branch.get("branch_path_detail") or active_path or "")
+    active_side = str(branch.get("branch_side") or _path_side(active_path, path_detail=active_path_detail))
+    branch_family = str(branch.get("branch_family") or "")
+    branch_stage_now = str(branch.get("branch_stage_now") or "")
+    branch_volatility = str(branch.get("branch_volatility") or "")
+    expected_next_family = str(branch.get("expected_next_family") or "")
+    expected_next_stage = str(branch.get("expected_next_stage") or "")
+    fallback_family = str(branch.get("fallback_family") or "")
+    fallback_stage = str(branch.get("fallback_stage") or "")
+    next_gate = str(branch.get("next_transition_gate") or "")
+    branch_dominant_prob = _safe_float(branch.get("branch_dominant_prob")) or 0.0
+    expected_prob = _safe_float(branch.get("expected_follow_through_prob")) or 0.50
+    fallback_prob = _safe_float(branch.get("fallback_prob")) or 0.30
+    if bool(branch.get("matched_subset_active")):
+        signal_weight = 1.0
+    elif active_path_source == "observed_path" and branch_dominant_prob >= 0.80:
+        signal_weight = 0.95
+    elif active_path_source == "observed_path" and branch_dominant_prob >= 0.65:
+        signal_weight = 0.90
+    elif branch_dominant_prob >= 0.70:
+        signal_weight = 0.86
+    else:
+        signal_weight = 0.75
+
+    upper_tail_adjust_c = 0.0
+    cold_tail_allowance_c = 0.0
+    significant_detail_key = branch_family or "matched_branch"
+    branch_volatility_penalty = {"low": 0.0, "medium": 0.03, "high": 0.06}.get(branch_volatility, 0.0)
+
+    if branch_family == "warm_support_track":
+        upper_tail_adjust_c += 0.08 + max(0.0, expected_prob - 0.55) * 0.16
+        cold_tail_allowance_c -= 0.05
+    elif branch_family in {"warm_landing_watch", "warm_transition_probe"}:
+        upper_tail_adjust_c -= 0.03 + fallback_prob * 0.16
+    elif branch_family == "cloud_release_watch":
+        upper_tail_adjust_c -= 0.06 + fallback_prob * 0.18
+    elif branch_family == "convective_interrupt_risk":
+        upper_tail_adjust_c -= 0.08 + expected_prob * 0.18
+        cold_tail_allowance_c += 0.04 + expected_prob * 0.08
+    elif branch_family in {"cold_suppression_track", "convective_cold_hold"}:
+        cold_tail_allowance_c += 0.08 + expected_prob * 0.18
+        upper_tail_adjust_c -= 0.03 + expected_prob * 0.06
+    elif branch_family == "cold_transition_probe":
+        cold_tail_allowance_c += 0.06 + expected_prob * 0.10
+    elif branch_family == "neutral_plateau":
+        upper_tail_adjust_c -= 0.02 + fallback_prob * 0.06
+        cold_tail_allowance_c += 0.03 if active_side == "cold" else 0.0
+    elif branch_family == "volatile_split":
+        upper_tail_adjust_c += 0.03 - branch_volatility_penalty
+        cold_tail_allowance_c += 0.05 + branch_volatility_penalty
+    elif branch_family == "second_peak_retest":
+        upper_tail_adjust_c += 0.05 + max(0.0, expected_prob - 0.50) * 0.10
+        cold_tail_allowance_c += 0.02
+
+    if branch_volatility == "medium":
+        upper_tail_adjust_c -= 0.02
+        cold_tail_allowance_c += 0.02
+    elif branch_volatility == "high":
+        upper_tail_adjust_c -= 0.04
+        cold_tail_allowance_c += 0.04
+
+    upper_tail_adjust_c = round(upper_tail_adjust_c * signal_weight, 2)
+    cold_tail_allowance_c = round(cold_tail_allowance_c * signal_weight, 2)
+
+    gate_label = _branch_gate_label(next_gate)
+    expected_label = _branch_family_label(expected_next_family)
+    fallback_label = _branch_family_label(fallback_family)
+    current_label = _branch_family_label(branch_family)
+    significant_detail_score = 0.80
+
+    if branch_family == "warm_support_track":
+        significant_detail_text = f"当前匹配的是{current_label}这支，下一步主看{gate_label}；若继续兑现，更可能维持{expected_label}，若掉链子，更容易转成{fallback_label}"
+        significant_detail_score = 0.86
+    elif branch_family in {"warm_landing_watch", "warm_transition_probe"}:
+        significant_detail_text = f"当前匹配的是{current_label}这支，下一步主看{gate_label}；若接上，更可能转到{expected_label}，若接不上，更容易转成{fallback_label}"
+        significant_detail_score = 0.90
+    elif branch_family == "cloud_release_watch":
+        significant_detail_text = f"当前匹配的是{current_label}这支，下一步主看{gate_label}；若松开，更可能转到{expected_label}，若不松，更容易继续停在{fallback_label}"
+        significant_detail_score = 0.90
+    elif branch_family == "convective_interrupt_risk":
+        significant_detail_text = f"当前匹配的是{current_label}这支，下一步主看{gate_label}；若压进来，更可能转到{expected_label}，若没压进来，分支才更容易回到{fallback_label}"
+        significant_detail_score = 0.92
+    elif branch_family in {"cold_suppression_track", "convective_cold_hold", "cold_transition_probe"}:
+        significant_detail_text = f"当前匹配的是{current_label}这支，下一步主看{gate_label}；若继续落地，更可能维持{expected_label}，若松动，更容易转回{fallback_label}"
+        significant_detail_score = 0.89
+    elif branch_family == "second_peak_retest":
+        significant_detail_text = f"当前匹配的是{current_label}这支，下一步主看{gate_label}；若再破，更可能转到{expected_label}，若不破，更容易回到{fallback_label}"
+        significant_detail_score = 0.88
+    elif branch_family == "volatile_split":
+        significant_detail_text = f"当前匹配的是{current_label}这支，下一步主看{gate_label}；若暖侧胜出，更可能转到{expected_label}，若分歧继续，区间仍要保留双侧机动"
+        significant_detail_score = 0.86
+    else:
+        significant_detail_text = f"当前匹配的是{current_label}这支，下一步主看{gate_label}；若继续演化，更可能转到{expected_label}，若不顺，更容易回到{fallback_label}"
+        significant_detail_score = 0.82
+
+    if branch_stage_now in {"watch", "pending", "testing"}:
+        significant_detail_score += 0.02
+    if branch_volatility == "high":
+        significant_detail_score += 0.01
+    significant_detail_score = round(_clamp(significant_detail_score * signal_weight, 0.55, 0.96), 2)
+
+    return {
+        "active_path_source": active_path_source,
+        "active_path": active_path,
+        "active_path_detail": active_path_detail,
+        "active_path_side": active_side,
+        "branch_family": branch_family,
+        "branch_stage_now": branch_stage_now,
+        "branch_volatility": branch_volatility,
+        "next_transition_gate": next_gate,
+        "expected_next_family": expected_next_family,
+        "expected_next_stage": expected_next_stage,
+        "expected_follow_through_prob": round(expected_prob, 3),
+        "fallback_family": fallback_family,
+        "fallback_stage": fallback_stage,
+        "fallback_prob": round(fallback_prob, 3),
+        "signal_weight": round(signal_weight, 2),
+        "upper_tail_allowance_adjust_c": round(upper_tail_adjust_c, 2),
+        "cold_tail_allowance_c": round(cold_tail_allowance_c, 2),
+        "significant_detail_key": significant_detail_key,
+        "significant_forecast_detail_text": significant_detail_text,
+        "significant_forecast_detail_score": round(significant_detail_score, 2) if significant_detail_text else 0.0,
+    }
+
+
 def _near_term_model_weight(hours_to_peak: float | None) -> float:
     if hours_to_peak is None:
         return 1.0
@@ -362,6 +538,7 @@ def build_weather_posterior_core(
     track_state = dict(feat.get("track_state") or {})
     quality_state = dict(feat.get("quality_state") or {})
     ensemble_state = dict(feat.get("ensemble_path_state") or {})
+    branch_outlook_state = dict(feat.get("matched_branch_outlook_state") or {})
 
     latest_temp_c = _safe_float(obs_state.get("latest_temp_c"))
     observed_max_temp_c = _safe_float(obs_state.get("observed_max_temp_c"))
@@ -398,19 +575,52 @@ def build_weather_posterior_core(
     precip_state = str(moisture_state.get("precip_state") or "none")
     transport = str(transport_state.get("transport_state") or "neutral")
     thermal_adv_state = str(transport_state.get("thermal_advection_state") or "none")
+    surface_role = str(transport_state.get("surface_role") or "")
     surface_coupling = str(mixing_state.get("surface_coupling_state") or "")
     low_level_cap_score = _safe_float(vertical_state.get("low_level_cap_score")) or 0.0
+    h925_coupling_state = str(vertical_state.get("h925_coupling_state") or "")
+    h700_scope = str(vertical_state.get("h700_scope") or "")
+    h700_dry_intrusion_strength = _safe_float(vertical_state.get("h700_dry_intrusion_strength"))
     multi_peak_state = str(shape_state.get("multi_peak_state") or "none")
     coverage_density = str(vertical_state.get("coverage_density") or "")
     main_track_confidence = str(track_state.get("main_track_confidence") or "")
-    ensemble_dominant_path = str(ensemble_state.get("dominant_path") or "")
-    ensemble_split_state = str(ensemble_state.get("split_state") or "")
-    ensemble_dominant_prob = _safe_float(ensemble_state.get("dominant_prob"))
+    ensemble_full_dominant_path = str(ensemble_state.get("dominant_path") or "")
+    ensemble_full_dominant_path_detail = str(ensemble_state.get("dominant_path_detail") or "")
+    ensemble_full_split_state = str(ensemble_state.get("split_state") or "")
+    ensemble_full_dominant_prob = _safe_float(ensemble_state.get("dominant_prob"))
     ensemble_alignment_match_state = str(ensemble_state.get("observed_alignment_match_state") or "")
     ensemble_alignment_confidence = str(ensemble_state.get("observed_alignment_confidence") or "")
     ensemble_alignment_score = _safe_float(ensemble_state.get("observed_alignment_score"))
     ensemble_observed_path = str(ensemble_state.get("observed_path") or "")
+    ensemble_observed_path_detail = str(ensemble_state.get("observed_path_detail") or "")
     ensemble_observed_path_locked = bool(ensemble_state.get("observed_path_locked"))
+    ensemble_matched_subset_active = bool(ensemble_state.get("matched_subset_active"))
+    ensemble_matched_member_share = _safe_float(ensemble_state.get("matched_member_share"))
+    ensemble_matched_dominant_path = str(ensemble_state.get("matched_dominant_path") or "")
+    ensemble_matched_dominant_path_detail = str(ensemble_state.get("matched_dominant_path_detail") or ensemble_state.get("matched_transition_detail") or "")
+    ensemble_active_source = "matched_subset" if ensemble_matched_subset_active else "full_ensemble"
+    ensemble_dominant_path = str(
+        (
+            ensemble_state.get("matched_dominant_path")
+            if ensemble_matched_subset_active
+            else ensemble_full_dominant_path
+        ) or ""
+    ) or ensemble_full_dominant_path
+    ensemble_split_state = str(
+        (
+            ensemble_state.get("matched_split_state")
+            if ensemble_matched_subset_active
+            else ensemble_full_split_state
+        ) or ""
+    ) or ensemble_full_split_state
+    ensemble_dominant_prob = _safe_float(
+        ensemble_state.get("matched_dominant_prob")
+        if ensemble_matched_subset_active
+        else ensemble_full_dominant_prob
+    )
+    if ensemble_dominant_prob is None:
+        ensemble_dominant_prob = ensemble_full_dominant_prob
+    path_context = _build_path_context(branch_outlook_state=branch_outlook_state)
 
     floor_c = observed_floor_c
     if floor_c is None:
@@ -556,6 +766,8 @@ def build_weather_posterior_core(
         reason_codes.append("ensemble_path_live_confirmed")
     if progress_spread_adjustment < 0.0:
         reason_codes.extend(progress_reason_codes)
+    if ensemble_matched_subset_active:
+        reason_codes.append("ensemble_obs_matched_subset")
 
     baseline_median_c = float(median_c)
     baseline_spread_c = float(spread_c)
@@ -682,10 +894,16 @@ def build_weather_posterior_core(
             "latest_temp_c": latest_temp_c,
             "observed_max_temp_c": observed_max_temp_c,
             "observed_floor_c": floor_c,
+            "observed_ceiling_c": _safe_float(obs.get("observed_max_interval_hi_c")),
             "posterior_median_c": round(median_c, 2),
             "spread_c": round(spread_c, 2),
             "ensemble_dominant_path": ensemble_dominant_path,
             "ensemble_dominant_prob": ensemble_dominant_prob,
+            "ensemble_active_source": ensemble_active_source,
+            "ensemble_matched_subset_active": ensemble_matched_subset_active,
+            "ensemble_matched_member_share": round(ensemble_matched_member_share, 3) if ensemble_matched_member_share is not None else None,
+            "ensemble_full_dominant_path": ensemble_full_dominant_path,
+            "ensemble_full_dominant_prob": ensemble_full_dominant_prob,
             "ensemble_observed_path": ensemble_observed_path,
             "ensemble_alignment_confidence": ensemble_alignment_confidence,
             "baseline_posterior_median_c": round(baseline_median_c, 2),
@@ -733,6 +951,7 @@ def build_weather_posterior_core(
             "timing_source": timing_source,
             "confidence": timing_confidence,
         },
+        "path_context": path_context,
         "raw_scores": {
             "new_high_score": round(new_high_score, 3),
             "lock_score": round(lock_score, 3),

@@ -7,6 +7,16 @@ import re
 from datetime import datetime
 from typing import Any
 
+from analysis_snapshot_view import (
+    snapshot_canonical_raw_state,
+    snapshot_path_context,
+    snapshot_posterior_feature_vector,
+    snapshot_temp_phase_decision,
+    snapshot_weather_posterior_anchor,
+    snapshot_weather_posterior_calibration,
+    snapshot_weather_posterior_core,
+    snapshot_weather_posterior_event_probs,
+)
 from analysis_snapshot_service import build_analysis_snapshot
 from polymarket_render_service import _build_polymarket_section
 from report_focus_service import GENERIC_FOCUS_KEYS, build_report_focus_bundle
@@ -539,6 +549,184 @@ def _ensemble_path_side(path_label: str, *, summary: dict[str, Any] | None = Non
     }.get(key, "neutral")
 
 
+def _format_signed_temp(value: float | None, *, unit: str = "C") -> str:
+    temp = _safe_float(value)
+    if temp is None:
+        return ""
+    return f"{temp:+.1f}°{unit}"
+
+
+def _pick_first_float(*values: Any) -> float | None:
+    for value in values:
+        parsed = _safe_float(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _format_lead_time(hours: float | None) -> str:
+    value = _safe_float(hours)
+    if value is None:
+        return ""
+    value = max(0.0, float(value))
+    if value < 1.0:
+        minutes = max(10, int(round(value * 60.0 / 10.0) * 10))
+        return f"约{minutes}分钟"
+    half_hour = round(value * 2.0) / 2.0
+    if abs(half_hour - round(half_hour)) <= 0.01:
+        return f"约{int(round(half_hour))}小时"
+    return f"约{half_hour:.1f}小时"
+
+
+def _live_window_progress_text(
+    snapshot: dict[str, Any],
+    metar_diag: dict[str, Any],
+    *,
+    unit: str,
+) -> str:
+    posterior = dict(snapshot.get("posterior_feature_vector") or {})
+    time_phase = dict(posterior.get("time_phase") or {})
+    observation_state = dict(posterior.get("observation_state") or {})
+    peak_summary = dict(dict(snapshot.get("peak_data") or {}).get("summary") or {})
+    ranges = dict(peak_summary.get("ranges") or {})
+    core_range = dict(ranges.get("core") or {})
+    display_range = dict(ranges.get("display") or {})
+
+    latest_temp = _pick_first_float(
+        metar_diag.get("latest_temp"),
+        observation_state.get("latest_temp_c"),
+    )
+    if latest_temp is None:
+        return ""
+
+    core_lo = _pick_first_float(
+        core_range.get("lo"),
+        core_range.get("lo_c"),
+        display_range.get("lo"),
+        display_range.get("lo_c"),
+    )
+    core_hi = _pick_first_float(
+        core_range.get("hi"),
+        core_range.get("hi_c"),
+        display_range.get("hi"),
+        display_range.get("hi_c"),
+    )
+    hours_to_window_start = _safe_float(time_phase.get("hours_to_window_start"))
+    hours_to_peak = _safe_float(time_phase.get("hours_to_peak"))
+
+    if hours_to_window_start is not None and hours_to_window_start > 0.15:
+        lead_text = _format_lead_time(hours_to_window_start)
+        if core_lo is not None:
+            gap_to_lo = core_lo - latest_temp
+            if gap_to_lo >= 1.2:
+                return f"距峰值窗开始{lead_text}，当前还比区间下沿低约 {gap_to_lo:.1f}°{unit}"
+            if gap_to_lo >= 0.35:
+                return f"距峰值窗开始{lead_text}，当前正在逼近区间下沿，还差约 {gap_to_lo:.1f}°{unit}"
+            if core_hi is not None:
+                gap_to_hi = core_hi - latest_temp
+                if gap_to_hi >= 0.9:
+                    return f"距峰值窗开始{lead_text}，当前已贴近区间下沿，接下来主要看能否继续往区间中上段推进"
+                if gap_to_hi >= 0.2:
+                    return f"距峰值窗开始{lead_text}，当前已进到区间中段，接下来主要看还能不能继续往上段摸"
+                return f"距峰值窗开始{lead_text}，当前已贴近区间上沿，接下来主要看还能不能再抬一点"
+        return f"距峰值窗开始{lead_text}，当前主要看实况能不能继续往窗口里推进"
+
+    if hours_to_peak is not None:
+        lead_text = _format_lead_time(hours_to_peak)
+        if core_hi is not None:
+            gap_to_hi = core_hi - latest_temp
+            if gap_to_hi >= 1.0:
+                return f"离峰值时点{lead_text}，当前仍在区间下沿附近，能否继续往上段推进更关键"
+            if gap_to_hi >= 0.2:
+                return f"离峰值时点{lead_text}，当前已进到区间中段，接下来主要看还能不能继续往上段摸"
+            return f"离峰值时点{lead_text}，当前已贴近区间上沿，接下来主要看上沿还能不能再抬"
+        return f"离峰值时点{lead_text}，当前主要看实况能不能继续往峰值窗里推进"
+
+    return ""
+
+
+def _ensemble_dominance_phrase(
+    split_state: str,
+    dominant_prob: float | None,
+    dominant_margin_prob: float | None,
+) -> str:
+    split = str(split_state or "").strip()
+    prob = _safe_float(dominant_prob) or 0.0
+    margin = _safe_float(dominant_margin_prob) or 0.0
+    if split == "clustered":
+        if prob >= 0.85 or margin >= 0.60:
+            return "几乎一边倒"
+        return "主支很稳"
+    if split == "mixed":
+        if prob >= 0.58 or margin >= 0.18:
+            return "主支占优"
+        return "主次并存"
+    return "主支优势有限"
+
+
+def _ensemble_secondary_branch_text(
+    *,
+    dominant_path: str,
+    split_state: str,
+    transition_detail: str,
+    transition_detail_prob: float | None,
+    warm_support_prob: float | None,
+    transition_prob: float | None,
+    cold_suppression_prob: float | None,
+) -> str:
+    candidates: list[tuple[str, float]] = []
+    if dominant_path != "warm_support":
+        warm_prob = _safe_float(warm_support_prob)
+        if warm_prob is not None and warm_prob > 0.0:
+            candidates.append(("暖输送抬升", warm_prob))
+    if dominant_path != "transition":
+        trans_prob = _pick_first_float(transition_detail_prob, transition_prob)
+        trans_label = _ensemble_transition_detail_label(transition_detail) or "中性过渡"
+        if trans_prob is not None and trans_prob > 0.0:
+            candidates.append((trans_label, trans_prob))
+    if dominant_path != "cold_suppression":
+        cold_prob = _safe_float(cold_suppression_prob)
+        if cold_prob is not None and cold_prob > 0.0:
+            candidates.append(("冷抑制", cold_prob))
+
+    ordered = sorted(candidates, key=lambda item: item[1], reverse=True)
+    ordered = [item for item in ordered if item[1] >= 0.04]
+    if not ordered:
+        return ""
+
+    split = str(split_state or "").strip()
+    top_label, top_prob = ordered[0]
+    top_pct = _format_prob_pct(top_prob)
+    if split == "clustered":
+        return f"次支只剩{top_label} {top_pct}"
+    if split == "mixed":
+        extras = [f"{label} {_format_prob_pct(prob)}" for label, prob in ordered[:2]]
+        return f"次支仍留着{' / '.join(extras)}"
+    extras = [f"{label} {_format_prob_pct(prob)}" for label, prob in ordered[:3]]
+    return f"分支仍散，{' / '.join(extras)}"
+
+
+def _ensemble_amplitude_band_text(
+    *,
+    dominant_path: str,
+    transition_detail: str,
+    delta_t850_p10_c: float | None,
+    delta_t850_p90_c: float | None,
+) -> str:
+    p10 = _safe_float(delta_t850_p10_c)
+    p90 = _safe_float(delta_t850_p90_c)
+    if p10 is None or p90 is None:
+        return ""
+    if dominant_path == "warm_support" and p10 > 0.2:
+        return f"暖支振幅大多落在 {_format_signed_temp(p10)}~{_format_signed_temp(p90)}"
+    if dominant_path == "cold_suppression" and p90 < -0.2:
+        return f"冷支振幅大多落在 {_format_signed_temp(p10)}~{_format_signed_temp(p90)}"
+    if dominant_path == "transition":
+        detail_label = _ensemble_transition_detail_label(transition_detail) or "过渡支"
+        return f"{detail_label}振幅大多落在 {_format_signed_temp(p10)}~{_format_signed_temp(p90)}"
+    return ""
+
+
 def _ensemble_convergence_text(
     split_state: str,
     dominant_prob: float | None,
@@ -647,6 +835,7 @@ def _build_far_ensemble_line(snapshot: dict[str, Any]) -> str:
     ensemble = dict(forecast.get("ensemble_factor") or {})
     summary = dict(ensemble.get("summary") or {})
     probabilities = dict(ensemble.get("probabilities") or {})
+    diagnostics = dict(ensemble.get("diagnostics") or {})
     context = dict(forecast.get("context") or {})
     if not probabilities:
         return ""
@@ -664,48 +853,87 @@ def _build_far_ensemble_line(snapshot: dict[str, Any]) -> str:
     dominant_prob = _safe_float(summary.get("dominant_prob")) or ordered[0][1]
     split_state = str(summary.get("split_state") or "")
     dominant_detail = str(summary.get("dominant_path_detail") or summary.get("transition_detail") or "")
+    transition_detail = str(summary.get("transition_detail") or "")
     dominant_label = _ensemble_path_label(dominant_path, summary=summary)
     trigger = _ensemble_path_trigger_text(
         dominant_path,
         str(context.get("bottleneck_text") or ""),
         path_detail=dominant_detail,
     )
+    dominance_phrase = _ensemble_dominance_phrase(
+        split_state,
+        dominant_prob,
+        summary.get("dominant_margin_prob"),
+    )
+    secondary_text = _ensemble_secondary_branch_text(
+        dominant_path=dominant_path,
+        split_state=split_state,
+        transition_detail=transition_detail,
+        transition_detail_prob=summary.get("transition_detail_prob"),
+        warm_support_prob=probabilities.get("warm_support"),
+        transition_prob=probabilities.get("transition"),
+        cold_suppression_prob=probabilities.get("cold_suppression"),
+    )
+    amplitude_text = _ensemble_amplitude_band_text(
+        dominant_path=dominant_path,
+        transition_detail=transition_detail,
+        delta_t850_p10_c=diagnostics.get("delta_t850_p10_c"),
+        delta_t850_p90_c=diagnostics.get("delta_t850_p90_c"),
+    )
 
     line = "ECMWF ENS"
     if split_state == "clustered":
-        line += f" 基本收敛到{dominant_label}路径（约 {_format_prob_pct(dominant_prob)}）"
+        line += f" {dominance_phrase}收敛到{dominant_label}路径（主路径约 {_format_prob_pct(dominant_prob)}）"
     elif split_state == "mixed":
-        line += f" 有主次分支，主路径为{dominant_label}（约 {_format_prob_pct(dominant_prob)}）"
+        line += f" {dominance_phrase}，主路径为{dominant_label}（主路径约 {_format_prob_pct(dominant_prob)}）"
     else:
-        line += f" 仍有分歧，主路径为{dominant_label}（约 {_format_prob_pct(dominant_prob)}）"
-
-    secondary_parts: list[str] = []
-    for key, prob in ordered[1:3]:
-        label = _ensemble_path_label(key, summary=summary)
-        if label == dominant_label:
-            continue
-        secondary_parts.append(f"{label} {_format_prob_pct(prob)}")
-    if secondary_parts:
-        line += f"；次路径 { ' / '.join(secondary_parts) }"
+        line += f" 仍有分歧，主路径为{dominant_label}（主路径约 {_format_prob_pct(dominant_prob)}）"
+    if secondary_text:
+        line += f"；{secondary_text}"
+    if amplitude_text:
+        line += f"；{amplitude_text}"
     if trigger:
         line += f"；{trigger}"
     return line
 
 
-def _build_live_path_reference_line(snapshot: dict[str, Any], *, report_mode: str) -> str:
+def _build_live_path_reference_line(
+    snapshot: dict[str, Any],
+    metar_diag: dict[str, Any],
+    *,
+    report_mode: str,
+    unit: str,
+) -> str:
     if report_mode not in {"transition", "near_obs"}:
         return ""
     posterior = dict(snapshot.get("posterior_feature_vector") or {})
     ensemble_state = dict(posterior.get("ensemble_path_state") or {})
-    dominant_path = str(ensemble_state.get("dominant_path") or "")
+    full_dominant_path = str(ensemble_state.get("dominant_path") or "")
+    active_subset = bool(ensemble_state.get("matched_subset_active"))
+    dominant_path = str(
+        (
+            ensemble_state.get("matched_dominant_path")
+            if active_subset
+            else ensemble_state.get("dominant_path")
+        ) or ""
+    )
     observed_path = str(ensemble_state.get("observed_path") or "")
+    progress_text = _live_window_progress_text(snapshot, metar_diag, unit=unit)
 
     if dominant_path and observed_path:
         dominant_label = _ensemble_path_label(
             dominant_path,
             summary={
-                "transition_detail": ensemble_state.get("transition_detail"),
-                "dominant_path_detail": ensemble_state.get("dominant_path_detail"),
+                "transition_detail": (
+                    ensemble_state.get("matched_transition_detail")
+                    if active_subset
+                    else ensemble_state.get("transition_detail")
+                ),
+                "dominant_path_detail": (
+                    ensemble_state.get("matched_dominant_path_detail")
+                    if active_subset
+                    else ensemble_state.get("dominant_path_detail")
+                ),
             },
         )
         observed_label = _ensemble_path_label(
@@ -719,15 +947,73 @@ def _build_live_path_reference_line(snapshot: dict[str, Any], *, report_mode: st
             match_state = str(ensemble_state.get("observed_alignment_match_state") or "")
             confidence = str(ensemble_state.get("observed_alignment_confidence") or "")
             observed_locked = bool(ensemble_state.get("observed_path_locked"))
-            dominant_prob = _format_prob_pct(ensemble_state.get("dominant_prob"))
+            dominant_prob = _format_prob_pct(
+                ensemble_state.get("matched_dominant_prob") if active_subset else ensemble_state.get("dominant_prob")
+            )
+            secondary_text = _ensemble_secondary_branch_text(
+                dominant_path=dominant_path,
+                split_state=str(
+                    (
+                        ensemble_state.get("matched_split_state")
+                        if active_subset
+                        else ensemble_state.get("split_state")
+                    ) or ""
+                ),
+                transition_detail=str(
+                    (
+                        ensemble_state.get("matched_transition_detail")
+                        if active_subset
+                        else ensemble_state.get("transition_detail")
+                    ) or ""
+                ),
+                transition_detail_prob=(
+                    ensemble_state.get("matched_transition_detail_prob")
+                    if active_subset
+                    else ensemble_state.get("transition_detail_prob")
+                ),
+                warm_support_prob=(
+                    ensemble_state.get("matched_warm_support_prob")
+                    if active_subset
+                    else ensemble_state.get("warm_support_prob")
+                ),
+                transition_prob=(
+                    ensemble_state.get("matched_transition_prob")
+                    if active_subset
+                    else ensemble_state.get("transition_prob")
+                ),
+                cold_suppression_prob=(
+                    ensemble_state.get("matched_cold_suppression_prob")
+                    if active_subset
+                    else ensemble_state.get("cold_suppression_prob")
+                ),
+            )
+            subset_intro = ""
+            if active_subset:
+                if full_dominant_path and full_dominant_path != dominant_path:
+                    subset_intro = "当前实况已筛掉和实况不符的主支；"
+                else:
+                    subset_intro = "当前实况已筛掉明显不符路径；"
+            if active_subset:
+                line = f"{subset_intro}保留下来的系集里，{observed_label}"
+                if dominant_prob:
+                    line += f"约 {dominant_prob}"
+                if progress_text:
+                    line += f"，{progress_text}"
+                if secondary_text:
+                    line += f"；{secondary_text}"
+                return line
 
             if match_state == "exact" and observed_locked:
-                line = f"当前实况高度贴合系集主路径，正沿{observed_label}演进"
+                line = f"当前实况高度贴合系集主路径，{progress_text}" if progress_text else f"当前实况高度贴合系集主路径，正沿{observed_label}演进"
+                if secondary_text:
+                    line += f"；{secondary_text}"
                 if dominant_prob:
                     line += f"（主路径约 {dominant_prob}）"
                 return line
             if match_state in {"exact", "path"} and confidence in {"high", "partial"}:
-                line = f"当前实况更像在走{observed_label}路径，与系集主判断大体一致"
+                line = f"当前实况和系集主路径大体一致，{progress_text}" if progress_text else f"当前实况在走{observed_label}路径，与系集主判断大体一致"
+                if secondary_text:
+                    line += f"；{secondary_text}"
                 if dominant_prob:
                     line += f"（主路径约 {dominant_prob}）"
                 return line
@@ -751,11 +1037,15 @@ def _build_live_path_reference_line(snapshot: dict[str, Any], *, report_mode: st
                 elif observed_side == "cold" and dominant_side in {"warm", "neutral"}:
                     line = f"当前实况正偏离系集主支，开始往{observed_label}演进，而主支仍偏{dominant_label}"
                 elif observed_side == "neutral" and dominant_side == "warm":
-                    line = f"当前实况没跟上系集主暖支，更像{observed_label}，和主支{dominant_label}已有偏离"
+                    line = f"当前实况没跟上系集主暖支，已转到{observed_label}，和主支{dominant_label}已有偏离"
                 elif observed_side == "neutral" and dominant_side == "cold":
-                    line = f"当前实况没跟上系集主冷支，更像{observed_label}，和主支{dominant_label}已有偏离"
+                    line = f"当前实况没跟上系集主冷支，已转到{observed_label}，和主支{dominant_label}已有偏离"
                 else:
-                    line = f"当前实况更像在走{observed_label}路径，和系集主支{dominant_label}并不完全一致"
+                    line = f"当前实况在走{observed_label}路径，和系集主支{dominant_label}不一致"
+                if progress_text:
+                    line += f"；{progress_text}"
+                if secondary_text:
+                    line += f"；{secondary_text}"
                 if dominant_prob:
                     line += f"（主路径约 {dominant_prob}）"
                 return line
@@ -812,16 +1102,24 @@ def _build_live_path_reference_line(snapshot: dict[str, Any], *, report_mode: st
     cold_transport = transport_key == "cold" or "cold" in surface_bias
 
     if warm_transport and warm_rate_support and env_warm_support:
+        if progress_text:
+            return f"当前升温节奏仍在往窗口里推进，{progress_text}"
         if radiation_eff is not None and radiation_eff >= 0.62:
-            return "当前升温节奏和辐射条件更像暖侧路径在提前落地"
-        return "当前升温节奏更像暖侧路径在提前落地"
+            return "当前升温节奏和辐射条件已提前兑现暖侧路径"
+        return "当前升温节奏已提前兑现暖侧路径"
     if cold_transport and cold_rate_support and env_cold_support:
+        if progress_text:
+            return f"当前升温兑现偏慢，{progress_text}"
         if radiation_eff is not None and radiation_eff <= 0.50:
-            return "当前升温节奏和辐射条件更像冷抑制路径仍在持续"
-        return "当前升温节奏更像冷抑制路径仍在持续"
+            return "当前升温节奏和辐射条件仍在兑现冷抑制路径"
+        return "当前升温节奏仍在兑现冷抑制路径"
     if warm_rate_support and env_warm_support:
+        if progress_text:
+            return f"当前节奏略快于模式主路径，{progress_text}"
         return "当前升温节奏比模式主路径略快"
     if cold_rate_support and env_cold_support:
+        if progress_text:
+            return f"当前节奏略慢于模式主路径，{progress_text}"
         return "当前升温节奏比模式主路径偏慢"
     return ""
 
@@ -1107,6 +1405,115 @@ def _mechanism_basis_line(mechanism: str, impact: str) -> str:
     return ""
 
 
+def _matched_path_detail_reason_line(
+    snapshot: dict[str, Any],
+    metar_diag: dict[str, Any],
+    *,
+    report_mode: str,
+) -> tuple[float, str]:
+    if report_mode not in {"near_obs", "transition"}:
+        return 0.0, ""
+
+    path_context = snapshot_path_context(snapshot)
+    significant_text = str(path_context.get("significant_forecast_detail_text") or "").strip()
+    significant_score = _safe_float(path_context.get("significant_forecast_detail_score"))
+    if significant_text and significant_score is not None and significant_score >= 0.78:
+        return float(significant_score), significant_text
+
+    posterior = snapshot_posterior_feature_vector(snapshot)
+    ensemble_state = dict(posterior.get("ensemble_path_state") or {})
+    match_state = str(ensemble_state.get("observed_alignment_match_state") or "")
+    confidence = str(ensemble_state.get("observed_alignment_confidence") or "")
+    if match_state not in {"exact", "path"} or confidence not in {"high", "partial"}:
+        return 0.0, ""
+
+    dominant_path = str(ensemble_state.get("dominant_path") or "")
+    observed_path = str(ensemble_state.get("observed_path") or dominant_path or "")
+    if not observed_path:
+        return 0.0, ""
+
+    path_summary = {
+        "transition_detail": ensemble_state.get("observed_path_detail") or ensemble_state.get("transition_detail"),
+        "dominant_path_detail": ensemble_state.get("observed_path_detail") or ensemble_state.get("dominant_path_detail"),
+    }
+    matched_side = _ensemble_path_side(observed_path, summary=path_summary)
+
+    canonical = snapshot_canonical_raw_state(snapshot)
+    forecast = dict(canonical.get("forecast") or {})
+    observations = dict(canonical.get("observations") or {})
+    context = dict(forecast.get("context") or {})
+    h500 = dict(forecast.get("h500") or {})
+    h850_review = dict(forecast.get("h850_review") or {})
+
+    wx_state = str(metar_diag.get("latest_precip_state") or observations.get("precip_state") or "").strip().lower()
+    wx_trend = str(metar_diag.get("precip_trend") or observations.get("precip_trend") or "").strip().lower()
+    latest_wx = str(observations.get("latest_wx") or "").strip().upper()
+    cloud_trend = str(observations.get("cloud_trend") or "").strip().lower()
+    bottleneck_text = str(context.get("bottleneck_text") or "").strip()
+    bottleneck_code = str(context.get("bottleneck_code") or "").strip()
+    thermal_role = str(h500.get("thermal_role") or "").strip()
+    tmax_bias_label = str(h500.get("tmax_bias_label") or "").strip()
+    advection_type = str(h850_review.get("advection_type") or "").strip().lower()
+    thermal_advection_state = str(h850_review.get("thermal_advection_state") or "").strip().lower()
+    surface_role = str(h850_review.get("surface_role") or "").strip().lower()
+
+    convective_now = (
+        wx_state == "convective"
+        or any(token in latest_wx for token in ("TS", "SHRA", "VCTS"))
+    )
+    precip_now = convective_now or wx_state in {"light", "moderate", "heavy", "rain", "showers"} or wx_trend in {"new", "steady", "intensify"}
+
+    if convective_now:
+        if matched_side == "warm":
+            return 0.91, "当前仍在暖支里，但接下来主要看对流会不会提前冒出来压住上沿"
+        return 0.92, "当前更该看对流和降水会不会继续压温，决定区间能否继续贴冷侧"
+
+    if precip_now:
+        if matched_side == "warm":
+            return 0.88, "当前仍在暖支里，但接下来主要看降水和湿重置会不会拖慢后段升温"
+        return 0.89, "当前更该看降水压温会不会继续，决定区间还能不能回到中上段"
+
+    if "低云" in bottleneck_text or ("云" in bottleneck_text and any(token in bottleneck_text for token in ("松动", "破碎", "抬升"))):
+        if any(token in cloud_trend for token in {"clearing", "break", "散", "减", "少"}):
+            if matched_side == "cold":
+                return 0.88, "当前更该看低云会不会继续松动；若松得动，冷侧压制才会开始退"
+            return 0.88, "当前更该看低云能否继续松动，决定区间能不能从下沿继续往上推"
+        if matched_side == "cold":
+            return 0.89, "当前更该看低云稳层何时真正松动；不松，区间更容易继续贴下沿"
+        return 0.89, "当前更该看低云何时真正松动，决定暖支还能不能继续兑现"
+
+    if "混合层" in bottleneck_text or "耦合" in bottleneck_text or bottleneck_code in {"low_level_coupling_weak", "mixing_depth_limited"}:
+        if matched_side == "warm":
+            if advection_type == "warm" and (thermal_advection_state in {"weak", "probable"} or surface_role in {"background", "low_representativeness"}):
+                return 0.89, "当前已在验证暖支，850偏暖输送还没完全接地，接下来主要看低层耦合能不能真正接上"
+            return 0.89, "当前已在验证暖支，接下来主要看低层耦合和混合层能不能真正接上"
+        if matched_side == "cold":
+            if advection_type == "cold" and (thermal_advection_state in {"weak", "probable"} or surface_role in {"background", "low_representativeness"}):
+                return 0.89, "当前已在验证压温支，850偏冷输送还没完全接地，接下来主要看冷抑制会不会继续落到站点"
+            return 0.89, "当前已在验证压温支，混合层若起不来，区间更容易继续贴冷侧"
+        return 0.86, "当前更该看混合层能否打穿稳层，这会决定中间路径会不会被打破"
+
+    if thermal_role == "cold_high_suppression" or "压温" in tmax_bias_label:
+        return 0.87, "当前更该看高空压温会不会继续落地，决定区间会不会继续贴冷侧"
+
+    if thermal_role in {"warm_high_subsidence", "warm_ridge_support"} or "增温" in tmax_bias_label:
+        if advection_type == "warm" and surface_role in {"background", "low_representativeness"}:
+            return 0.85, "高空增温背景在托住暖支，但850偏暖输送代表性还弱，接下来主要看低层能不能真正接上"
+        return 0.83, "高空增温背景还在托住暖支，接下来主要看这股暖势能不能继续兑现到地面"
+
+    if advection_type == "warm":
+        if thermal_advection_state in {"weak", "probable"} or surface_role in {"background", "low_representativeness"}:
+            return 0.83, "850偏暖输送还没完全接地，接下来主要看暖支能不能真正落到站点"
+        return 0.82, "接下来主要看850暖输送能否继续落地，决定能不能往区间上段推"
+
+    if advection_type == "cold":
+        if thermal_advection_state in {"weak", "probable"} or surface_role in {"background", "low_representativeness"}:
+            return 0.83, "850偏冷输送还没完全接地，接下来主要看压温支会不会继续落到站点"
+        return 0.82, "接下来主要看850冷输送能否继续落地，决定区间会不会继续贴冷侧"
+
+    return 0.0, ""
+
+
 def _push_reason_candidate(bucket: list[tuple[float, str]], score: float, text: str) -> None:
     cleaned = str(text or "").strip()
     if not cleaned:
@@ -1126,12 +1533,14 @@ def _is_generic_reason_text(text: str) -> bool:
 
 
 def _posterior_reasoning_line(snapshot: dict[str, Any], *, report_mode: str, unit: str) -> tuple[float, str]:
-    weather_posterior = dict(snapshot.get("weather_posterior") or {})
-    event_probs = dict(weather_posterior.get("event_probs") or {})
-    calibration = dict(weather_posterior.get("calibration") or {})
-    anchor = dict(weather_posterior.get("anchor") or {})
-    core = dict(weather_posterior.get("core") or {})
+    event_probs = snapshot_weather_posterior_event_probs(snapshot)
+    calibration = snapshot_weather_posterior_calibration(snapshot)
+    anchor = snapshot_weather_posterior_anchor(snapshot)
+    core = snapshot_weather_posterior_core(snapshot)
     progress = dict(core.get("progress") or {})
+    temp_phase = snapshot_temp_phase_decision(snapshot)
+    timing = dict(temp_phase.get("timing") or {})
+    shape = dict(temp_phase.get("shape") or {})
 
     lock_prob = _safe_float(event_probs.get("lock_by_window_end"))
     new_high_prob = _safe_float(event_probs.get("new_high_next_60m"))
@@ -1139,6 +1548,21 @@ def _posterior_reasoning_line(snapshot: dict[str, Any], *, report_mode: str, uni
     observed_anchor_c = _safe_float(progress.get("observed_anchor_c"))
     modeled_headroom_c = _safe_float(progress.get("modeled_headroom_c"))
     regime_shift_c = _safe_float(anchor.get("regime_median_shift_c"))
+    display_phase = str(temp_phase.get("display_phase") or "")
+    dominant_shape = str(temp_phase.get("dominant_shape") or "")
+    second_peak_potential = str(temp_phase.get("second_peak_potential") or "none")
+    should_discuss_second_peak = bool(temp_phase.get("should_discuss_second_peak"))
+    future_candidate_role = str(shape.get("future_candidate_role") or "")
+    before_typical_peak = bool(timing.get("before_typical_peak"))
+
+    plain_single_peak_ramp = bool(
+        report_mode in {"near_obs", "transition", "far_synoptic"}
+        and dominant_shape == "single_peak"
+        and future_candidate_role == "primary_remaining_peak"
+        and second_peak_potential in {"none", "weak"}
+        and (not should_discuss_second_peak)
+        and before_typical_peak
+    )
 
     if report_mode in {"near_obs", "transition"}:
         if (
@@ -1164,6 +1588,7 @@ def _posterior_reasoning_line(snapshot: dict[str, Any], *, report_mode: str, uni
             new_high_prob is not None
             and new_high_prob >= 0.68
             and (lock_prob is None or lock_prob <= 0.45)
+            and (not plain_single_peak_ramp)
         ):
             if modeled_headroom_c is not None and modeled_headroom_c <= 0.55:
                 return (
@@ -1211,7 +1636,7 @@ def _phase_structure_reasoning_line(snapshot: dict[str, Any], *, report_mode: st
         if future_gap_vs_current is not None and future_gap_vs_current >= 0.45:
             return 0.88, f"后段仍留着补涨段，次峰候选还高出当前约 {future_gap_vs_current:.1f}°{unit}"
         if rebound_mode == "second_peak":
-            return 0.84, "当前更像早峰后的二峰观察段，还不能按已经锁定理解"
+            return 0.84, "当前处在早峰后二峰观察段，还不能按已锁定理解"
 
     if (
         daily_peak_state == "open"
@@ -1221,9 +1646,9 @@ def _phase_structure_reasoning_line(snapshot: dict[str, Any], *, report_mode: st
     ):
         peak_clock = _format_hour_of_day(warm_peak_hour_median)
         if very_late_peak_share >= 0.35 and peak_clock:
-            return 0.79, f"这个站常见拖到 {peak_clock} 前后才更像见顶，眼前高点不宜直接当终点"
+            return 0.79, f"这个站常见拖到 {peak_clock} 前后见顶，眼前高点不宜直接当终点"
         if peak_clock:
-            return 0.76, f"这个站常见高点偏晚，通常要到 {peak_clock} 前后才更像见顶"
+            return 0.76, f"这个站常见高点偏晚，常拖到 {peak_clock} 前后见顶"
         return 0.74, "这个站常见偏晚见顶，眼前高点不宜直接当终点"
 
     return 0.0, ""
@@ -1298,7 +1723,7 @@ def _build_range_rationale_block(
     if coastal_mechanism and background_txt and coastal_mechanism in background_txt:
         mechanism = coastal_mechanism
 
-    live_path_line = _build_live_path_reference_line(snapshot, report_mode=report_mode)
+    live_path_line = _build_live_path_reference_line(snapshot, metar_diag, report_mode=report_mode, unit=unit)
 
     obs_line = _obs_reasoning_line(latest_temp, trend, unit)
     obs_signal_strong = bool(
@@ -1331,12 +1756,22 @@ def _build_range_rationale_block(
     impact_repeated = bool(concise_impact and background_txt and concise_impact in background_txt)
     reason_candidates: list[tuple[float, str]] = []
 
+    matched_detail_score, matched_detail_line = _matched_path_detail_reason_line(
+        snapshot,
+        metar_diag,
+        report_mode=report_mode,
+    )
     posterior_score, posterior_line = _posterior_reasoning_line(
         snapshot,
         report_mode=report_mode,
         unit=unit,
     )
-    if posterior_line:
+    suppress_positive_posterior = bool(
+        matched_detail_line
+        and matched_detail_score >= 0.82
+        and any(token in posterior_line for token in ("再创新高路径", "再创新高当主情景"))
+    )
+    if posterior_line and not suppress_positive_posterior:
         _push_reason_candidate(reason_candidates, posterior_score, posterior_line)
 
     phase_structure_score, phase_structure_line = _phase_structure_reasoning_line(
@@ -1349,6 +1784,9 @@ def _build_range_rationale_block(
 
     if live_path_line:
         _push_reason_candidate(reason_candidates, 0.97, live_path_line)
+
+    if matched_detail_line:
+        _push_reason_candidate(reason_candidates, matched_detail_score, matched_detail_line)
 
     if mechanism and not mechanism_repeated:
         mechanism_line = _mechanism_basis_line(mechanism, impact)

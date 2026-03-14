@@ -31,8 +31,8 @@ def build_market_label_policy(
     q_cov = _f((quality or {}).get("synoptic_coverage"), -1.0)
     obj_conf = str((obj or {}).get("confidence") or "").lower()
 
-    base_lead_min = _f(cfg.get("best_lead_min"), 0.05)
-    base_weather_min = _f(cfg.get("best_weather_min"), 0.30)
+    base_lead_min = _f(cfg.get("best_lead_min"), 0.30)
+    base_weather_min = _f(cfg.get("best_weather_min"), 0.54)
 
     lead_min = base_lead_min
     weather_min = base_weather_min
@@ -80,10 +80,10 @@ def build_market_label_policy(
     if (settled_bias or late_cap_no_reheat) and (not rebreak_evidence):
         allow_alpha = False
 
-    alpha_cheap_edge_min = _f(cfg.get("alpha_cheap_edge_min"), 0.10)
-    alpha_mid_edge_min = _f(cfg.get("alpha_mid_edge_min"), 0.12)
+    alpha_cheap_edge_min = _f(cfg.get("alpha_cheap_edge_min"), 0.15)
+    alpha_mid_edge_min = _f(cfg.get("alpha_mid_edge_min"), 0.18)
     if phase_now == "far":
-        edge_add = _f(cfg.get("alpha_far_edge_add"), 0.03)
+        edge_add = _f(cfg.get("alpha_far_edge_add"), 0.05)
         alpha_cheap_edge_min += edge_add
         alpha_mid_edge_min += edge_add
 
@@ -100,12 +100,12 @@ def build_market_label_policy(
         "min_display_rows": max(2, min(5, int(min_display_rows))),
         "alpha_cheap_ask_max": _f(cfg.get("alpha_cheap_ask_max"), 0.14),
         "alpha_cheap_spread_max": _f(cfg.get("alpha_cheap_spread_max"), 0.08),
-        "alpha_cheap_weather_min": _f(cfg.get("alpha_cheap_weather_min"), 0.18),
-        "alpha_cheap_score_min": _f(cfg.get("alpha_cheap_score_min"), 0.24),
+        "alpha_cheap_weather_min": _f(cfg.get("alpha_cheap_weather_min"), 0.22),
+        "alpha_cheap_score_min": _f(cfg.get("alpha_cheap_score_min"), 0.28),
         "alpha_cheap_edge_min": max(0.06, min(0.30, float(alpha_cheap_edge_min))),
         "alpha_mid_ask_max": _f(cfg.get("alpha_mid_ask_max"), 0.18),
         "alpha_mid_spread_max": _f(cfg.get("alpha_mid_spread_max"), 0.06),
-        "alpha_mid_weather_min": _f(cfg.get("alpha_mid_weather_min"), 0.28),
-        "alpha_mid_score_min": _f(cfg.get("alpha_mid_score_min"), 0.32),
+        "alpha_mid_weather_min": _f(cfg.get("alpha_mid_weather_min"), 0.48),
+        "alpha_mid_score_min": _f(cfg.get("alpha_mid_score_min"), 0.36),
         "alpha_mid_edge_min": max(0.08, min(0.35, float(alpha_mid_edge_min))),
     }

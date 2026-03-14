@@ -24,6 +24,7 @@ Last updated: 2026-03-09
   - 天气区间（`peak_range_service`）不读取任何盘口信息。
   - 市场渲染仅接收天气锚点快照（`latest_temp_c / observed_max_temp_c` + `range_hint`），不得反向修改天气判断状态。
   - 盘口标签策略（`👍最有可能` / `😇潜在Alpha`）由 `market_label_policy.py` 独立决策，阈值统一从 `market_labels` 参数组读取。
+  - 当前 `👍最可能` 的基础门槛为：`top_bin_prob >= 0.54` 且 `top_bin_prob - second_bin_prob >= 0.30`；`far / low_conf / low_coverage` 会在此基础上继续加严。
 
 ## 3) METAR 数据技术处理
 - 量化温度台阶识别（`metar_temp_quantized`）。
