@@ -127,9 +127,179 @@ class ReportFocusAndSynopticSummaryTest(unittest.TestCase):
         )
 
         joined = "\n".join(bundle["vars_block"])
-        self.assertIn("优先看下一报温度斜率、风向节奏和云量是否继续支持当前路径", joined)
+        self.assertEqual(bundle["vars_block"], ["⚠️ **关注变量**（远离窗口）"])
         self.assertNotIn("该站常规约每30分钟一报", joined)
-        self.assertEqual(len(bundle["vars_block"]), 2)
+        self.assertNotIn("优先看下一报温度斜率、风向节奏和云量是否继续支持当前路径", joined)
+
+    def test_report_focus_can_surface_posterior_locking_signal(self) -> None:
+        bundle = build_report_focus_bundle(
+            primary_window={"peak_local": "2026-03-09T16:00"},
+            metar_diag={"metar_routine_cadence_min": 30},
+            analysis_snapshot={
+                "temp_phase_decision": {
+                    "display_phase": "in_window",
+                    "daily_peak_state": "lean_locked",
+                    "short_term_state": "holding",
+                    "timing": {},
+                    "shape": {},
+                },
+                "weather_posterior": {
+                    "event_probs": {
+                        "lock_by_window_end": 0.84,
+                        "new_high_next_60m": 0.18,
+                    },
+                    "calibration": {
+                        "progress_spread_multiplier": 0.78,
+                        "upper_tail_cap_c": 24.35,
+                    },
+                    "core": {
+                        "progress": {
+                            "observed_anchor_c": 24.15,
+                        }
+                    },
+                },
+                "quality_snapshot": {"scores": {"confidence_label": "high"}},
+                "peak_data": {"summary": {"consistency": {}, "confidence": {}, "phase_now": "in_window"}},
+                "boundary_layer_regime": {"tracking_line": "", "regime_key": "synoptic", "thermo": {"vertical_regime": "dry_clear_mixed"}},
+                "condition_state": {},
+            },
+        )
+
+        joined = "\n".join(bundle["vars_block"])
+        self.assertIn("综合判断已把高点基本压回已观测高点附近", joined)
+        self.assertNotIn("当前更该看环流、云量和低层风场配置会不会延续", joined)
+
+    def test_report_focus_skips_progress_only_posterior_line(self) -> None:
+        bundle = build_report_focus_bundle(
+            primary_window={"peak_local": "2026-03-09T16:00"},
+            metar_diag={"metar_routine_cadence_min": 30},
+            analysis_snapshot={
+                "temp_phase_decision": {
+                    "display_phase": "in_window",
+                    "daily_peak_state": "lean_locked",
+                    "short_term_state": "holding",
+                    "timing": {},
+                    "shape": {},
+                },
+                "weather_posterior": {
+                    "event_probs": {
+                        "lock_by_window_end": 0.60,
+                        "new_high_next_60m": 0.42,
+                    },
+                    "calibration": {
+                        "progress_spread_multiplier": 0.78,
+                        "upper_tail_cap_c": 24.35,
+                    },
+                    "core": {
+                        "progress": {
+                            "observed_anchor_c": 24.15,
+                        }
+                    },
+                },
+                "quality_snapshot": {"scores": {"confidence_label": "high"}},
+                "peak_data": {"summary": {"consistency": {}, "confidence": {}, "phase_now": "in_window"}},
+                "boundary_layer_regime": {"tracking_line": "", "regime_key": "synoptic", "thermo": {"vertical_regime": "dry_clear_mixed"}},
+                "condition_state": {},
+            },
+        )
+
+        self.assertEqual(bundle["vars_block"], ["⚠️ **关注变量**（窗口内）"])
+
+    def test_report_focus_can_surface_second_peak_watch(self) -> None:
+        bundle = build_report_focus_bundle(
+            primary_window={"peak_local": "2026-03-09T16:00"},
+            metar_diag={"metar_routine_cadence_min": 30},
+            analysis_snapshot={
+                "temp_phase_decision": {
+                    "display_phase": "post",
+                    "daily_peak_state": "open",
+                    "second_peak_potential": "moderate",
+                    "rebound_mode": "second_peak",
+                    "should_discuss_second_peak": True,
+                    "timing": {"before_typical_peak": True},
+                    "station": {"late_peak_share": 0.62, "very_late_peak_share": 0.18},
+                    "shape": {
+                        "future_candidate_role": "secondary_peak_candidate",
+                        "future_gap_vs_obs": 0.4,
+                        "future_gap_vs_current": 0.7,
+                    },
+                },
+                "weather_posterior": {"event_probs": {}},
+                "posterior_feature_vector": {},
+                "quality_snapshot": {"scores": {"confidence_label": "high"}},
+                "peak_data": {"summary": {"consistency": {}, "confidence": {}, "phase_now": "post"}},
+                "boundary_layer_regime": {"tracking_line": "", "regime_key": "synoptic", "thermo": {"vertical_regime": "dry_clear_mixed"}},
+                "condition_state": {},
+            },
+        )
+
+        joined = "\n".join(bundle["vars_block"])
+        self.assertIn("后段二峰还开着", joined)
+        self.assertIn("翻过前高", joined)
+
+    def test_report_focus_can_surface_late_peak_station_bias(self) -> None:
+        bundle = build_report_focus_bundle(
+            primary_window={"peak_local": "2026-03-09T17:00"},
+            metar_diag={"metar_routine_cadence_min": 30},
+            analysis_snapshot={
+                "temp_phase_decision": {
+                    "display_phase": "near_window",
+                    "daily_peak_state": "open",
+                    "second_peak_potential": "none",
+                    "timing": {"before_typical_peak": True},
+                    "station": {
+                        "late_peak_share": 0.66,
+                        "very_late_peak_share": 0.38,
+                        "warm_peak_hour_median": 16.5,
+                    },
+                    "shape": {},
+                },
+                "weather_posterior": {"event_probs": {}},
+                "posterior_feature_vector": {},
+                "quality_snapshot": {"scores": {"confidence_label": "high"}},
+                "peak_data": {"summary": {"consistency": {}, "confidence": {}, "phase_now": "near_window"}},
+                "boundary_layer_regime": {"tracking_line": "", "regime_key": "synoptic", "thermo": {"vertical_regime": "dry_clear_mixed"}},
+                "condition_state": {},
+            },
+        )
+
+        joined = "\n".join(bundle["vars_block"])
+        self.assertIn("16:30", joined)
+        self.assertIn("眼前高点别急着当终点", joined)
+
+    def test_report_focus_can_surface_ensemble_main_branch_deviation(self) -> None:
+        bundle = build_report_focus_bundle(
+            primary_window={"peak_local": "2026-03-09T16:00"},
+            metar_diag={"metar_routine_cadence_min": 30},
+            analysis_snapshot={
+                "temp_phase_decision": {
+                    "display_phase": "in_window",
+                    "daily_peak_state": "open",
+                    "timing": {},
+                    "shape": {},
+                },
+                "weather_posterior": {"event_probs": {}},
+                "posterior_feature_vector": {
+                    "ensemble_path_state": {
+                        "dominant_path": "transition",
+                        "dominant_path_detail": "neutral_stable",
+                        "dominant_prob": 0.62,
+                        "observed_path": "transition",
+                        "observed_path_detail": "weak_warm_transition",
+                        "observed_alignment_match_state": "divergent",
+                        "observed_alignment_confidence": "high",
+                    }
+                },
+                "quality_snapshot": {"scores": {"confidence_label": "high"}},
+                "peak_data": {"summary": {"consistency": {}, "confidence": {}, "phase_now": "in_window"}},
+                "boundary_layer_regime": {"tracking_line": "", "regime_key": "synoptic", "thermo": {"vertical_regime": "dry_clear_mixed"}},
+                "condition_state": {},
+            },
+        )
+
+        joined = "\n".join(bundle["vars_block"])
+        self.assertIn("偏离系集主支", joined)
+        self.assertIn("暖侧试探", joined)
 
     def test_synoptic_summary_skips_generic_front_wording_in_weak_background_case(self) -> None:
         summary = build_synoptic_summary(

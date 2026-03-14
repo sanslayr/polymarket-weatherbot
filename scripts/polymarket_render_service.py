@@ -95,10 +95,156 @@ def _poly_label(slug: str) -> str:
     return slug
 
 
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, float(value)))
+
+
+def _posterior_cdf_points(weather_posterior: dict[str, Any] | None) -> list[tuple[float, float]] | None:
+    posterior = dict(weather_posterior or {})
+    quantiles = dict(posterior.get("quantiles") or {})
+    p10 = _safe_float(quantiles.get("p10_c"))
+    p25 = _safe_float(quantiles.get("p25_c"))
+    p50 = _safe_float(quantiles.get("p50_c"))
+    p75 = _safe_float(quantiles.get("p75_c"))
+    p90 = _safe_float(quantiles.get("p90_c"))
+    if None in {p10, p25, p50, p75, p90}:
+        return None
+
+    left_gap = max(float(p25) - float(p10), float(p50) - float(p25), 0.45)
+    right_gap = max(float(p90) - float(p75), float(p75) - float(p50), 0.45)
+    support_lo = float(p10) - left_gap * (0.10 / 0.15)
+    support_hi = float(p90) + right_gap * (0.10 / 0.15)
+    raw_points = [
+        (support_lo, 0.00),
+        (float(p10), 0.10),
+        (float(p25), 0.25),
+        (float(p50), 0.50),
+        (float(p75), 0.75),
+        (float(p90), 0.90),
+        (support_hi, 1.00),
+    ]
+
+    points: list[tuple[float, float]] = []
+    last_x = -math.inf
+    last_p = 0.0
+    for x_raw, p_raw in raw_points:
+        x = max(float(x_raw), float(last_x))
+        p = max(float(p_raw), float(last_p))
+        points.append((x, p))
+        last_x = x
+        last_p = p
+    return points
+
+
+def _posterior_cdf(points: list[tuple[float, float]] | None, x: float) -> float:
+    if not points:
+        return 0.0
+    if x <= points[0][0]:
+        return 0.0
+
+    prev_x, prev_p = points[0]
+    for next_x, next_p in points[1:]:
+        if next_x <= prev_x + 1e-9:
+            if x < next_x:
+                return float(prev_p)
+            prev_x, prev_p = next_x, next_p
+            continue
+        if x <= next_x:
+            frac = _clamp((x - prev_x) / (next_x - prev_x), 0.0, 1.0)
+            return float(prev_p) + frac * float(next_p - prev_p)
+        prev_x, prev_p = next_x, next_p
+    return 1.0
+
+
+def _posterior_bin_probability(
+    points: list[tuple[float, float]] | None,
+    *,
+    lo: float,
+    hi: float,
+) -> float | None:
+    if not points:
+        return None
+
+    edge_eps = 1e-6
+    lo_cdf = 0.0 if lo == -math.inf else _posterior_cdf(points, float(lo) - edge_eps)
+    hi_cdf = 1.0 if hi == math.inf else _posterior_cdf(points, float(hi) + edge_eps)
+    return round(_clamp(float(hi_cdf) - float(lo_cdf), 0.0, 1.0), 4)
+
+
+def _ensure_min_display_rows(
+    rows: list[tuple[float, str, Any, Any, float, float]],
+    *,
+    filtered: list[tuple[float, str, Any, Any, float, float]],
+    min_rows: int,
+    target_center: float,
+) -> list[tuple[float, str, Any, Any, float, float]]:
+    if len(rows) >= min_rows:
+        return sorted(rows, key=lambda x: x[0])
+
+    ordered = sorted({str(r[1]): r for r in rows}.values(), key=lambda x: x[0])
+    finite_all = sorted(
+        [r for r in filtered if not (math.isinf(r[4]) or math.isinf(r[5]))],
+        key=lambda x: x[0],
+    )
+    seen = {str(r[1]) for r in ordered}
+
+    while len(ordered) < min_rows and finite_all:
+        finite_existing = [r for r in ordered if not (math.isinf(r[4]) or math.isinf(r[5]))]
+        if finite_existing:
+            cmin = min(r[0] for r in finite_existing)
+            cmax = max(r[0] for r in finite_existing)
+            left = [r for r in finite_all if r[0] < cmin and str(r[1]) not in seen]
+            right = [r for r in finite_all if r[0] > cmax and str(r[1]) not in seen]
+            candidates: list[tuple[float, tuple[float, str, Any, Any, float, float]]] = []
+            if left:
+                pick = left[-1]
+                candidates.append((abs(pick[0] - target_center), pick))
+            if right:
+                pick = right[0]
+                candidates.append((abs(pick[0] - target_center), pick))
+            if candidates:
+                _, chosen = sorted(candidates, key=lambda x: x[0])[0]
+                ordered.append(chosen)
+                seen.add(str(chosen[1]))
+                ordered = sorted(ordered, key=lambda x: x[0])
+                continue
+        remaining = [r for r in finite_all if str(r[1]) not in seen]
+        if not remaining:
+            break
+        chosen = sorted(remaining, key=lambda x: abs(x[0] - target_center))[0]
+        ordered.append(chosen)
+        seen.add(str(chosen[1]))
+        ordered = sorted(ordered, key=lambda x: x[0])
+
+    if len(ordered) < min_rows:
+        edges = sorted(
+            [r for r in filtered if (math.isinf(r[4]) or math.isinf(r[5])) and str(r[1]) not in seen],
+            key=lambda x: abs(x[0] - target_center),
+        )
+        for edge in edges:
+            ordered.append(edge)
+            seen.add(str(edge[1]))
+            ordered = sorted(ordered, key=lambda x: x[0])
+            if len(ordered) >= min_rows:
+                break
+
+    return sorted(ordered, key=lambda x: x[0])
+
+
 def _build_polymarket_section(
     polymarket_event_url: str,
     primary_window: dict[str, Any],
     weather_anchor: dict[str, Any] | None = None,
+    weather_posterior: dict[str, Any] | None = None,
     range_hint: dict[str, float] | None = None,
     allow_best_label: bool = True,
     allow_alpha_label: bool = True,
@@ -248,10 +394,15 @@ def _build_polymarket_section(
     alpha_cheap_spread_max = _lp_float("alpha_cheap_spread_max", 0.10)
     alpha_cheap_weather_min = _lp_float("alpha_cheap_weather_min", 0.12)
     alpha_cheap_score_min = _lp_float("alpha_cheap_score_min", 0.22)
+    alpha_cheap_edge_min = _lp_float("alpha_cheap_edge_min", 0.10)
     alpha_mid_ask_max = _lp_float("alpha_mid_ask_max", 0.18)
     alpha_mid_spread_max = _lp_float("alpha_mid_spread_max", 0.06)
     alpha_mid_weather_min = _lp_float("alpha_mid_weather_min", 0.45)
     alpha_mid_score_min = _lp_float("alpha_mid_score_min", 0.30)
+    alpha_mid_edge_min = _lp_float("alpha_mid_edge_min", 0.12)
+    min_display_rows = max(2, min(5, int(round(_lp_float("min_display_rows", 3.0)))))
+    posterior_points = _posterior_cdf_points(weather_posterior)
+    has_posterior_probs = posterior_points is not None
 
     likely_lo = peak - 0.8
     likely_hi = peak + 0.8
@@ -297,6 +448,13 @@ def _build_polymarket_section(
         c_term = max(0.0, 1.0 - abs(c - mid) / 2.0)
         return 0.55 * ov_core + 0.30 * ov_disp + 0.15 * c_term
 
+    def _weather_signal(row: tuple[float, str, Any, Any, float, float]) -> float:
+        _c, _l, _b, _a, lo, hi = row
+        posterior_prob = _posterior_bin_probability(posterior_points, lo=lo, hi=hi)
+        if posterior_prob is not None:
+            return float(posterior_prob)
+        return _weather_score(row)
+
     def _market_strength(row: tuple[float, str, Any, Any, float, float]) -> float:
         _c, _l, b, a, _lo, _hi = row
         bid = _px(b)
@@ -310,19 +468,43 @@ def _build_polymarket_section(
         liquid = 0.08 if max(bid, ask) >= 0.02 else -0.05
         return mid - 0.35 * spread + liquid
 
+    def _market_yes_cost(row: tuple[float, str, Any, Any, float, float]) -> float | None:
+        _c, _l, b, a, _lo, _hi = row
+        ask = _px(a)
+        if ask > 0:
+            return ask
+        return None
+
+    def _market_mid_prob(row: tuple[float, str, Any, Any, float, float]) -> float:
+        _c, _l, b, a, _lo, _hi = row
+        bid = _px(b)
+        ask = _px(a)
+        if bid > 0 and ask > 0:
+            return 0.5 * (bid + ask)
+        return max(bid, ask)
+
+    def _alpha_edge(row: tuple[float, str, Any, Any, float, float]) -> float:
+        market_cost = _market_yes_cost(row)
+        if market_cost is None:
+            return -1.0
+        return _weather_signal(row) - float(market_cost)
+
     def _alpha_score(row: tuple[float, str, Any, Any, float, float]) -> float:
         _c, _l, b, a, _lo, hi = row
         bid = _px(b)
         ask = _px(a)
         spread = max(0.0, ask - bid)
-        w = _weather_score(row)
-        m = _market_strength(row)
-        mispricing = max(0.0, w - m)
+        w = _weather_signal(row)
+        if has_posterior_probs:
+            edge = max(0.0, _alpha_edge(row))
+            mispricing = 0.65 * edge + 0.35 * max(0.0, w - _market_mid_prob(row))
+        else:
+            mispricing = max(0.0, w - _market_strength(row))
 
         cheap_bonus = 0.0
         if ask > 0 and ask <= 0.15:
             cheap_bonus = 0.14 + 0.10 * (0.15 - ask) / 0.15
-        elif ask > 0.15 and ask <= 0.20 and spread <= 0.06 and w >= 0.45:
+        elif ask > 0.15 and ask <= 0.20 and spread <= 0.06 and w >= 0.28:
             cheap_bonus = 0.05 + 0.05 * (0.20 - ask) / 0.05
 
         tradable = 0.05 if max(bid, ask) >= 0.02 else -0.04
@@ -332,7 +514,7 @@ def _build_polymarket_section(
 
         return 0.85 * mispricing + 0.25 * w + cheap_bonus + tradable - 0.25 * spread - stale_penalty
 
-    ranked = sorted(filtered, key=lambda r: (0.75 * _weather_score(r) + 0.25 * _market_strength(r)), reverse=True)
+    ranked = sorted(filtered, key=lambda r: (0.85 * _weather_signal(r) + 0.15 * _market_strength(r)), reverse=True)
 
     def _overlap_or_near(row: tuple[float, str, Any, Any, float, float]) -> bool:
         _c, _l, _b, _a, lo, hi = row
@@ -482,13 +664,13 @@ def _build_polymarket_section(
         pick_pool = core_bins if core_bins else filtered
 
         def _likely_score(row: tuple[float, str, Any, Any, float, float]) -> float:
-            return 0.82 * _weather_score(row) + 0.18 * _market_strength(row)
+            return 0.90 * _weather_signal(row) + 0.10 * _market_strength(row)
 
         pick_sorted = sorted(pick_pool, key=_likely_score, reverse=True)
-        s1 = _likely_score(pick_sorted[0])
-        s2 = _likely_score(pick_sorted[1]) if len(pick_sorted) > 1 else -999.0
+        s1 = _weather_signal(pick_sorted[0])
+        s2 = _weather_signal(pick_sorted[1]) if len(pick_sorted) > 1 else -999.0
         # require clear lead to avoid over-tagging in tight distributions
-        if (s1 - s2) >= best_lead_min and _weather_score(pick_sorted[0]) >= best_weather_min:
+        if (s1 - s2) >= best_lead_min and s1 >= best_weather_min:
             best_label = pick_sorted[0][1]
 
     # Non-settled markets should show at least 2-3 bins (main + adjacent), avoid single-bin squeeze.
@@ -539,14 +721,52 @@ def _build_polymarket_section(
         ask_v = _px(ask)
         spread_v = max(0.0, ask_v - bid_v)
         if allow_best_label and best_label and label == best_label:
-            return "👍最有可能"
+            return "👍最可能"
         if not allow_alpha_label:
             return ""
         s = score_map.get((label, str(bid), str(ask)), 0.0)
-        w = _weather_score(row)
-        if ask_v > 0 and ask_v <= alpha_cheap_ask_max and spread_v <= alpha_cheap_spread_max and w >= alpha_cheap_weather_min and s >= alpha_cheap_score_min:
+        w = _weather_signal(row)
+        edge = _alpha_edge(row)
+        stale = t_now is not None and _hi <= t_now + 0.3
+        if stale:
+            return ""
+        if (
+            has_posterior_probs
+            and ask_v > 0
+            and ask_v <= alpha_cheap_ask_max
+            and spread_v <= alpha_cheap_spread_max
+            and w >= alpha_cheap_weather_min
+            and edge >= alpha_cheap_edge_min
+            and s >= alpha_cheap_score_min
+        ):
             return "😇潜在Alpha"
-        if ask_v > alpha_cheap_ask_max and ask_v <= alpha_mid_ask_max and spread_v <= alpha_mid_spread_max and w >= alpha_mid_weather_min and s >= alpha_mid_score_min:
+        if (
+            has_posterior_probs
+            and ask_v > alpha_cheap_ask_max
+            and ask_v <= alpha_mid_ask_max
+            and spread_v <= alpha_mid_spread_max
+            and w >= alpha_mid_weather_min
+            and edge >= alpha_mid_edge_min
+            and s >= alpha_mid_score_min
+        ):
+            return "😇潜在Alpha"
+        if (
+            (not has_posterior_probs)
+            and ask_v > 0
+            and ask_v <= alpha_cheap_ask_max
+            and spread_v <= alpha_cheap_spread_max
+            and w >= alpha_cheap_weather_min
+            and s >= alpha_cheap_score_min
+        ):
+            return "😇潜在Alpha"
+        if (
+            (not has_posterior_probs)
+            and ask_v > alpha_cheap_ask_max
+            and ask_v <= alpha_mid_ask_max
+            and spread_v <= alpha_mid_spread_max
+            and w >= alpha_mid_weather_min
+            and s >= alpha_mid_score_min
+        ):
             return "😇潜在Alpha"
         return ""
 
@@ -822,6 +1042,13 @@ def _build_polymarket_section(
                 display_rows = sorted(display_rows + [top_row], key=lambda x: x[0])
     except Exception:
         pass
+
+    display_rows = _ensure_min_display_rows(
+        display_rows,
+        filtered=filtered,
+        min_rows=min_display_rows,
+        target_center=0.5 * (target_lo + target_hi),
+    )
 
     if expectation_lines:
         lines.append("**市场定价**")

@@ -185,6 +185,61 @@ Last updated: 2026-03-11
 5. `vertical_3d.py` 已具备基础 tracking 能力，不再只是静态单帧 object 摘要。
 6. 市场异动通知链路已经从 `/look` 主链路中剥离出来，并进一步拆成 `scheduler -> monitor -> signal -> formatter -> delivery -> worker`，适合在 weatherbot workspace 内长期运行。
 
+## 4.1) 当前 runtime posterior 算法
+
+当前 `weather_posterior` 已不再只是“model peak + quality widening”。runtime 现阶段已经形成以下分层：
+
+1. `canonical_raw_state_service.py`
+   - 统一收口窗口、实况、forecast decision、ensemble 与 `analysis_window_mode`
+   - 保留后续 posterior 需要的原始进度字段，而不是把这些信号留在 render 层
+2. `posterior_feature_service.py`
+   - 将输入压成正交 feature block
+   - 当前近窗收束直接依赖的进度特征包括：
+     - `modeled_headroom_c`
+     - `time_since_observed_peak_h`
+     - `reports_since_observed_peak`
+     - `latest_gap_below_observed_c`
+     - `hours_to_peak`
+     - `hours_to_window_end`
+     - `analysis_window_mode`
+3. `weather_posterior_core.py`
+   - 先生成未校正 posterior center / spread / event probabilities
+   - center 仍以物理锚定为主：`modeled peak / observed max / locked state / regime adjustment`
+   - spread 现已拆成：
+     - `heuristic spread`
+     - `ensemble live alignment adjustment`
+     - `progress spread adjustment`
+   - 近窗/窗内/后窗的 progress shrink 由“剩余 headroom、离已观测高点多久、已经过了几报、是否已过模型峰时刻、离窗口结束还有多久”共同控制
+4. `weather_posterior_calibration.py`
+   - 先应用 `quality_spread_multiplier` 做数据质量放宽
+   - 再应用 `progress_spread_multiplier`，允许在强实况证据下 `< 1.0`
+   - 最后用 `upper_tail_cap_c` 约束上尾，避免 `lock_by_window_end` 已高、`new_high_next_60m` 已低时 quantile 仍保留过宽暖尾
+
+当前 runtime 可概括为：
+
+- `spread_final = spread_core * quality_spread_multiplier * progress_spread_multiplier`
+- `upper_tail <= observed_anchor + dynamic_allowance`
+
+其中 `dynamic_allowance` 由：
+
+- `lock_by_window_end`
+- `new_high_next_60m`
+- `modeled_headroom_c`
+- `hours_to_peak`
+- `hours_to_window_end`
+- `time_since_observed_peak_h`
+- `analysis_window_mode`
+
+共同控制。
+
+## 4.2) 当前 posterior 与 peak range 的关系
+
+- `weather_posterior` 是天气侧数值后验层，负责给市场/策略提供 quantiles、event probabilities、peak timing。
+- `peak_range_service.py` 仍保留路径解释和历史/信号侧分析，但最终 snapshot 输出已优先以 `weather_posterior` quantiles 为真值来源。
+- `analysis_snapshot_service.py` 中的 path cap 继续保留，但定位已下沉为 downstream guard：
+  - 当 posterior 在近窗被异常放宽，或已存在 settled/obs anchor 时，防止最终展示重新发散
+  - 正常情况下，希望收束主要由 posterior 自身完成，而不是依赖 render/snapshot 层补救
+
 ## 5) 当前仍需继续收口的问题
 
 1. `canonical_raw_state` 和 `posterior_feature_vector` 已开始落地
@@ -201,6 +256,10 @@ Last updated: 2026-03-11
 5. 3D tracking 仍是轻量 heuristic
    - 目前能区分 `approaching / receding / passing / steady`
    - 还不等于完整的 split/merge/trajectory solver
+6. `weather_posterior` 虽已具备 progress-aware shrink 和 upper-tail cap，但本质上仍以 heuristic runtime posterior 为主
+   - 多数城市仍共享同一套 spread / cap 规则
+   - city-specific 差异目前主要通过 station prior 和少量 regime rule 间接体现
+   - 下一步应继续推进 station-family / regime-family calibration，而不是把更多特判塞回 render 层
 
 ## 6) 关联文档
 

@@ -233,6 +233,7 @@ def build_peak_range_summary(
     temp_phase_decision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     peak_c = float(calc_window.get('peak_temp_c') or 0.0)
+    station_icao = str(metar_diag.get("station_icao") or metar_diag.get("icao") or "").upper()
     obs_max = None
     try:
         obs_max = float(metar_diag.get('observed_max_temp_c')) if metar_diag.get('observed_max_temp_c') is not None else None

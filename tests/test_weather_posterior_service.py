@@ -404,7 +404,13 @@ class WeatherPosteriorServiceTest(unittest.TestCase):
         )
 
         self.assertIn("near_peak_obs_anchor", posterior["reason_codes"])
-        self.assertLess(posterior["anchor"]["posterior_median_c"], 22.7)
+        self.assertIn("regime_sunny_highland_dry_mix", posterior["reason_codes"])
+        self.assertGreater(posterior["anchor"]["regime_median_shift_c"], 0.0)
+        self.assertLess(posterior["anchor"]["posterior_median_c"], 23.5)
+        self.assertEqual(
+            posterior["regimes"]["active_regimes"][0]["id"],
+            "sunny_highland_dry_mix",
+        )
 
     def test_same_day_live_ensemble_alignment_narrows_spread_without_moving_center(self) -> None:
         primary_window = {
@@ -591,6 +597,212 @@ class WeatherPosteriorServiceTest(unittest.TestCase):
             aligned_posterior["anchor"]["spread_c"],
             conflicting_posterior["anchor"]["spread_c"],
         )
+
+    def test_progress_aware_calibration_narrows_flat_near_end_case(self) -> None:
+        primary_window = {
+            "start_local": "2026-03-09T13:00",
+            "peak_local": "2026-03-09T14:00",
+            "end_local": "2026-03-09T16:00",
+            "peak_temp_c": 24.0,
+            "low_cloud_pct": 18.0,
+            "w850_kmh": 22.0,
+        }
+        metar_diag = {
+            "latest_report_local": "2026-03-09T15:40:00+00:00",
+            "latest_temp": 23.4,
+            "latest_dewpoint": 8.0,
+            "latest_rh": 44.0,
+            "latest_wspd": 8.0,
+            "latest_wdir": 180.0,
+            "latest_cloud_code": "FEW",
+            "latest_cloud_lowest_base_ft": 5000,
+            "latest_wx": "",
+            "cloud_effective_cover_smooth": 0.16,
+            "radiation_eff_smooth": 0.70,
+            "cloud_trend": "stable",
+            "latest_precip_state": "none",
+            "precip_trend": "none",
+            "temp_trend_smooth_c": -0.05,
+            "temp_bias_smooth_c": -0.10,
+            "temp_accel_2step_c": -0.02,
+            "observed_max_temp_c": 23.6,
+            "observed_max_time_local": "2026-03-09T15:10:00+00:00",
+            "observed_max_interval_lo_c": 23.4,
+            "observed_max_interval_hi_c": 23.8,
+            "metar_temp_quantized": False,
+            "metar_routine_cadence_min": 30,
+            "metar_recent_interval_min": 30,
+            "analysis_window_mode": "obs_plateau_reanchor",
+        }
+        forecast_decision = {
+            "meta": {
+                "station": "LTAC",
+                "date": "2026-03-09",
+                "model": "ecmwf",
+                "synoptic_provider": "ecmwf-open-data",
+                "runtime": "2026030900Z",
+                "window": dict(primary_window),
+            },
+            "quality": {
+                "source_state": "fresh",
+                "missing_layers": [],
+                "synoptic_coverage": 1.0,
+                "synoptic_provider_requested": "ecmwf-open-data",
+                "synoptic_provider_used": "ecmwf-open-data",
+            },
+            "features": {
+                "objects_3d": {"tracks": [], "count": 0, "anchors_count": 0},
+                "h850": {"review": {"thermal_advection_state": "probable", "transport_state": "neutral"}},
+                "sounding": {"thermo": {"coverage": {"density_class": "moderate"}}},
+            },
+        }
+
+        canonical = build_canonical_raw_state(
+            primary_window=primary_window,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            temp_unit="C",
+            temp_shape_analysis={
+                "forecast": {
+                    "shape_type": "single_peak",
+                    "multi_peak_state": "none",
+                    "plateau_state": "narrow",
+                },
+                "observed": {
+                    "plateau_state": "holding",
+                    "hold_duration_hours": 0.5,
+                },
+            },
+        )
+        features = build_posterior_feature_vector(
+            canonical_raw_state=canonical,
+            temp_phase_decision={
+                "phase": "in_window",
+                "display_phase": "in_window",
+                "short_term_state": "holding",
+                "daily_peak_state": "lean_locked",
+                "second_peak_potential": "none",
+                "rebound_mode": "retest",
+                "dominant_shape": "peak_plateau",
+                "plateau_hold_state": "holding",
+            },
+        )
+        posterior = build_weather_posterior(
+            canonical_raw_state=canonical,
+            posterior_feature_vector=features,
+            quality_snapshot=build_quality_snapshot(
+                canonical_raw_state=canonical,
+                posterior_feature_vector=features,
+            ),
+        )
+
+        self.assertLess(posterior["calibration"]["progress_spread_multiplier"], 1.0)
+        self.assertLessEqual(posterior["quantiles"]["p75_c"], 23.9)
+        self.assertLessEqual(posterior["quantiles"]["p90_c"], 23.95)
+        self.assertEqual(posterior["core"]["progress"]["analysis_window_mode"], "obs_plateau_reanchor")
+
+    def test_post_window_lock_caps_upper_tail_near_observed_high(self) -> None:
+        primary_window = {
+            "start_local": "2026-03-08T15:00",
+            "peak_local": "2026-03-08T17:00",
+            "end_local": "2026-03-08T18:00",
+            "peak_temp_c": 24.0,
+            "low_cloud_pct": 10.0,
+            "w850_kmh": 18.0,
+        }
+        metar_diag = {
+            "latest_report_local": "2026-03-08T18:40:00+00:00",
+            "latest_temp": 23.2,
+            "latest_dewpoint": 7.0,
+            "latest_rh": 35.0,
+            "latest_wspd": 4.0,
+            "latest_wdir": 200.0,
+            "latest_cloud_code": "CLR",
+            "latest_cloud_lowest_base_ft": 8000,
+            "latest_wx": "",
+            "cloud_effective_cover_smooth": 0.05,
+            "radiation_eff_smooth": 0.55,
+            "cloud_trend": "稳定",
+            "latest_precip_state": "none",
+            "precip_trend": "none",
+            "temp_trend_1step_c": -0.5,
+            "temp_trend_smooth_c": -0.4,
+            "temp_bias_c": -0.2,
+            "temp_accel_2step_c": -0.08,
+            "observed_max_temp_c": 24.2,
+            "observed_max_time_local": "2026-03-08T17:20:00+00:00",
+            "observed_max_interval_lo_c": 24.0,
+            "observed_max_interval_hi_c": 24.5,
+            "metar_temp_quantized": False,
+            "metar_routine_cadence_min": 30,
+            "metar_recent_interval_min": 30,
+            "peak_lock_confirmed": True,
+        }
+        forecast_decision = {
+            "meta": {
+                "station": "LTAC",
+                "date": "2026-03-08",
+                "model": "ecmwf",
+                "synoptic_provider": "ecmwf-open-data",
+                "runtime": "2026030800Z",
+                "window": dict(primary_window),
+            },
+            "quality": {
+                "source_state": "fresh",
+                "missing_layers": [],
+                "synoptic_coverage": 1.0,
+                "synoptic_provider_requested": "ecmwf-open-data",
+                "synoptic_provider_used": "ecmwf-open-data",
+            },
+            "features": {
+                "objects_3d": {"tracks": [], "count": 0, "anchors_count": 0},
+                "h850": {"review": {"thermal_advection_state": "none", "transport_state": "neutral"}},
+                "sounding": {"thermo": {"coverage": {"density_class": "moderate"}}},
+            },
+        }
+
+        canonical = build_canonical_raw_state(
+            primary_window=primary_window,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            temp_unit="C",
+            temp_shape_analysis={
+                "forecast": {
+                    "shape_type": "single_peak",
+                    "multi_peak_state": "none",
+                    "plateau_state": "narrow",
+                },
+                "observed": {
+                    "plateau_state": "none",
+                    "hold_duration_hours": 0.0,
+                },
+            },
+        )
+        features = build_posterior_feature_vector(
+            canonical_raw_state=canonical,
+            temp_phase_decision={
+                "phase": "post",
+                "display_phase": "post",
+                "short_term_state": "fading",
+                "daily_peak_state": "locked",
+                "second_peak_potential": "none",
+                "rebound_mode": "none",
+                "dominant_shape": "single_peak_tail",
+                "plateau_hold_state": "none",
+            },
+        )
+        posterior = build_weather_posterior(
+            canonical_raw_state=canonical,
+            posterior_feature_vector=features,
+            quality_snapshot=build_quality_snapshot(
+                canonical_raw_state=canonical,
+                posterior_feature_vector=features,
+            ),
+        )
+
+        self.assertLessEqual(posterior["quantiles"]["p90_c"], 24.45)
+        self.assertLessEqual(posterior["quantiles"]["p75_c"], 24.35)
+        self.assertLessEqual(posterior["calibration"]["upper_tail_cap_c"], 24.45)
 
 
 if __name__ == "__main__":

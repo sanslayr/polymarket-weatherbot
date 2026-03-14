@@ -333,6 +333,7 @@ def build_posterior_feature_vector(
     shape_observed = dict(shape.get("observed") or {})
     quality = dict(forecast.get("quality") or {})
     context = dict(forecast.get("context") or {})
+    source = dict(raw.get("source") or {})
     ensemble_factor = dict(forecast.get("ensemble_factor") or {})
     ensemble_summary = dict(ensemble_factor.get("summary") or {})
     ensemble_probs = dict(ensemble_factor.get("probabilities") or {})
@@ -373,9 +374,43 @@ def build_posterior_feature_vector(
     if observed_max_temp_c is not None and latest_temp_c is not None:
         gap_to_observed_max_c = observed_max_temp_c - latest_temp_c
 
+    latest_gap_below_observed_c = None
+    if observed_max_temp_c is not None and latest_temp_c is not None:
+        latest_gap_below_observed_c = max(0.0, observed_max_temp_c - latest_temp_c)
+
     forecast_peak_minus_latest_c = None
     if peak_temp_c is not None and latest_temp_c is not None:
         forecast_peak_minus_latest_c = peak_temp_c - latest_temp_c
+
+    observed_progress_anchor_c = None
+    if observed_max_temp_c is not None and latest_temp_c is not None:
+        observed_progress_anchor_c = max(observed_max_temp_c, latest_temp_c)
+    elif observed_max_temp_c is not None:
+        observed_progress_anchor_c = observed_max_temp_c
+    elif latest_temp_c is not None:
+        observed_progress_anchor_c = latest_temp_c
+
+    modeled_headroom_c = None
+    if peak_temp_c is not None and observed_progress_anchor_c is not None:
+        modeled_headroom_c = peak_temp_c - observed_progress_anchor_c
+
+    time_since_observed_peak_h = None
+    observed_peak_local = obs.get("observed_max_time_local")
+    if observed_peak_local:
+        age_h = _hours_between_iso(latest_report_local, observed_peak_local)
+        if age_h is not None and age_h >= 0.0:
+            time_since_observed_peak_h = age_h
+
+    reports_since_observed_peak = None
+    cadence_for_reports = _safe_float(obs.get("metar_routine_cadence_min"))
+    if (
+        time_since_observed_peak_h is not None
+        and cadence_for_reports is not None
+        and cadence_for_reports > 0.0
+    ):
+        reports_since_observed_peak = int(
+            max(0.0, (time_since_observed_peak_h * 60.0) / cadence_for_reports)
+        )
 
     ensemble_alignment = _live_ensemble_path_alignment(
         temp_trend_c=_safe_float(obs.get("temp_trend_c")),
@@ -411,11 +446,18 @@ def build_posterior_feature_vector(
             "hours_to_peak": _hours_between_iso(peak_local, latest_report_local),
             "hours_to_window_end": _hours_between_iso(end_local, latest_report_local),
             "window_width_h": _hours_between_iso(end_local, start_local),
+            "analysis_window_mode": str(source.get("analysis_window_mode") or ""),
+            "analysis_window_override_active": bool(source.get("analysis_window_override_active")),
         },
         "observation_state": {
             "latest_temp_c": latest_temp_c,
             "observed_max_temp_c": observed_max_temp_c,
             "gap_to_observed_max_c": gap_to_observed_max_c,
+            "latest_gap_below_observed_c": latest_gap_below_observed_c,
+            "observed_progress_anchor_c": observed_progress_anchor_c,
+            "modeled_headroom_c": modeled_headroom_c,
+            "time_since_observed_peak_h": time_since_observed_peak_h,
+            "reports_since_observed_peak": reports_since_observed_peak,
             "forecast_peak_minus_latest_c": forecast_peak_minus_latest_c,
             "temp_trend_c": _safe_float(obs.get("temp_trend_c")),
             "temp_trend_effective_c": _safe_float(obs.get("temp_trend_effective_c")),

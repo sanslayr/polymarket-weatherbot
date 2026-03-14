@@ -105,6 +105,114 @@ def _solar_clear_score(lat_deg: float, lon_deg: float, dt_local: datetime) -> fl
     return max(0.0, min(1.0, cosz ** 1.15))
 
 
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, float(value)))
+
+
+def _apply_posterior_range_truth_source(
+    peak_summary: dict[str, Any],
+    weather_posterior: dict[str, Any],
+) -> dict[str, Any]:
+    summary = dict(peak_summary or {})
+    posterior = dict(weather_posterior or {})
+    quantiles = dict(posterior.get("quantiles") or {})
+    p10 = _safe_float(quantiles.get("p10_c"))
+    p25 = _safe_float(quantiles.get("p25_c"))
+    p75 = _safe_float(quantiles.get("p75_c"))
+    p90 = _safe_float(quantiles.get("p90_c"))
+    if None in {p10, p25, p75, p90}:
+        return summary
+
+    phase_now = str(summary.get("phase_now") or "")
+    confidence_label = str((posterior.get("quality_snapshot_ref") or {}).get("confidence_label") or "")
+    tail_weight = {
+        "far": 0.55,
+        "same_day": 0.35,
+        "near_window": 0.0,
+        "in_window": 0.0,
+        "post": 0.0,
+    }.get(phase_now, 0.25)
+    if confidence_label == "high":
+        tail_weight -= 0.10
+    elif confidence_label == "low":
+        tail_weight += 0.10
+    tail_weight = _clamp(tail_weight, 0.0, 1.0)
+
+    disp_lo = float(p25) - tail_weight * float(p25 - p10)
+    disp_hi = float(p75) + tail_weight * float(p90 - p75)
+    core_lo = float(p25)
+    core_hi = float(p75)
+
+    ranges = dict(summary.get("ranges") or {})
+    pre_display = dict(ranges.get("display") or {})
+    pre_core = dict(ranges.get("core") or {})
+    annotations = [str(item) for item in (summary.get("annotations") or []) if str(item).strip()]
+    settled = dict(ranges.get("settled") or {})
+    if bool(settled.get("active")):
+        settle_reason = str(settled.get("reason") or "").strip()
+        settle_note = settle_reason or "已观测最高温已基本确认，区间已相应收窄。"
+        settle_line = f"- 注：{settle_note}"
+        if settle_line not in annotations:
+            annotations.append(settle_line)
+
+    def _valid_range(node: dict[str, Any]) -> tuple[float, float] | None:
+        lo = _safe_float(node.get("lo"))
+        hi = _safe_float(node.get("hi"))
+        if lo is None or hi is None or hi < lo:
+            return None
+        return float(lo), float(hi)
+
+    source_label = "posterior_quantiles"
+    pre_display_range = _valid_range(pre_display)
+    pre_core_range = _valid_range(pre_core)
+    if (
+        phase_now in {"near_window", "in_window", "post"}
+        and pre_display_range is not None
+        and pre_core_range is not None
+    ):
+        pre_disp_lo, pre_disp_hi = pre_display_range
+        pre_core_lo, pre_core_hi = pre_core_range
+        posterior_width = max(0.0, float(disp_hi) - float(disp_lo))
+        pre_width = max(0.0, float(pre_disp_hi) - float(pre_disp_lo))
+        path_cap_active = (
+            bool(settled.get("active"))
+            or (posterior_width - pre_width) >= 0.35
+        )
+        if path_cap_active:
+            disp_lo = max(float(disp_lo), pre_disp_lo)
+            disp_hi = min(float(disp_hi), pre_disp_hi)
+            core_lo = max(float(core_lo), pre_core_lo)
+            core_hi = min(float(core_hi), pre_core_hi)
+
+            if disp_hi < disp_lo:
+                disp_lo, disp_hi = pre_disp_lo, pre_disp_hi
+            if core_hi < core_lo:
+                core_lo, core_hi = pre_core_lo, pre_core_hi
+
+            disp_lo = min(float(disp_lo), float(core_lo))
+            disp_hi = max(float(disp_hi), float(core_hi))
+            source_label = "posterior_quantiles_path_capped"
+
+    ranges["display"] = {"lo": float(disp_lo), "hi": float(disp_hi)}
+    ranges["core"] = {"lo": float(core_lo), "hi": float(core_hi)}
+    ranges["settled"] = settled if bool(settled.get("active")) else {"active": False}
+    ranges["source"] = source_label
+    ranges["posterior_tail_weight"] = round(tail_weight, 2)
+    summary["ranges"] = ranges
+    summary["annotations"] = annotations
+    summary["range_truth_source"] = "weather_posterior"
+    return summary
+
+
 def build_analysis_snapshot(
     *,
     primary_window: dict[str, Any],
@@ -199,15 +307,6 @@ def build_analysis_snapshot(
         solar_clear_score_fn=_solar_clear_score,
         temp_phase_decision=temp_phase_decision,
     )
-    peak_data = {
-        "summary": peak_summary,
-        "block": render_peak_range_block(
-            peak_summary,
-            unit=unit,
-            fmt_range_fn=_build_fmt_range_fn(unit),
-        ),
-    }
-
     synoptic_summary = build_synoptic_summary(
         primary_window=primary_window,
         metar_diag=metar_diag,
@@ -241,6 +340,15 @@ def build_analysis_snapshot(
         posterior_feature_vector=posterior_feature_vector,
         quality_snapshot=quality_snapshot,
     )
+    peak_summary = _apply_posterior_range_truth_source(peak_summary, weather_posterior)
+    peak_data = {
+        "summary": peak_summary,
+        "block": render_peak_range_block(
+            peak_summary,
+            unit=unit,
+            fmt_range_fn=_build_fmt_range_fn(unit),
+        ),
+    }
 
     return {
         "schema_version": ANALYSIS_SNAPSHOT_SCHEMA_VERSION,

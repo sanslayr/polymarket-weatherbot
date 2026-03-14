@@ -189,6 +189,9 @@ class PosteriorFeatureServiceTest(unittest.TestCase):
         self.assertEqual(features["track_state"]["main_track_evolution"], "approaching")
         self.assertEqual(features["regime_state"]["dominant_mechanism"], "混合加深")
         self.assertEqual(features["ensemble_path_state"]["dominant_path"], "")
+        self.assertAlmostEqual(features["observation_state"]["modeled_headroom_c"], 5.7, places=2)
+        self.assertEqual(features["observation_state"]["reports_since_observed_peak"], 0)
+        self.assertEqual(features["time_phase"]["analysis_window_mode"], "")
         self.assertNotIn("legacy_text", canonical["forecast"])
         self.assertNotIn("headline", features["regime_state"])
 

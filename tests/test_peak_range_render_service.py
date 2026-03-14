@@ -72,7 +72,47 @@ class PeakRangeRenderServiceTest(unittest.TestCase):
 
         self.assertEqual(
             block[1],
-            "• **17.5~18.8°C**（主看 17.5~18.3°C；峰值窗 16:00~20:00 Local）",
+            "• **17.5~18.8°C**（峰值窗 16:00~20:00 Local）",
+        )
+
+    def test_render_includes_pxx_band_for_posterior_driven_range(self) -> None:
+        block = render_peak_range_block(
+            {
+                "ranges": {
+                    "display": {"lo": 17.5, "hi": 18.8},
+                    "core": {"lo": 17.5, "hi": 18.3},
+                    "window": {"label": "峰值窗", "text": "16:00~20:00 Local"},
+                    "source": "posterior_quantiles",
+                    "posterior_tail_weight": 0.35,
+                },
+            },
+            unit="C",
+            fmt_range_fn=lambda lo, hi: f"{lo:.1f}~{hi:.1f}°C",
+        )
+
+        self.assertEqual(
+            block[1],
+            "• **17.5~18.8°C**（峰值窗 16:00~20:00 Local）",
+        )
+
+    def test_render_marks_path_capped_posterior_band(self) -> None:
+        block = render_peak_range_block(
+            {
+                "ranges": {
+                    "display": {"lo": 23.4, "hi": 23.8},
+                    "core": {"lo": 23.4, "hi": 23.8},
+                    "window": {"label": "峰值窗", "text": "14:00~16:00 Local"},
+                    "source": "posterior_quantiles_path_capped",
+                    "posterior_tail_weight": 0.0,
+                },
+            },
+            unit="C",
+            fmt_range_fn=lambda lo, hi: f"{lo:.1f}~{hi:.1f}°C",
+        )
+
+        self.assertEqual(
+            block[1],
+            "• **23.4~23.8°C**（已按实况路径收紧；峰值窗 14:00~16:00 Local）",
         )
 
 

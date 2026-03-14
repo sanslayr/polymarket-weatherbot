@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timedelta
 from typing import Any
 
 from contracts import WEATHER_POSTERIOR_CORE_SCHEMA_VERSION
+from posterior_regime_adjuster import apply_regime_effects
+from regime_detector import detect_station_regimes
 
 
 def _safe_float(value: Any) -> float | None:
@@ -118,6 +121,133 @@ def _ensemble_live_spread_adjustment(
     return -round(reduction, 2)
 
 
+def _progress_spread_adjustment(
+    *,
+    phase: str,
+    daily_peak_state: str,
+    short_term_state: str,
+    second_peak_potential: str,
+    multi_peak_state: str,
+    plateau_hold_state: str,
+    analysis_window_mode: str,
+    hours_to_peak: float | None,
+    hours_to_window_end: float | None,
+    modeled_headroom_c: float | None,
+    observed_peak_age_h: float | None,
+    reports_since_observed_peak: float | None,
+    latest_gap_below_observed_c: float | None,
+    temp_trend_c: float,
+    temp_bias_c: float,
+) -> tuple[float, list[str]]:
+    if phase not in {"near_window", "in_window", "post"}:
+        return 0.0, []
+
+    reduction = 0.0
+    reason_codes: list[str] = []
+    if analysis_window_mode == "obs_plateau_reanchor":
+        reduction += 0.28
+        reason_codes.append("progress_plateau_reanchor")
+    elif analysis_window_mode == "obs_peak_reanchor":
+        reduction += 0.16
+        reason_codes.append("progress_obs_peak_reanchor")
+
+    if hours_to_window_end is not None:
+        window_tail_h = float(hours_to_window_end)
+        if window_tail_h <= 0.40:
+            reduction += 0.18
+            reason_codes.append("progress_window_nearly_closed")
+        elif window_tail_h <= 0.75:
+            reduction += 0.12
+            reason_codes.append("progress_window_closing")
+        elif phase == "in_window" and window_tail_h <= 1.50:
+            reduction += 0.06
+            reason_codes.append("progress_window_late")
+
+    if hours_to_peak is not None:
+        peak_offset_h = float(hours_to_peak)
+        if peak_offset_h <= 0.0:
+            reduction += 0.10
+            reason_codes.append("progress_past_modeled_peak")
+        elif peak_offset_h <= 0.35:
+            reduction += 0.06
+            reason_codes.append("progress_at_modeled_peak")
+
+    if modeled_headroom_c is not None:
+        headroom = max(0.0, float(modeled_headroom_c))
+        if headroom <= 0.15:
+            reduction += 0.22
+            reason_codes.append("progress_headroom_exhausted")
+        elif headroom <= 0.40:
+            reduction += 0.18
+            reason_codes.append("progress_headroom_low")
+        elif headroom <= 0.75:
+            reduction += 0.10
+            reason_codes.append("progress_headroom_limited")
+
+    if plateau_hold_state in {"holding", "sustained"}:
+        reduction += 0.08
+        reason_codes.append("progress_near_peak_plateau")
+
+    if observed_peak_age_h is not None:
+        age = max(0.0, float(observed_peak_age_h))
+        if age >= 1.0:
+            reduction += 0.16
+            reason_codes.append("progress_obs_peak_aging")
+        elif age >= 0.5:
+            reduction += 0.08
+            reason_codes.append("progress_obs_peak_recent")
+
+    if reports_since_observed_peak is not None:
+        reports = max(0.0, float(reports_since_observed_peak))
+        if reports >= 3.0:
+            reduction += 0.10
+            reason_codes.append("progress_three_reports_since_high")
+        elif reports >= 2.0:
+            reduction += 0.06
+            reason_codes.append("progress_two_reports_since_high")
+
+    if latest_gap_below_observed_c is not None:
+        latest_gap = max(0.0, float(latest_gap_below_observed_c))
+        if latest_gap >= 0.35:
+            reduction += 0.14
+            reason_codes.append("progress_latest_below_high")
+        elif latest_gap >= 0.15:
+            reduction += 0.08
+            reason_codes.append("progress_latest_off_high")
+
+    if temp_trend_c <= -0.12:
+        reduction += 0.12
+        reason_codes.append("progress_negative_trend")
+    elif temp_trend_c <= 0.05:
+        reduction += 0.06
+        reason_codes.append("progress_flat_trend")
+
+    if temp_bias_c <= -0.10:
+        reduction += 0.04
+
+    reduction *= {
+        "near_window": 0.70,
+        "in_window": 1.00,
+        "post": 1.12,
+    }.get(phase, 1.0)
+
+    if second_peak_potential in {"moderate", "high"} or multi_peak_state == "likely":
+        reduction *= 0.35
+    elif second_peak_potential == "weak" or multi_peak_state == "possible":
+        reduction *= 0.60
+    elif short_term_state == "reaccelerating" and (
+        modeled_headroom_c is None or float(modeled_headroom_c) > 0.60
+    ):
+        reduction *= 0.70
+
+    if daily_peak_state == "locked":
+        reduction *= 0.55
+
+    if reduction <= 0.0:
+        return 0.0, []
+    return -round(min(0.55, reduction), 2), reason_codes
+
+
 def _spread_from_state(
     *,
     daily_peak_state: str,
@@ -184,8 +314,24 @@ def _spread_from_state(
                 spread -= 0.04
 
     if daily_peak_state == "locked":
-        spread = min(spread, 0.45)
-    return _clamp(spread, 0.30, 2.40)
+        spread = min(spread, 0.18)
+    elif daily_peak_state == "lean_locked":
+        spread = min(spread, 0.34)
+    return _clamp(spread, 0.18, 2.40)
+
+
+def _shift_local_time_text(value: str, shift_h: float) -> str:
+    text = str(value or "").strip()
+    if not text or abs(float(shift_h or 0.0)) < 0.01:
+        return text
+    try:
+        dt = datetime.fromisoformat(text)
+    except Exception:
+        return text
+    shifted = dt + timedelta(hours=float(shift_h))
+    if shifted.second == 0 and shifted.microsecond == 0:
+        return shifted.isoformat(timespec="minutes")
+    return shifted.isoformat()
 
 
 def build_weather_posterior_core(
@@ -197,6 +343,9 @@ def build_weather_posterior_core(
     feat = posterior_feature_vector if isinstance(posterior_feature_vector, dict) else {}
 
     obs = dict(raw.get("observations") or {})
+    forecast = dict(raw.get("forecast") or {})
+    forecast_meta = dict(forecast.get("meta") or {})
+    station_icao = str(forecast_meta.get("station") or "").upper()
     window = dict(raw.get("window") or {})
     primary_window = dict(window.get("primary") or {})
     calc_window = dict(window.get("calc") or {})
@@ -221,12 +370,23 @@ def build_weather_posterior_core(
     if modeled_peak_c is None:
         modeled_peak_c = _safe_float(primary_window.get("peak_temp_c"))
 
+    phase = str(time_phase.get("phase") or "")
     hours_to_peak = _safe_float(time_phase.get("hours_to_peak"))
     hours_to_window_end = _safe_float(time_phase.get("hours_to_window_end"))
+    analysis_window_mode = str(
+        time_phase.get("analysis_window_mode")
+        or ((raw.get("source") or {}).get("analysis_window_mode"))
+        or ""
+    )
     daily_peak_state = str(peak_state.get("daily_peak_state") or "open")
     short_term_state = str(peak_state.get("short_term_state") or "holding")
     second_peak_potential = str(peak_state.get("second_peak_potential") or "none")
     plateau_hold_state = str(peak_state.get("plateau_hold_state") or "none")
+    latest_gap_below_observed_c = _safe_float(obs_state.get("latest_gap_below_observed_c"))
+    observed_progress_anchor_c = _safe_float(obs_state.get("observed_progress_anchor_c"))
+    modeled_headroom_c = _safe_float(obs_state.get("modeled_headroom_c"))
+    observed_peak_age_h = _safe_float(obs_state.get("time_since_observed_peak_h"))
+    reports_since_observed_peak = _safe_float(obs_state.get("reports_since_observed_peak"))
 
     temp_trend_c = _safe_float(obs_state.get("temp_trend_effective_c"))
     if temp_trend_c is None:
@@ -365,19 +525,74 @@ def build_weather_posterior_core(
         alignment_score=ensemble_alignment_score,
         observed_path_locked=ensemble_observed_path_locked,
     )
-    spread_c = _clamp(spread_c + live_alignment_spread_adjustment, 0.30, 2.40)
+    progress_spread_adjustment, progress_reason_codes = _progress_spread_adjustment(
+        phase=phase,
+        daily_peak_state=daily_peak_state,
+        short_term_state=short_term_state,
+        second_peak_potential=second_peak_potential,
+        multi_peak_state=multi_peak_state,
+        plateau_hold_state=plateau_hold_state,
+        analysis_window_mode=analysis_window_mode,
+        hours_to_peak=hours_to_peak,
+        hours_to_window_end=hours_to_window_end,
+        modeled_headroom_c=modeled_headroom_c,
+        observed_peak_age_h=observed_peak_age_h,
+        reports_since_observed_peak=reports_since_observed_peak,
+        latest_gap_below_observed_c=latest_gap_below_observed_c,
+        temp_trend_c=temp_trend_c,
+        temp_bias_c=temp_bias_c,
+    )
+    min_spread_floor = 0.18 if daily_peak_state == "locked" else (
+        0.24 if phase in {"in_window", "post"} else 0.30
+    )
+    spread_c = _clamp(
+        spread_c + live_alignment_spread_adjustment + progress_spread_adjustment,
+        min_spread_floor,
+        2.40,
+    )
     if live_alignment_spread_adjustment < 0.0 and ensemble_alignment_confidence == "high" and ensemble_observed_path_locked:
         reason_codes.append("ensemble_path_alignment_locked")
     elif live_alignment_spread_adjustment < 0.0 and ensemble_alignment_confidence in {"high", "partial"} and ensemble_alignment_match_state in {"exact", "path"}:
         reason_codes.append("ensemble_path_live_confirmed")
+    if progress_spread_adjustment < 0.0:
+        reason_codes.extend(progress_reason_codes)
+
+    baseline_median_c = float(median_c)
+    baseline_spread_c = float(spread_c)
+    regime_detection = detect_station_regimes(raw)
+    regime_adjustment = apply_regime_effects(
+        station_icao=station_icao,
+        baseline_posterior={
+            "median_c": baseline_median_c,
+            "spread_c": baseline_spread_c,
+            "warm_tail_boost": 0.0,
+            "lower_tail_lift_c": 0.0,
+            "timing_shift_h": 0.0,
+        },
+        active_regimes=list(regime_detection.get("active_regimes") or []),
+        raw_state=raw,
+    )
+    adjusted_distribution = dict(regime_adjustment.get("distribution") or {})
+    median_c = float(adjusted_distribution.get("median_c") or median_c)
+    spread_c = float(adjusted_distribution.get("spread_c") or spread_c)
+    warm_tail_boost = float(adjusted_distribution.get("warm_tail_boost") or 0.0)
+    lower_tail_lift_c = float(adjusted_distribution.get("lower_tail_lift_c") or 0.0)
+    timing_shift_h = float(adjusted_distribution.get("timing_shift_h") or 0.0)
+    if floor_c is not None:
+        median_c = max(median_c, floor_c)
+    if daily_peak_state == "locked" and observed_max_temp_c is not None:
+        median_c = min(median_c, observed_max_temp_c + 0.10)
+    elif daily_peak_state == "lean_locked" and observed_max_temp_c is not None:
+        median_c = min(median_c, observed_max_temp_c + 0.40)
+    reason_codes.extend(list(regime_adjustment.get("reason_codes") or []))
 
     quantile_values = _ensure_monotonic(
         [
-            median_c - 1.25 * spread_c,
-            median_c - 0.65 * spread_c,
+            median_c - 1.15 * spread_c + lower_tail_lift_c,
+            median_c - 0.55 * spread_c + 0.65 * lower_tail_lift_c,
             median_c,
-            median_c + 0.65 * spread_c,
-            median_c + 1.25 * spread_c,
+            median_c + (0.72 + warm_tail_boost) * spread_c,
+            median_c + (1.28 + warm_tail_boost) * spread_c,
         ],
         floor=floor_c,
     )
@@ -448,6 +663,7 @@ def build_weather_posterior_core(
     ):
         best_time_local = str(track_state.get("main_track_closest_time_local") or "")
         timing_source = "track_eta"
+    best_time_local = _shift_local_time_text(best_time_local, timing_shift_h)
 
     timing_confidence = "medium"
     if daily_peak_state == "locked":
@@ -472,6 +688,11 @@ def build_weather_posterior_core(
             "ensemble_dominant_prob": ensemble_dominant_prob,
             "ensemble_observed_path": ensemble_observed_path,
             "ensemble_alignment_confidence": ensemble_alignment_confidence,
+            "baseline_posterior_median_c": round(baseline_median_c, 2),
+            "baseline_spread_c": round(baseline_spread_c, 2),
+            "regime_median_shift_c": round(median_c - baseline_median_c, 2),
+            "regime_lower_tail_lift_c": round(lower_tail_lift_c, 2),
+            "regime_warm_tail_boost": round(warm_tail_boost, 2),
         },
         "quantiles": {
             "p10_c": p10,
@@ -483,6 +704,22 @@ def build_weather_posterior_core(
         "range_hint": {
             "display": {"lo_c": p10, "hi_c": p90},
             "core": {"lo_c": p25, "hi_c": p75},
+        },
+        "progress": {
+            "phase": phase,
+            "analysis_window_mode": analysis_window_mode,
+            "hours_to_peak": round(hours_to_peak, 2) if hours_to_peak is not None else None,
+            "hours_to_window_end": round(hours_to_window_end, 2) if hours_to_window_end is not None else None,
+            "daily_peak_state": daily_peak_state,
+            "short_term_state": short_term_state,
+            "second_peak_potential": second_peak_potential,
+            "multi_peak_state": multi_peak_state,
+            "observed_anchor_c": observed_progress_anchor_c,
+            "modeled_headroom_c": round(modeled_headroom_c, 2) if modeled_headroom_c is not None else None,
+            "observed_peak_age_h": round(observed_peak_age_h, 2) if observed_peak_age_h is not None else None,
+            "reports_since_observed_peak": int(reports_since_observed_peak) if reports_since_observed_peak is not None else None,
+            "latest_gap_below_observed_c": round(latest_gap_below_observed_c, 2) if latest_gap_below_observed_c is not None else None,
+            "progress_spread_adjustment_c": round(progress_spread_adjustment, 2),
         },
         "event_probs": {
             "new_high_next_60m": round(_clamp(_logistic(new_high_score), 0.02, 0.98), 3),
@@ -499,6 +736,11 @@ def build_weather_posterior_core(
         "raw_scores": {
             "new_high_score": round(new_high_score, 3),
             "lock_score": round(lock_score, 3),
+        },
+        "regimes": {
+            "station": station_icao,
+            "profile": dict(regime_adjustment.get("profile") or regime_detection.get("profile") or {}),
+            "active_regimes": list(regime_adjustment.get("applied_regimes") or []),
         },
         "reason_codes": sorted(set(reason_codes)),
     }

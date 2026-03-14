@@ -81,7 +81,7 @@ def apply_historical_reference(
     disp_lo: float,
     disp_hi: float,
 ) -> tuple[float, float, float, float, dict[str, Any] | None]:
-    return blend_historical_range(
+    _, _, _, _, historical_blend = blend_historical_range(
         metar_diag=metar_diag,
         phase_now=phase_now,
         compact_settled_mode=compact_settled_mode,
@@ -90,6 +90,15 @@ def apply_historical_reference(
         disp_lo=disp_lo,
         disp_hi=disp_hi,
     )
+    if isinstance(historical_blend, dict):
+        historical_blend = {
+            **historical_blend,
+            "applied": False,
+            "advisory_only": True,
+        }
+    # Final /look ranges now come from posterior quantiles. Historical analogs
+    # remain available as advisory context only, not as direct range patches.
+    return core_lo, core_hi, disp_lo, disp_hi, historical_blend
 
 
 def build_peak_historical_reference(

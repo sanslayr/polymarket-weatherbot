@@ -175,5 +175,8 @@ def build_canonical_raw_state(
         },
         "source": {
             "post_focus_window_active": bool(metar_diag.get("post_focus_window_active")),
+            "analysis_window_mode": str(metar_diag.get("analysis_window_mode") or ""),
+            "analysis_window_override_active": bool(metar_diag.get("analysis_window_override_active")),
+            "analysis_window_reason_codes": list(metar_diag.get("analysis_window_reason_codes") or []),
         },
     }

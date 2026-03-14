@@ -1,787 +1,924 @@
 # Posterior Learning Plan
 
-Last updated: 2026-03-13
-Status: Draft
+Last updated: 2026-03-14
+Status: Working design
 
-## 1. 目标
+## 1. 文档目标
 
-本文件定义 weather posterior 的离线学习/在线校正方案，重点解决：
+本文件替代旧版 posterior learning 草案，统一回答 4 个问题：
 
-1. 如何把数值预报分析、实况状态和两者偏离结构化为同一套 factor system
-2. 如何以日级节奏训练/评估/发布校正参数，而不是在线实时重训
-3. 如何让 learning 只校正 posterior，不反向污染 weather core 和 runtime 主链路
+1. 当前 runtime posterior 架构已经到了哪一步
+2. 当前架构还存在哪些关键问题
+3. 它是否已经支持 posterior 的持续学习
+4. 接下来应该沿什么方法论继续推进，包括经典统计路线、ML 路线和更偏元方法的启发
 
-本方案默认：
+这份文档不再把 posterior learning 仅仅描述成“离线训练一个模型”，而是把它视为一个完整系统：
 
-- runtime repo 继续负责在线推理
-- research/training/backtest 可以放在独立 research repo
-- runtime 只消费 artifact
+- runtime 负责稳定推理
+- logging 负责留样
+- labeling 负责形成日级真值
+- research 负责训练和评估
+- artifact 负责发布、回滚和灰度
+- guardrail 负责保证线上安全
 
-## 2. 设计原则
+## 2. 执行摘要
 
-### 2.1 单向依赖
+### 2.1 当前结论
 
-- `canonical_raw_state` 只承载原始结构化状态，不承载训练逻辑
-- `posterior_factor_bundle` 只承载特征表达，不承载 label 和模型参数
-- `posterior_learning_artifact` 只承载训练产物，不承载 runtime 推理代码
-- `weather_posterior_core` 继续做物理/机制锚定
-- learning 层只在 calibration hook 里做中心、区间、概率校正
+当前 weather posterior 已经不再只是一个“把模型峰值换成分位数”的包装层。
+它已经形成了可扩展的 runtime 骨架：
 
-### 2.2 语义先于数据源
+- `canonical_raw_state`
+- `posterior_feature_vector`
+- `quality_snapshot`
+- `weather_posterior_core`
+- `weather_posterior_calibration`
 
-特征定义按物理语义组织，而不是按 provider/METAR/forecast source 命名。
+并且近窗收束已经从 snapshot 兜底，部分前移到了 posterior 自身。
 
-反例：
+### 2.2 当前最大现实
 
-- `metar_temp_bias`
-- `ecmwf_cloud_cover`
-- `openmeteo_peak_temp`
+当前系统已经“支持插入学习”，但还没有“持续学习闭环”。
 
-推荐：
+更准确地说：
 
-- `obs_thermal_progress.latest_temp_c`
-- `cloud_radiation.cloud_suppression_expected`
-- `obs_model_innovation.peak_temp_resid_c`
+- 已有可学习 posterior 的 runtime 边界
+- 还没有完整的样本、标签、artifact、发布、监控链路
 
-### 2.3 通道化表示优于多份平行 schema
+所以今天它更像：
 
-不建议长期使用“同名三视图”直接展开成三套平行字段。
-
-更优表示：
-
-- `context`
-- `live`
-- `innovation`
-- `quality`
-
-其中：
-
-- `context` = 慢变量 + 数值预报/环流/边界层预期
-- `live` = 当前实况与已观测进度
-- `innovation` = `live - E[live | context]` 的条件残差，而不是简单差值
-- `quality` = 数据可信度、缺失、量化、cadence、fallback 等控制变量
-
-### 2.4 版本、口径、缺失必须显式化
-
-learning 方案不能依赖隐式默认值。
-
-所有 artifact 都必须显式带：
-
-- `schema_version`
-- `feature_manifest_version`
-- `normalization_version`
-- `label_policy_version`
-- `training_window`
-- `artifact_built_at`
-
-## 3. 进一步的去耦化建议
-
-## 3.1 代码层去耦
-
-建议新增并保持边界清晰的模块：
-
-- `posterior_factor_service.py`
-  - 从 `canonical_raw_state` 产出统一 factor bundle
-- `posterior_training_log_service.py`
-  - 负责在线样本落盘，不做训练
-- `posterior_training_dataset_service.py`
-  - 负责 `bronze + labels -> silver`
-- `posterior_daily_trainer.py`
-  - 负责日级训练与评估
-- `posterior_artifact_registry.py`
-  - 负责 artifact manifest 与 promote/fallback
-- `posterior_case_index_service.py`
-  - 负责历史案例索引与检索
-
-不建议：
-
-- 把训练特征拼装继续塞进 `analysis_snapshot_service.py`
-- 把训练参数直接混进 `config/tmax_learning_params.json`
-- 把历史案例检索逻辑塞进 `report_render_service.py`
-
-## 3.2 数据层去耦
-
-建议把以下实体拆开存储：
-
-- runtime snapshot sample
-- final day label
-- training view
-- published artifact
-- case index
-
-原因：
-
-- snapshot 是 append-only，不能被 label 回写污染
-- label 有自然滞后，必须和采样分离
-- training view 是可重建中间层，不应成为唯一真相
-- artifact 是发布物，不应和原始样本混放
-
-## 3.3 语义层去耦
-
-建议把 factor 分成 8 个 block：
-
-1. `station_background`
-2. `synoptic_forcing`
-3. `boundary_layer_support`
-4. `cloud_radiation`
-5. `obs_thermal_progress`
-6. `obs_model_innovation`
-7. `peak_shape`
-8. `quality`
-
-每个 block 内再走 `context/live/innovation/quality` 通道；并非每个 block 都必须 4 通道全满，但语义框架保持一致。
-
-## 4. 进一步的结构化/标准化建议
-
-## 4.1 factor registry 先于 extractor
-
-建议先维护一份显式 factor registry，而不是让字段散落在 extractor 代码里。
-
-registry 至少记录：
-
-- `factor_name`
-- `block`
-- `channel`
-- `dtype`
-- `unit`
-- `allowed_range`
-- `enum_vocab`
-- `missing_policy`
-- `default_imputation`
-- `normalization_policy`
-- `used_for_training`
-- `used_for_case_retrieval`
-
-## 4.2 缺失与质量不做隐式填补
-
-每个连续特征建议同时带三类信息：
-
-- `value`
-- `is_missing`
-- `source_confidence`
-
-原因：
-
-- `0.0` 不应和“缺失后填 0”混淆
-- 案例匹配时，质量维度通常应作为 mask 或弱权重，而不是主距离轴
-
-## 4.3 数值标准化规则
-
-建议统一：
-
-- 温度全部存 `C`
-- 风速全部存 `kt`
-- 时间差全部存 `hours`
-- 概率全部存 `[0, 1]`
-- 覆盖/效率类全部存 `[0, 1]`
-- 离散枚举统一在 registry 中维护词表
-
-连续变量建议记录：
-
-- raw value
-- clipped value
-- normalized value
-
-runtime 侧只需要 raw value；research 侧可生成 clipped/normalized 视图。
-
-## 4.4 创新量不直接用 raw diff
-
-`innovation` 建议优先使用条件残差：
-
-`innovation = realized - expected_given_context`
+- `learnable posterior runtime`
 
 而不是：
 
-`innovation = obs - model`
+- `continually learning posterior system`
 
-因为后者会把 station background、季节位相、已知 synoptic forcing 重复计入，难以去耦。
+### 2.3 最重要的哲学判断
 
-第一版可先用简化近似：
+posterior learning 不应试图“学习天气本身”，而应学习：
 
-- global/station-family 的 expectation baseline
-- 随后升级为 `E[live | context]`
+- 在既定物理路径下，误差如何演化
+- 在不同 phase / station family / regime family 下，区间如何收缩或保留尾部
+- 在高质量实况接近 resolution 时，何时应快速收敛
 
-## 4.5 训练特征与检索特征分开标记
+换句话说：
 
-不是所有训练特征都适合做相似案例检索。
+- weather core 负责解释世界
+- posterior 负责量化不确定性
+- learning 负责校正 posterior，而不是篡位成为新的天气主链
 
-建议：
+## 3. 当前 runtime posterior 结构
 
-- `quality` block 默认不参与主距离，只参与 mask/权重
-- `obs_model_innovation` 在早盘 case retrieval 中默认关闭
-- `station_background + synoptic_forcing + boundary_layer_support + cloud_radiation` 作为 forecast-stage 主检索轴
-- 近窗阶段再追加 `obs_thermal_progress + innovation + peak_shape`
+## 3.1 当前主链
 
-## 5. 统一 factor schema 建议
+当前运行时主链已经是：
 
-建议新增 schema：`posterior-factor-bundle.v1`
+1. `canonical_raw_state_service.py`
+2. `posterior_feature_service.py`
+3. `quality_snapshot_service.py`
+4. `weather_posterior_core.py`
+5. `weather_posterior_calibration.py`
+6. `analysis_snapshot_service.py`
 
-顶层结构建议：
+其中：
 
-```json
-{
-  "schema_version": "posterior-factor-bundle.v1",
-  "meta": {},
-  "context": {},
-  "live": {},
-  "innovation": {},
-  "quality": {},
-  "masks": {},
-  "registry_ref": {}
-}
-```
+- `weather_posterior_core` 负责物理和机制锚定
+- `weather_posterior_calibration` 负责质量修正、进度收缩、尾部约束
+- `analysis_snapshot_service` 负责下游展示与 guardrail merge
 
-## 5.1 `meta`
+## 3.2 当前 posterior 已经做了什么
 
-建议包含：
+当前 posterior 已具备以下能力：
 
-- `station_icao`
-- `station_family`
-- `date_local`
-- `sample_time_local`
+1. 中心锚定
+   - `modeled_peak`
+   - `observed_max`
+   - `daily_peak_state`
+   - `short_term_state`
+   - `ensemble alignment`
+   - `regime adjustment`
+2. 不确定性拆层
+   - `heuristic spread`
+   - `quality widening`
+   - `progress shrink`
+3. 事件概率
+   - `P(new_high_next_60m)`
+   - `P(lock_by_window_end)`
+   - `P(exceed_modeled_peak)`
+4. 上尾裁决
+   - 用 observed anchor、event probabilities、phase 和 headroom 限制暖尾
+
+当前 runtime 逻辑已可概括为：
+
+- `spread_final = spread_core * quality_spread_multiplier * progress_spread_multiplier`
+- `upper_tail <= observed_anchor + dynamic_allowance`
+
+## 3.3 当前近窗收束依赖的特征
+
+当前 runtime 已把以下变量明确接入 posterior：
+
+- `modeled_headroom_c`
+- `time_since_observed_peak_h`
+- `reports_since_observed_peak`
+- `latest_gap_below_observed_c`
 - `hours_to_peak`
 - `hours_to_window_end`
-- `forecast_runtime`
-- `provider_bundle`
-- `canonical_raw_state_version`
-- `extractor_version`
+- `analysis_window_mode`
 
-## 5.2 `context`
+这意味着 posterior 已经开始从“只看状态标签”升级到“直接看实况进度”。
 
-建议从 forecast/synoptic/3D/boundary-layer 侧提取：
+## 4. 当前架构 review
 
-- `station_background.diurnal_swing_class`
-- `station_background.late_surge_risk`
-- `synoptic_forcing.h500_tmax_support_score`
-- `synoptic_forcing.thermal_advection_score`
-- `synoptic_forcing.track_proximity_score`
-- `boundary_layer_support.surface_coupling_score`
-- `boundary_layer_support.cap_suppression_score`
-- `cloud_radiation.cloud_suppression_expected`
-- `cloud_radiation.radiation_support_expected`
-- `peak_shape.model_peak_width_h`
-- `peak_shape.model_peak_sharpness`
+## 4.1 已做对的地方
 
-## 5.3 `live`
+### A. 边界已经成型
 
-建议从当前实况与 intra-day progress 提取：
+最值得肯定的是，posterior 已经从 render 层分离出来。
+这件事比单个算法细节更重要，因为它决定了未来是否能接训练、评估和 artifact 发布。
 
-- `obs_thermal_progress.latest_temp_c`
-- `obs_thermal_progress.observed_max_temp_c`
-- `obs_thermal_progress.temp_trend_cph`
-- `obs_thermal_progress.temp_accel_cph2`
-- `obs_thermal_progress.dewpoint_trend_cph`
-- `cloud_radiation.cloud_cover_realized`
-- `cloud_radiation.radiation_eff_realized`
-- `peak_shape.daily_peak_state_code`
-- `peak_shape.short_term_state_code`
-- `peak_shape.second_peak_potential_code`
+### B. 已经具备多层后验结构
 
-## 5.4 `innovation`
+当前 posterior 不是一个单点函数，而是：
 
-建议保留真正用于校正的创新轴：
+- core
+- quality
+- progress
+- tail cap
 
-- `obs_model_innovation.latest_temp_resid_c`
-- `obs_model_innovation.peak_temp_resid_c`
-- `obs_model_innovation.cloud_suppression_resid`
-- `obs_model_innovation.radiation_support_resid`
-- `obs_model_innovation.peak_timing_resid_h`
-- `obs_model_innovation.path_alignment_score`
-- `obs_model_innovation.transport_realization_resid`
+这比“一个模型直接吐区间”更适合长期演化，因为每层都可以单独替换或单独学习。
 
-## 5.5 `quality`
+### C. 已经尊重物理路径
 
-建议：
+当前设计没有把 learning 直接放在最上游覆盖天气解释链，而是保留：
 
-- `quality.provider_score`
-- `quality.coverage_score`
-- `quality.sounding_score`
-- `quality.obs_score`
-- `quality.metar_quantized_flag`
-- `quality.provider_fallback_flag`
-- `quality.missing_layers_count`
-- `quality.metar_recent_interval_min`
+- phase decision
+- shape analysis
+- synoptic / boundary-layer reasoning
+- posterior 只做量化校正
 
-## 5.6 `masks`
+这条原则非常重要，应该继续保持。
 
-建议保存：
+### D. 已开始显式追踪近窗进度
 
-- `available_channels`
-- `block_present_mask`
-- `feature_missing_mask`
-- `safe_for_case_retrieval_mask`
+区间何时该快速收束，本质不是单一 `locked/open` 标签，而是一个连续进度问题。
+现在 runtime 已经开始显式建模这个进度，这是走向真正 posterior 的必要一步。
 
-## 6. 数值预报板块如何提取为同一套向量
+## 4.2 当前关键问题
 
-答案是：应该，而且必须。
+### A. 最终区间真相仍然分裂
 
-数值预报板块不应只输出 narrative 诊断，还应映射到与实况同语义的 factor axes。推荐做法：
+当前最终展示区间仍经过 `analysis_snapshot_service.py` 的 merge / path-cap。
+这意味着系统里仍存在两套区间影响力：
 
-- forecast 端输出“预期值/预期状态”
-- obs 端输出“已实现值/已实现状态”
-- innovation 端输出“条件残差”
+- posterior quantiles
+- downstream guardrail merge
 
-例如：
+这在工程上是合理的，但在学习上有一个隐患：
 
-- 预报侧：`thermal_advection_score = 0.62`
-- 实况侧：`transport_realization_score = 0.18`
-- 创新侧：`transport_realization_resid = -0.44`
+- 训练时到底应该学习 posterior 原输出
+- 还是学习最终展示输出
+- 还是同时记录两者
 
-这样：
+如果这个问题不明确，后续 attribution 和 error analysis 会变得混乱。
 
-- 训练模型能知道“预报说会暖，但实况没兑现”
-- 相似案例检索也能同时做 forecast-stage 和 live-stage 两种匹配
+### B. 持续学习需要的 offline 实体还没有真正存在
 
-## 7. 训练数据存储设计
+当前文档里已经提出这些模块：
 
-不建议直接用单一 JSONL 作为长期主存。推荐：
-
-- debug/审阅可附加 JSONL
-- 正式训练主存用 Parquet
-- 查询/构建训练集用 DuckDB
-
-## 7.1 Bronze: snapshot samples
-
-用途：append-only 原始训练样本日志。
-
-建议分区：
-
-- `dataset=posterior_samples/station_icao=XXXX/date_local=YYYY-MM-DD/*.parquet`
-
-主键：
-
-- `sample_id = station_icao + date_local + sample_time_local + extractor_version`
-
-字段：
-
-- `sample_id`
-- `station_icao`
-- `date_local`
-- `sample_time_local`
-- `hours_to_peak`
-- `hours_to_window_end`
-- `sampling_reason`
-- `factor_bundle`
-- `baseline_posterior`
-- `raw_snapshot_ref`
-- `schema_version`
-- `extractor_version`
-
-更新策略：
-
-- 仅 append
-- 不回写 label
-- 不做 inplace 修改
-
-## 7.2 Labels: final day outcome table
-
-用途：本地日结束后的最终真值。
-
-建议分区：
-
-- `dataset=posterior_labels/date_local=YYYY-MM-DD/*.parquet`
-
-主键：
-
-- `station_icao + date_local + label_policy_version`
-
-字段：
-
-- `station_icao`
-- `date_local`
-- `final_tmax_c`
-- `final_tmax_lo_c`
-- `final_tmax_hi_c`
-- `final_peak_time_local`
-- `late_surge_flag`
-- `lock_by_window_end_flag`
-- `exceed_modeled_peak_flag`
-- `label_policy_version`
-- `labeled_at_utc`
-
-## 7.3 Silver: training view
-
-用途：研究/训练直接消费的数据视图，可每日重建。
-
-字段：
-
-- `meta.*`
-- `context.*`
-- `live.*`
-- `innovation.*`
-- `quality.*`
-- `target.delta_median_c`
-- `target.headroom_c`
-- `target.abs_residual_c`
-- `target.late_surge_flag`
-- `target.lock_flag`
-- `target.exceed_modeled_peak_flag`
-- `sample_weight`
-
-原则：
-
-- silver 可重建
-- 不作为唯一真相
-- 任何标准化/clip/residualization 版本变化都要重建
-
-## 7.4 Gold: published artifacts
-
-用途：runtime 消费的稳定发布物。
-
-建议内容：
-
-- `posterior_learning_manifest.json`
-- `posterior_center_model.*`
-- `posterior_spread_calibration.*`
-- `posterior_event_calibration.*`
-- `posterior_case_index.parquet`
-- `training_metrics.json`
-
-manifest 应包含：
-
-- artifact 版本
-- 训练窗口
-- station 覆盖
-- 支持的 schema versions
-- fallback artifact
-- promotion 时间
-
-## 8. 日级样本更新策略
-
-## 8.1 采样时机
-
-不建议每分钟落样本。建议 anchor + event-driven 混合策略：
-
-- routine METAR
-- SPECI
-- `hours_to_peak` 跨关键阈值
-- `daily_peak_state` 变化
-- `short_term_state` 变化
-- 市场异动或关键标签变化
-
-采样原因应显式记录在 `sampling_reason`。
-
-## 8.2 label 回填
-
-在 local day 明确结束后回填。
-
-建议：
-
-- 正常情况在次日固定时间回填
-- 若市场/报文仍不稳定，可延迟回填
-- label 与 bronze 分离，不回写原样本
-
-## 8.3 日级训练窗口
-
-建议滚动窗口：
-
-- 默认近 120 天
-- 最近 30 天加权
-- 同季节窗样本加权
-- 极端天气型可额外放大样本权重
-
-## 9. 训练算法设计
-
-## 9.1 学习目标
-
-不直接让模型重建天气全链路，只学习 posterior 的校正量。
-
-建议四个目标头：
-
-1. 中心校正
-   - `delta_median_c = final_tmax_c - baseline_posterior_p50_c`
-2. 剩余上冲空间
-   - `headroom_c = final_tmax_c - max(observed_max_temp_c, latest_temp_c)`
-3. 区间宽度/残差尺度
-   - `abs_residual_c`
-4. 事件概率
-   - `late_surge_flag`
-   - `lock_by_window_end_flag`
-   - `exceed_modeled_peak_flag`
-
-## 9.2 特征预处理
-
-建议顺序：
-
-1. block 内 clip
-2. block 内标准化
-3. 枚举 one-hot / ordinal 编码
-4. `innovation` 构建
-5. blockwise residualization
-6. 生成训练视图
-
-blockwise residualization 建议顺序：
-
-1. `station_background`
-2. `synoptic_forcing`
-3. `boundary_layer_support`
-4. `cloud_radiation`
-5. `obs_thermal_progress`
-6. `obs_model_innovation`
-7. `peak_shape`
-8. `quality`
-
-目的不是做完全数学正交，而是减少重复解释量。
-
-## 9.3 模型栈建议
-
-### A. 中心校正模型
-
-第一版建议：
-
-- `HuberRegressor` 或 `ElasticNet`
-
-输入：
-
-- `context + live + innovation`
-
-输出：
-
-- `delta_median_c`
-
-原因：
-
-- 稳
-- 可解释
-- 对异常天不太脆弱
-
-### B. 区间宽度校正
-
-第一版建议：
-
-- 分位回归或 split-conformal calibration
-
-输入：
-
-- `context + innovation + quality`
-
-输出：
-
-- `spread_multiplier`
-- 或 `residual_quantiles`
-
-建议优先：
-
-- 先保留当前 heuristic spread
-- learning 只学习 correction factor
-
-### C. 事件概率校正
-
-第一版建议：
-
-- `LogisticRegression`
-- 再叠 `Isotonic`/`Platt`
-
-输出：
-
-- `P(late_surge)`
-- `P(lock_by_window_end)`
-- `P(exceed_modeled_peak)`
-
-### D. 历史相似案例检索
-
-建议和监督模型并行，不混为一个黑箱：
-
-- forecast-stage retrieval
-- live-stage retrieval
-
-距离度量建议：
-
-- block-weighted Mahalanobis
-- 或 cosine + block weights
-
-默认不让 `quality` 主导距离，只做 mask/惩罚。
-
-## 9.4 层级回退链
-
-建议显式采用 shrinkage/fallback，而不是单站独立硬切：
-
-1. `station × regime × phase_bucket`
-2. `station_family × regime × phase_bucket`
-3. `station × phase_bucket`
-4. `regime × phase_bucket`
-5. `global × phase_bucket`
-6. `global`
-
-样本不足时：
-
-- 不做激进中心修正
-- 只放宽 spread
-- 概率向 0.5 收缩
-
-## 9.5 样本权重
-
-建议样本权重由以下因子组成：
-
-- recency weight
-- quality weight
-- phase relevance weight
-- rare-case bonus
-- station balance weight
-
-不建议让单一高频站点吞掉训练分布。
-
-## 10. 日级训练/评估/发布流程
-
-## 10.1 训练流程
-
-1. 收集当日 bronze samples
-2. 回填上一日 labels
-3. 重建 silver training view
-4. 训练 candidate models
-5. 做 rolling backtest
-6. 与当前 production artifact 比较
-7. 若通过门槛则 promote，否则保留旧版本
-
-## 10.2 评估指标
-
-主指标：
-
-- `MAE`
-- `Bias`
-- `p50 calibration`
-- `coverage@display_range`
-- `coverage@core_range`
-
-业务指标：
-
-- `warm_tail_overrate`
-- `rounded_top_overforecast_rate`
-- `late_surge_miss_rate`
-- `peak_lock_false_lock_rate`
-
-分组评估：
-
-- 按站点
-- 按 station family
-- 按 regime
-- 按 `hours_to_peak` bucket
-- 按 `daily_peak_state`
-
-## 10.3 promote gate
-
-建议 candidate 只有在同时满足以下条件时才发布：
-
-- 全局 `MAE` 不劣化
-- `late_surge_miss_rate` 不恶化到阈值外
-- display/core coverage 不明显变差
-- 至少 `N` 个核心站点分组未显著恶化
-
-若不满足：
-
-- 允许保留旧 artifact
-- 允许只发布某个子模块，如 spread calibration
-
-## 11. runtime 接入建议
-
-runtime 只读 artifact，不参与训练。
-
-建议接入点：
-
-- `weather_posterior_core.py`
-  - 保持物理锚定，不直接读 learning weights
-- `weather_posterior_calibration.py`
-  - 读取 center/spread/probability artifact 并应用
+- `posterior_factor_service.py`
+- `posterior_training_log_service.py`
+- `posterior_training_dataset_service.py`
+- `posterior_daily_trainer.py`
+- `posterior_artifact_registry.py`
 - `posterior_case_index_service.py`
-  - 在需要时返回相似案例摘要，但不干预 core
 
-建议新增配置：
+但当前代码里它们尚未落地。
 
-- `config/posterior_learning_manifest.json`
-- `config/posterior_learning_params.json`
+所以系统虽然有 learning 的插槽，却还没有 learning 的生产线。
 
-不要把 posterior learning 参数继续塞进：
+### C. calibration 还主要是硬编码
+
+当前：
+
+- quality widening 是公式
+- progress shrink 是公式
+- upper-tail allowance 是公式
+
+这对现在非常有帮助，但还不构成“在线可升级的 calibration artifact”。
+
+更直接地说：
+
+- 今天更新 posterior，主要靠改代码
+- 不是靠发布新 artifact
+
+### D. city-specific 差异还主要停留在上游 heuristics
+
+当前 station 差异主要通过这些途径间接进入 posterior：
+
+- station prior
+- phase decision
+- 少量 regime rule
+
+但 posterior 自身还没有真正形成：
+
+- station-family calibration
+- regime-family calibration
+- hierarchical shrinkage
+
+这会限制它对不同城市近窗行为差异的学习能力。
+
+### E. learning 参数边界还不够干净
+
+当前不少 heuristic runtime 参数仍放在：
 
 - `config/tmax_learning_params.json`
 
-原因是该文件目前更偏 heuristic runtime params，而不是学习 artifact registry。
+这会造成一个长期问题：
 
-## 12. 建议的 schema 草案
+- runtime heuristic params
+- report policy params
+- posterior learning params
 
-## 12.1 `posterior-factor-bundle.v1`
+容易混在一起。
 
-建议字段：
+一旦开始真正发布 learning artifact，这种混放会迅速变成维护风险。
 
-- `schema_version`
-- `meta`
-- `context`
-- `live`
-- `innovation`
-- `quality`
-- `masks`
-- `registry_ref`
+### F. 契约和 provenance 仍需更严格
 
-## 12.2 `posterior-training-sample.v1`
+持续学习真正怕的不是模型弱，而是：
 
-建议字段：
+- schema 漂移
+- 口径漂移
+- 训练标签和线上输出不一致
+- 线上版本不可追溯
 
-- `schema_version`
+因此 posterior 的每个训练样本、每个线上输出、每个 artifact，都必须更严格地记录：
+
+- schema version
+- extractor version
+- label policy version
+- runtime heuristic version
+- artifact version
+- fallback provenance
+
+## 5. 当前架构是否支持 posterior 持续学习
+
+## 5.1 结论
+
+结论分成两层：
+
+### 从架构可扩展性看
+
+支持。
+
+因为当前系统已经具备：
+
+- 原始状态层
+- feature 层
+- posterior core
+- calibration hook
+- snapshot 汇总层
+
+这正是学习后验所需的基本骨架。
+
+### 从系统闭环能力看
+
+还不支持。
+
+因为持续学习至少还缺：
+
+- append-only sample logging
+- 日终 label 回填
+- training dataset builder
+- artifact manifest / registry
+- promote / rollback / canary
+- drift monitor
+- online scorecard
+
+因此更准确的表述应是：
+
+- `架构支持持续学习`
+- `当前实现尚不具备持续学习运营能力`
+
+## 5.2 readiness matrix
+
+### 已具备
+
+- `canonical_raw_state`
+- `posterior_feature_vector`
+- `quality_snapshot`
+- `weather_posterior_core`
+- `weather_posterior_calibration`
+- `analysis_snapshot`
+- schema version 常量
+
+### 部分具备
+
+- station prior
+- regime patch
+- near-window progress-aware shrink
+- posterior downstream guardrail
+
+### 尚未具备
+
+- posterior sample log
+- final day label store
+- factor bundle registry
+- artifact registry
+- case index
+- promote gate
+- rollback policy
+- drift dashboard
+- per-phase calibration scorecard
+
+## 6. 目标系统：从可学习到可持续学习
+
+## 6.1 总体原则
+
+目标不是把 runtime 改成一个在线自训练系统。
+
+目标是：
+
+- runtime 稳定推理
+- offline 训练和评估
+- artifact 周期性发布
+- runtime 只读 artifact
+
+这是 weather posterior 这种高风险后验层更稳妥的路线。
+
+## 6.2 推荐系统分层
+
+### A. Runtime repo
+
+职责：
+
+- 构造原始状态
+- 提取 posterior feature
+- 生成 posterior
+- 记录样本
+- 加载 artifact
+- 执行 fallback
+
+### B. Research repo
+
+职责：
+
+- 构建训练视图
+- 回填 label
+- 训练 / 回测 / 评估
+- 产出 artifact
+- 发布 manifest
+
+### C. Artifact layer
+
+推荐产物：
+
+- `feature_registry`
+- `station_family_priors`
+- `regime_family_priors`
+- `center_model`
+- `spread_calibration`
+- `upper_tail_calibration`
+- `event_probability_calibration`
+- `case_index`
+- `manifest`
+
+## 6.3 runtime 必须记录哪些样本
+
+推荐 append-only 记录 posterior sample。
+
+每条样本至少包括：
+
 - `sample_id`
 - `station_icao`
 - `date_local`
 - `sample_time_local`
+- `phase`
+- `canonical_raw_state_ref`
+- `posterior_feature_vector`
+- `quality_snapshot`
+- `weather_posterior_core`
+- `weather_posterior`
+- `final_snapshot_ranges`
+- `range_truth_source`
 - `sampling_reason`
-- `factor_bundle_ref`
-- `baseline_posterior`
-- `hours_to_peak`
-- `hours_to_window_end`
-- `extractor_version`
+- `schema versions`
 
-## 12.3 `posterior-day-label.v1`
+## 6.4 sampling reason
 
-建议字段：
+建议显式记录采样原因，而不是只做固定 cadence 采样。
 
-- `schema_version`
-- `station_icao`
-- `date_local`
+例如：
+
+- phase transition
+- daily peak state change
+- second peak state change
+- posterior range material change
+- event probability material change
+- market anomaly
+- pre-resolution / near-resolution checkpoint
+
+## 6.5 日终 label
+
+label 需要与 sample 分离存储。
+
+建议 label 至少包括：
+
 - `final_tmax_c`
 - `final_tmax_lo_c`
 - `final_tmax_hi_c`
 - `final_peak_time_local`
-- `late_surge_flag`
 - `lock_flag`
+- `late_surge_flag`
+- `second_peak_realized_flag`
 - `label_policy_version`
 
-## 12.4 `posterior-learning-manifest.v1`
+## 7. learning 目标应如何拆解
 
-建议字段：
+posterior learning 不应是一体化黑箱。
 
-- `schema_version`
-- `artifact_version`
-- `training_window`
-- `feature_manifest_version`
-- `supported_factor_schema_versions`
-- `center_model_ref`
-- `spread_model_ref`
-- `event_model_ref`
-- `case_index_ref`
-- `fallback_artifact_version`
+推荐拆成 5 个头：
 
-## 13. 第一阶段落地顺序
+### 7.1 中心校正
 
-### Phase-1
+- `delta_median_c`
 
-1. 固化 `factor registry`
-2. 产出 `posterior-factor-bundle.v1`
-3. 落 bronze samples + labels
-4. 重建 silver training view
-5. 训练 `delta_median` + `spread calibration`
-6. 发布只读 artifact
-7. 在 `weather_posterior_calibration.py` 接入
+解释：
 
-### Phase-2
+- 在物理锚定之上，再学习中心偏移
 
-1. 引入条件残差型 `innovation`
-2. 引入 case index
-3. 引入 station-family / regime shrinkage
-4. 引入 event probability calibration
+### 7.2 进度条件化 spread 缩放
 
-## 14. 当前结论
+- `progress_spread_scale`
 
-最重要的不是立刻换复杂模型，而是先把以下三件事固定下来：
+解释：
 
-1. factor 语义本体
-2. 样本/标签/artifact 的分层存储
-3. learning 只校正 posterior，不替代 weather core
+- 学习“在这个 phase、这个实况进度下，区间该收多快”
 
-只要这三件事先稳住，后续从 heuristic calibration 升级到更强模型时，runtime 主链路不需要再被重构。
+### 7.3 上尾 allowance
+
+- `upper_tail_allowance_c`
+
+解释：
+
+- 不对称地学习暖尾应该保留多少空间
+
+### 7.4 事件概率校正
+
+- `P(new_high_next_60m)`
+- `P(lock_by_window_end)`
+- `P(exceed_modeled_peak)`
+
+解释：
+
+- 概率层要和 quantile 层相互一致，而不是彼此各算各的
+
+### 7.5 峰时刻校正
+
+- optional
+
+解释：
+
+- 这不是第一优先级，但可以作为后续扩展头
+
+## 8. 方法路线图
+
+## 8.1 第一阶段：经典统计后处理
+
+这是最推荐的先手路线。
+
+### 方法
+
+- EMOS / NGR
+- BMA
+- 分位回归
+- 动态模型平均
+- conformal wrapper
+
+### 为什么适合现在
+
+因为当前系统已经是：
+
+- 物理路径先行
+- posterior 校正后置
+
+而经典 weather post-processing 的核心哲学正是：
+
+- 不重建天气
+- 只校正后验分布
+
+### 推荐用途
+
+- `center_model`
+- `spread_calibration`
+- `event calibration`
+
+### 风险
+
+- 表达能力有限
+- station-specific 非线性关系可能不够
+
+## 8.2 第二阶段：分层 / mixture / regime-aware learning
+
+这是最贴当前业务形态的升级方向。
+
+### 方法
+
+- station-family calibration
+- regime-family calibration
+- hierarchical shrinkage
+- mixture-of-experts
+- dynamic model averaging
+
+### 哲学
+
+不是所有城市共用一个 posterior，也不是每个城市各训一套模型。
+
+更合理的中间道路是：
+
+- 共享全局先验
+- 在 family / regime 层做条件化校正
+- 在样本稀疏站点上做 shrinkage
+
+### 为什么 fit
+
+你当前系统已经天然有这些离散结构：
+
+- phase
+- station prior
+- regime detection
+- second peak / multi-peak states
+
+它们天然适合作为 mixture gate 或 hierarchical key。
+
+## 8.3 第三阶段：灵活 ML calibrator
+
+当样本和 artifact 体系成熟后，可再进入这一层。
+
+### 方法
+
+- gradient boosting / quantile boosting
+- random forest quantile regression
+- shallow MLP calibrator
+- deep ensemble calibrator
+
+### 适合做什么
+
+- 学 `delta_median`
+- 学 `spread_scale`
+- 学 `upper_tail_allowance`
+
+### 什么时候值得做
+
+当以下条件成立时：
+
+- sample logging 稳定
+- label 回填稳定
+- per-phase scorecard 稳定
+- family/regime 特征充分
+
+否则复杂模型会更像噪声放大器。
+
+## 8.4 第四阶段：更激进的神经网络式元方法
+
+这部分更偏“研究型启发”，不是当前第一优先级。
+
+### A. Deep Ensembles
+
+启发：
+
+- 用多个神经网络的分歧近似 epistemic uncertainty
+
+适合程度：
+
+- 中等
+
+适合原因：
+
+- 工程实现相对务实
+- 可以作为 learned calibrator 的强 baseline
+
+### B. Neural Processes
+
+启发：
+
+- 学一个跨任务的函数先验
+- 让新站点或新 regime 只用少量样本就能适配
+
+适合程度：
+
+- 中低，但很有启发
+
+适合原因：
+
+- weather posterior 天然是“小样本站点 + 跨站共享结构”的问题
+
+### C. MAML / meta-learning
+
+启发：
+
+- 不追求一个万能模型
+- 追求“容易快速微调”的初始模型
+
+适合程度：
+
+- 中低，但对 station family adaptation 很有思想价值
+
+### D. Continual-learning / EWC
+
+启发：
+
+- 新 regime 学进来时，不要把旧 regime 全忘掉
+
+适合程度：
+
+- 现在偏低
+- 如果未来走共享 neural calibrator，这会变重要
+
+### E. Permutation-invariant ensemble nets
+
+启发：
+
+- 不要过早把 ensemble members 压成几个 summary stats
+- ensemble 是集合对象，不是固定顺序向量
+
+适合程度：
+
+- 如果未来能拿到稳定的 member-level NWP，适合程度会明显上升
+
+## 9. 我们真正应该学什么
+
+posterior learning 最重要的不是“换更强模型”，而是学对对象。
+
+推荐优先学习的不是：
+
+- 原始天气场
+- 报告文案
+- 人工总结句
+
+而是以下 4 类量：
+
+### 9.1 误差的条件结构
+
+- 在什么 phase 下偏宽
+- 在什么 regime 下偏慢收
+- 在什么 quality 状态下该保守
+
+### 9.2 剩余上冲空间
+
+这比“是否锁定”更本质。
+
+因为 resolution 风险大多来自：
+
+- 还可能冲多少
+- 这个尾巴是真尾巴还是幻觉
+
+### 9.3 时间上的不可逆性
+
+接近窗口尾、已过峰时刻、连续多报未创新高，这些都不是普通特征。
+它们是一种时间单向性信息。
+
+好的 posterior 必须尊重这种不可逆性。
+
+### 9.4 忘记与保留的平衡
+
+持续学习不是永远记住一切。
+
+真正困难的是：
+
+- 在新气候态和新城市行为出现时会更新
+- 但不把旧经验全部抹掉
+
+所以 posterior 的持续学习，本质上是“受约束的更新”，不是“永不停止的拟合”。
+
+## 10. 评估框架
+
+## 10.1 总体指标
+
+- CRPS
+- weighted interval score
+- P50 / P75 / P90 coverage
+- sharpness
+- Brier score
+- probability calibration error
+
+## 10.2 业务关键专项指标
+
+必须单独跟踪：
+
+- near-window upper-tail overshoot rate
+- post-window false rebreak rate
+- lock miss rate
+- late surge miss rate
+- settled-post width
+- path-cap trigger rate
+
+如果这些指标不单独看，只看总体 CRPS，容易掩盖真正影响 resolution 的问题。
+
+## 10.3 切片评估
+
+至少按以下维度切片：
+
+- `phase`
+- `station`
+- `station_family`
+- `regime_family`
+- `quality_confidence`
+- `single_peak / multi_peak / plateau`
+- `same_day / near_window / in_window / post`
+
+## 10.4 promote gate
+
+artifact 不应因为“总体分数略好”就自动发布。
+
+推荐 promote 条件：
+
+- 全局 CRPS 不恶化
+- near-window coverage 不恶化
+- post-window false warm tail 不恶化
+- 核心站点组无显著退化
+- resolution-sensitive 指标无恶化
+
+若不满足：
+
+- 保留旧 artifact
+- 或仅发布某个子头，例如 event calibration
+
+## 11. runtime 接入原则
+
+## 11.1 什么应该在线读取 artifact
+
+- center calibration
+- spread calibration
+- upper-tail allowance calibration
+- event probability calibration
+- family priors
+- case index
+
+## 11.2 什么不应该交给 artifact
+
+- 原始天气链解释
+- phase 的基础语义
+- 报告层文案
+- 最终风控 guardrail
+
+## 11.3 runtime fallback
+
+runtime 必须支持多级 fallback：
+
+1. 最新 artifact
+2. 上一稳定 artifact
+3. 纯 heuristic calibration
+4. core-only emergency mode
+
+这不是保守，而是高风险后验系统的必要设计。
+
+## 12. 未来 3 个阶段的落地建议
+
+## 12.1 近阶段：2 周内可落地
+
+1. 落 `posterior_training_log_service.py`
+2. 记录 append-only posterior samples
+3. 明确 `posterior raw output` 与 `final displayed range` 双留档
+4. 新增 `artifact manifest` 读取层
+5. 做一版 per-phase calibration scorecard
+
+## 12.2 中阶段：1 个月内可落地
+
+1. 落日终 label 回填
+2. 产出 `posterior-factor-bundle`
+3. 做 station-family / regime-family 分层
+4. 先训练经典统计校正头：
+   - center delta
+   - spread scale
+   - event calibration
+5. 在 runtime 里接入 artifact 发布和回滚
+6. 在最外层加 conformal 或 coverage guardrail
+
+## 12.3 远阶段：研究型探索
+
+1. mixture-of-experts posterior
+2. dynamic model averaging
+3. deep ensemble calibrator
+4. neural process / meta-learning for new station adaptation
+5. member-level ensemble set model
+
+## 13. 方法论与哲学备忘
+
+下面这些原则比具体模型更重要。
+
+### 13.1 学误差，不学世界本体
+
+weather core 继续解释天气，
+posterior learning 只解释：
+
+- 误差如何产生
+- 不确定性如何演化
+
+### 13.2 多元机制优于单一真理
+
+天气 posterior 不应被想成“唯一正确函数”。
+它更像多个机制的竞争与切换：
+
+- 海洋层云型
+- 晴空干混合型
+- 对流抑制型
+- 晚峰型
+- 平台峰型
+
+因此 mixture / family / regime 的思想，比单一全球黑箱更贴近问题本质。
+
+### 13.3 最终目标不是最窄，而是最可信
+
+posterior 的核心目标不是一味变窄，而是：
+
+- sharp when it should be sharp
+- humble when it should be humble
+
+也就是：
+
+- `sharpness subject to calibration`
+
+### 13.4 guardrail 应该拥有主权
+
+学习模块应该是：
+
+- proposal layer
+
+而不是：
+
+- sovereign layer
+
+真正拥有主权的应当是：
+
+- calibration validity
+- runtime fallback
+- resolution-sensitive guardrail
+
+### 13.5 忘记不是失败
+
+持续学习系统不能假设过去永远正确。
+
+它必须允许：
+
+- 新气候态修正旧经验
+- 新城市行为修正旧 family
+- 新 regime 出现时扩展假设空间
+
+但这种遗忘必须是：
+
+- 有证据的
+- 可追踪的
+- 可回滚的
+
+## 14. 推荐参考
+
+以下参考并不是要求全部照搬，而是为 posterior 设计提供方法论坐标。
+
+### 经典 weather post-processing
+
+- Raftery, Balabdaoui, Gneiting, Polakowski.
+  "Using Bayesian Model Averaging to Calibrate Forecast Ensembles."
+  https://sites.stat.washington.edu/people/raftery/Research/PDF/fadoua.pdf
+- Gneiting, Raftery, Westveld, Goldman.
+  "Calibrated Probabilistic Forecasting Using Ensemble Model Output Statistics and Minimum CRPS Estimation."
+  https://sites.stat.washington.edu/MURI/PDF/gneiting2005.pdf
+- Gneiting, Balabdaoui, Raftery.
+  "Probabilistic Forecasts, Calibration and Sharpness."
+  https://sites.stat.washington.edu/raftery/Research/PDF/Gneiting2007jrssb.pdf
+- Kárný, Guy, Ettler, Raftery.
+  "Online Prediction Under Model Uncertainty via Dynamic Model Averaging."
+  https://sites.stat.washington.edu/people/raftery/Research/PDF/Karny2010.pdf
+
+### Uncertainty / online validity / meta ideas
+
+- Gibbs, Candès.
+  "Adaptive Conformal Inference Under Distribution Shift."
+  https://proceedings.neurips.cc/paper/2021/hash/0d441de75945e5acbc865406fc9a2559-Abstract.html
+- Lakshminarayanan, Pritzel, Blundell.
+  "Simple and Scalable Predictive Uncertainty Estimation using Deep Ensembles."
+  https://arxiv.org/abs/1612.01474
+- Finn, Abbeel, Levine.
+  "Model-Agnostic Meta-Learning for Fast Adaptation of Deep Networks."
+  https://proceedings.mlr.press/v70/finn17a.html
+- Garnelo et al.
+  "Neural Processes."
+  https://arxiv.org/abs/1807.01622
+- Kirkpatrick et al.
+  "Overcoming Catastrophic Forgetting in Neural Networks."
+  https://pmc.ncbi.nlm.nih.gov/articles/PMC5380101/
+
+## 15. 最终结论
+
+下一阶段不应把精力首先投向“更复杂的神经网络”。
+
+更高优先级的顺序应该是：
+
+1. 固化 sample / label / artifact / rollback 基础设施
+2. 明确 posterior 原输出与最终展示输出的双轨留档
+3. 先完成经典统计校正和分层校正
+4. 再进入 mixture / dynamic averaging
+5. 最后才考虑更激进的 neural meta 方法
+
+如果这条顺序不倒置，posterior learning 会越来越稳。
+如果顺序倒置，系统很容易得到一个更复杂但更脆弱的后验层。

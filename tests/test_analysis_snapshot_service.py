@@ -183,6 +183,176 @@ class AnalysisSnapshotServiceTest(unittest.TestCase):
                 "core_hi": 7.2,
             },
         )
+        self.assertEqual(kwargs["weather_posterior"], snapshot["weather_posterior"])
+
+    def test_peak_ranges_are_sourced_from_weather_posterior_quantiles(self) -> None:
+        primary_window, metar_diag, forecast_decision = self._sample_inputs()
+
+        snapshot = build_analysis_snapshot(
+            primary_window=primary_window,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            temp_unit="C",
+        )
+
+        peak_ranges = snapshot["peak_data"]["summary"]["ranges"]
+        posterior_hint = snapshot["weather_posterior"]["range_hint"]
+        self.assertEqual(snapshot["peak_data"]["summary"]["range_truth_source"], "weather_posterior")
+        self.assertEqual(peak_ranges["source"], "posterior_quantiles")
+        self.assertAlmostEqual(peak_ranges["core"]["lo"], posterior_hint["core"]["lo_c"], places=2)
+        self.assertAlmostEqual(peak_ranges["core"]["hi"], posterior_hint["core"]["hi_c"], places=2)
+        self.assertGreaterEqual(peak_ranges["display"]["lo"], posterior_hint["display"]["lo_c"])
+        self.assertLessEqual(peak_ranges["display"]["hi"], posterior_hint["display"]["hi_c"])
+        self.assertAlmostEqual(peak_ranges["display"]["lo"], peak_ranges["core"]["lo"], places=2)
+        self.assertAlmostEqual(peak_ranges["display"]["hi"], peak_ranges["core"]["hi"], places=2)
+        self.assertGreaterEqual(peak_ranges["posterior_tail_weight"], 0.0)
+        self.assertLessEqual(peak_ranges["posterior_tail_weight"], 1.0)
+
+    def test_post_window_snapshot_keeps_settled_obs_anchor_range(self) -> None:
+        primary_window = {
+            "start_local": "2026-03-08T15:00",
+            "peak_local": "2026-03-08T17:00",
+            "end_local": "2026-03-08T18:00",
+            "peak_temp_c": 24.0,
+            "low_cloud_pct": 10.0,
+            "w850_kmh": 18.0,
+        }
+        metar_diag = {
+            "latest_report_local": "2026-03-08T18:40:00+00:00",
+            "observed_max_time_local": "2026-03-08T17:20:00+00:00",
+            "observed_max_temp_c": 24.2,
+            "observed_max_interval_lo_c": 24.0,
+            "observed_max_interval_hi_c": 24.5,
+            "latest_temp": 23.2,
+            "latest_cloud_code": "CLR",
+            "latest_precip_state": "none",
+            "precip_trend": "none",
+            "cloud_trend": "稳定",
+            "temp_trend_1step_c": -0.5,
+            "temp_trend_smooth_c": -0.4,
+            "temp_bias_c": -0.2,
+            "peak_lock_confirmed": True,
+            "latest_wspd": 4.0,
+            "latest_wdir": 200.0,
+            "latest_rh": 35.0,
+            "latest_dewpoint": 7.0,
+            "latest_wx": "",
+            "cloud_effective_cover_smooth": 0.05,
+            "radiation_eff_smooth": 0.55,
+            "metar_routine_cadence_min": 30,
+            "metar_recent_interval_min": 30,
+        }
+        forecast_decision = {
+            "meta": {
+                "station": "LTAC",
+                "date": "2026-03-08",
+                "model": "ecmwf",
+                "synoptic_provider": "ecmwf-open-data",
+                "runtime": "2026030800Z",
+                "window": dict(primary_window),
+            },
+            "quality": {
+                "source_state": "fresh",
+                "missing_layers": [],
+                "synoptic_coverage": 1.0,
+                "synoptic_provider_requested": "ecmwf-open-data",
+                "synoptic_provider_used": "ecmwf-open-data",
+                "synoptic_provider_fallback": False,
+            },
+            "features": {
+                "objects_3d": {"tracks": [], "count": 0, "anchors_count": 0},
+                "h850": {"review": {"thermal_advection_state": "none", "transport_state": "neutral"}},
+                "sounding": {"thermo": {"coverage": {"density_class": "moderate"}}},
+            },
+        }
+
+        snapshot = build_analysis_snapshot(
+            primary_window=primary_window,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            temp_unit="C",
+        )
+
+        settled = snapshot["peak_data"]["summary"]["ranges"]["settled"]
+        self.assertTrue(settled["active"])
+        self.assertLessEqual(settled["hi"], 24.5)
+        self.assertGreaterEqual(settled["lo"], 24.0)
+
+    def test_near_end_flat_path_caps_posterior_rewidening(self) -> None:
+        primary_window = {
+            "start_local": "2026-03-09T13:00",
+            "peak_local": "2026-03-09T14:00",
+            "end_local": "2026-03-09T16:00",
+            "peak_temp_c": 24.0,
+            "low_cloud_pct": 18.0,
+            "w850_kmh": 22.0,
+        }
+        metar_diag = {
+            "latest_report_local": "2026-03-09T15:40:00+00:00",
+            "observed_max_time_local": "2026-03-09T15:10:00+00:00",
+            "observed_max_temp_c": 23.6,
+            "observed_max_interval_lo_c": 23.4,
+            "observed_max_interval_hi_c": 23.8,
+            "latest_temp": 23.4,
+            "latest_cloud_code": "FEW",
+            "latest_precip_state": "none",
+            "precip_trend": "none",
+            "cloud_trend": "stable",
+            "temp_trend_smooth_c": -0.05,
+            "temp_bias_smooth_c": -0.10,
+            "temp_accel_2step_c": -0.02,
+            "peak_lock_confirmed": False,
+            "latest_wspd": 8.0,
+            "latest_wdir": 180.0,
+            "latest_rh": 44.0,
+            "latest_dewpoint": 8.0,
+            "latest_wx": "",
+            "latest_cloud_lowest_base_ft": 5000,
+            "cloud_effective_cover_smooth": 0.16,
+            "radiation_eff_smooth": 0.70,
+            "metar_routine_cadence_min": 30,
+            "metar_recent_interval_min": 30,
+        }
+        forecast_decision = {
+            "meta": {
+                "station": "LTAC",
+                "date": "2026-03-09",
+                "model": "ecmwf",
+                "synoptic_provider": "ecmwf-open-data",
+                "runtime": "2026030900Z",
+                "window": dict(primary_window),
+            },
+            "quality": {
+                "source_state": "fresh",
+                "missing_layers": [],
+                "synoptic_coverage": 1.0,
+                "synoptic_provider_requested": "ecmwf-open-data",
+                "synoptic_provider_used": "ecmwf-open-data",
+            },
+            "features": {
+                "objects_3d": {"tracks": [], "count": 0, "anchors_count": 0},
+                "h850": {"review": {"thermal_advection_state": "probable", "transport_state": "neutral"}},
+                "sounding": {"thermo": {"coverage": {"density_class": "moderate"}}},
+            },
+        }
+
+        snapshot = build_analysis_snapshot(
+            primary_window=primary_window,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            temp_unit="C",
+        )
+
+        peak_ranges = snapshot["peak_data"]["summary"]["ranges"]
+        posterior_hint = snapshot["weather_posterior"]["range_hint"]
+        self.assertIn(
+            peak_ranges["source"],
+            {"posterior_quantiles", "posterior_quantiles_path_capped"},
+        )
+        self.assertLess(snapshot["weather_posterior"]["calibration"]["progress_spread_multiplier"], 1.0)
+        self.assertLessEqual(peak_ranges["display"]["hi"], posterior_hint["core"]["hi_c"])
+        self.assertLessEqual(peak_ranges["display"]["hi"], 23.8)
+        self.assertGreaterEqual(peak_ranges["display"]["lo"], 23.4)
 
 
 if __name__ == "__main__":

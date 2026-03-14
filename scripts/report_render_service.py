@@ -9,7 +9,7 @@ from typing import Any
 
 from analysis_snapshot_service import build_analysis_snapshot
 from polymarket_render_service import _build_polymarket_section
-from report_focus_service import build_report_focus_bundle
+from report_focus_service import GENERIC_FOCUS_KEYS, build_report_focus_bundle
 from report_synoptic_service import (
     _background_compact_clause,
     _background_mechanism_text,
@@ -43,14 +43,58 @@ DEFAULT_TRACK_LINE = "• 临窗前继续跟踪温度斜率与风向节奏，必
 FAR_REPORT_HOURS_THRESHOLD = 10.0
 NEAR_REPORT_HOURS_THRESHOLD = 6.0
 
-GENERIC_FOCUS_KEYS = (
-    "优先盯下一报温度斜率、风向节奏和云量是否继续支持当前路径",
-    "优先看温度斜率和低层风向是否继续配合",
-    "临窗前继续跟踪温度斜率与风向节奏，必要时再改判",
-    "当前更该看环流、云量和低层风场配置会不会延续",
-    "当前先看环流、云量和低层风场配置是否继续维持",
-    "优先看云量、近地风场和温度斜率能否继续配合",
-    "若三者同步走强，再考虑上修后段上沿",
+GENERIC_REASON_KEYS = (
+    "从当前链路看",
+    "眼下更像是",
+    "区间先放在",
+    "最新报已经到",
+    "最新报还在",
+    "最新报冲到",
+    "两边各留一点机动",
+    "下沿留给偏冷回摆",
+    "上沿留给临窗再抬",
+    "上沿仍宜按受压情景处理",
+    "上沿仍保留小幅上修空间",
+    "短时没看到立刻冲顶的速度",
+    "这股斜率能不能续上还要看下一报",
+    "再大幅上冲要看下一报能不能重新提速",
+    "只剩尾段机动",
+    "仍是当前主导约束",
+)
+GENERIC_REASON_FRAGMENTS = (
+    ("上沿", "受压情景"),
+    ("上沿", "小幅上修空间"),
+    ("当前主导约束",),
+    ("还要看下一报",),
+    ("机动",),
+)
+DECISIVE_REASON_TOKENS = (
+    "锁定约",
+    "再创新高约",
+    "高点锁定（约",
+    "综合判断仍保留再创新高路径",
+    "综合判断仍把再创新高当主情景",
+    "主路径约",
+    "已观测高点",
+    "二峰",
+    "晚峰",
+    "系集主路径",
+    "系集主支",
+    "500hPa",
+    "850hPa",
+    "低云",
+    "混合层",
+    "偏南风",
+    "偏西风",
+    "冷空气压制",
+    "锋后",
+    "偏冷输送",
+    "偏暖输送",
+    "暖侧",
+    "冷侧",
+    "峰值更像落在偏冷侧",
+    "区间中心仍偏向暖侧",
+    "站点特征和天气型修正",
 )
 
 
@@ -382,30 +426,6 @@ def _build_far_obs_reference(
     return f"📡 当前实况：{fallback}" if fallback else "📡 当前实况：METAR 实况摘要缺失。"
 
 
-def _range_target_text(
-    *,
-    unit: str,
-    display_lo: float,
-    display_hi: float,
-    core_lo: float,
-    core_hi: float,
-) -> str:
-    def _fmt_range(lo: float, hi: float) -> str:
-        if unit == "F":
-            lo_u = lo * 9.0 / 5.0 + 32.0
-            hi_u = hi * 9.0 / 5.0 + 32.0
-            return f"{lo_u:.1f}~{hi_u:.1f}°F"
-        return f"{lo:.1f}~{hi:.1f}°C"
-
-    if core_lo > display_lo and core_hi < display_hi:
-        return f"区间先放在 {_fmt_range(core_lo, core_hi)}，两边各留一点机动"
-    if core_lo > display_lo:
-        return f"区间先放在 {_fmt_range(core_lo, core_hi)}，下沿留给偏冷回摆"
-    if core_hi < display_hi:
-        return f"区间先放在 {_fmt_range(core_lo, core_hi)}，上沿留给临窗再抬"
-    return f"区间先放在 {_fmt_range(core_lo, core_hi)}"
-
-
 def _model_curve_shape_text(shape_type: str, plateau_state: str, day_range_c: float | None, unit: str) -> str:
     lead = ""
     if plateau_state == "broad" or shape_type == "broad_plateau":
@@ -443,6 +463,19 @@ def _format_prob_pct(value: Any) -> str:
     if prob is None:
         return ""
     return f"{round(max(0.0, min(1.0, prob)) * 100.0):.0f}%"
+
+
+def _format_hour_of_day(hour_value: float | None) -> str:
+    hour = _safe_float(hour_value)
+    if hour is None:
+        return ""
+    hour = max(0.0, min(23.99, hour))
+    hh = int(hour)
+    mm = int(round((hour - hh) * 60.0))
+    if mm >= 60:
+        hh = min(23, hh + 1)
+        mm = 0
+    return f"{hh:02d}:{mm:02d}"
 
 
 def _ensemble_transition_detail_label(detail_label: str) -> str:
@@ -489,6 +522,21 @@ def _ensemble_path_label(path_label: str, *, summary: dict[str, Any] | None = No
         "warm_support": "暖输送抬升",
         "cold_suppression": "冷抑制",
     }.get(key, key or "主路径")
+
+
+def _ensemble_path_side(path_label: str, *, summary: dict[str, Any] | None = None) -> str:
+    key = str(path_label or "").strip()
+    summary = summary if isinstance(summary, dict) else {}
+    if key == "transition":
+        key = str(summary.get("transition_detail") or summary.get("dominant_path_detail") or "").strip() or "transition"
+    return {
+        "warm_support": "warm",
+        "weak_warm_transition": "warm",
+        "cold_suppression": "cold",
+        "weak_cold_transition": "cold",
+        "neutral_stable": "neutral",
+        "transition": "neutral",
+    }.get(key, "neutral")
 
 
 def _ensemble_convergence_text(
@@ -684,7 +732,30 @@ def _build_live_path_reference_line(snapshot: dict[str, Any], *, report_mode: st
                     line += f"（主路径约 {dominant_prob}）"
                 return line
             if confidence in {"high", "partial"} and observed_label != dominant_label:
-                line = f"当前实况更像在走{observed_label}路径，和系集主路径{dominant_label}并不完全一致"
+                observed_side = _ensemble_path_side(
+                    observed_path,
+                    summary={
+                        "transition_detail": ensemble_state.get("observed_path_detail"),
+                        "dominant_path_detail": ensemble_state.get("observed_path_detail"),
+                    },
+                )
+                dominant_side = _ensemble_path_side(
+                    dominant_path,
+                    summary={
+                        "transition_detail": ensemble_state.get("transition_detail"),
+                        "dominant_path_detail": ensemble_state.get("dominant_path_detail"),
+                    },
+                )
+                if observed_side == "warm" and dominant_side in {"cold", "neutral"}:
+                    line = f"当前实况正偏离系集主支，开始往{observed_label}演进，而主支仍偏{dominant_label}"
+                elif observed_side == "cold" and dominant_side in {"warm", "neutral"}:
+                    line = f"当前实况正偏离系集主支，开始往{observed_label}演进，而主支仍偏{dominant_label}"
+                elif observed_side == "neutral" and dominant_side == "warm":
+                    line = f"当前实况没跟上系集主暖支，更像{observed_label}，和主支{dominant_label}已有偏离"
+                elif observed_side == "neutral" and dominant_side == "cold":
+                    line = f"当前实况没跟上系集主冷支，更像{observed_label}，和主支{dominant_label}已有偏离"
+                else:
+                    line = f"当前实况更像在走{observed_label}路径，和系集主支{dominant_label}并不完全一致"
                 if dominant_prob:
                     line += f"（主路径约 {dominant_prob}）"
                 return line
@@ -985,9 +1056,13 @@ def _obs_reasoning_line(latest_temp: float | None, trend: float | None, unit: st
 def _impact_reasoning_text(impact: str) -> str:
     impact_txt = str(impact or "").strip()
     if any(key in impact_txt for key in ("偏下沿", "受压", "更容易被压住", "偏受限", "空间有限")):
-        return "上沿仍宜按受压情景处理"
+        return "峰值更像落在偏冷侧"
+    if "更可能比原先预报略高" in impact_txt:
+        return "区间中心仍偏向暖侧"
+    if "更可能比原先预报略低" in impact_txt:
+        return "区间中心仍偏向冷侧"
     if any(key in impact_txt for key in ("偏上沿", "上修空间")):
-        return "上沿仍保留小幅上修空间"
+        return "若后段继续配合，仍保留小幅补涨余地"
     return ""
 
 
@@ -1007,35 +1082,151 @@ def _mechanism_condition_text(mechanism: str) -> str:
     return out
 
 
-def _mechanism_reasoning_line(mechanism: str, impact: str, range_target: str) -> str:
+def _mechanism_basis_line(mechanism: str, impact: str) -> str:
     mechanism_txt = str(mechanism or "").strip()
     if not mechanism_txt:
         return ""
     impact_txt = _impact_reasoning_text(impact)
     condition = _mechanism_condition_text(mechanism_txt)
     if "锋后偏南气流" in mechanism_txt:
-        if impact_txt:
-            return f"在锋后偏南气流持续维持的前提下，{range_target}，{impact_txt}"
-        return f"在锋后偏南气流持续维持的前提下，{range_target}"
+        return f"锋后偏南气流仍在托住主路径，{impact_txt}" if impact_txt else "锋后偏南气流仍在托住主路径"
     if "锋后偏北气流" in mechanism_txt or "冷空气压制" in mechanism_txt:
-        return f"若冷空气压制尚未解除，{range_target}"
+        return f"冷空气压制尚未解除，{impact_txt}" if impact_txt else "冷空气压制尚未解除，峰值更像落在偏冷侧"
     if "低云稳层" in mechanism_txt:
-        return f"若低云稳层限制持续，{range_target}"
+        return f"低云稳层若不松动，{impact_txt}" if impact_txt else "低云稳层若不松动，午后高点更容易停在偏低侧"
     if "混合层" in mechanism_txt:
-        return f"若混合层加深幅度受限，冲高空间将受到约束，{range_target}"
+        return "混合层能否继续做深，决定后段还能不能补涨"
     if "近地偏南风" in mechanism_txt or "偏南风已开始接管" in mechanism_txt:
-        if impact_txt:
-            return f"在偏南风持续维持的前提下，{range_target}，{impact_txt}"
-        return f"在偏南风持续维持的前提下，{range_target}"
+        return f"偏南风仍在托住暖侧路径，{impact_txt}" if impact_txt else "偏南风仍在托住暖侧路径"
     if "近地偏西风" in mechanism_txt or "偏西风正在增强" in mechanism_txt:
-        if impact_txt:
-            return f"在偏西风继续增强的前提下，{range_target}，{impact_txt}"
-        return f"在偏西风继续增强的前提下，{range_target}"
+        return "偏西风增强后，后段温度更看风向切换后的混合效率"
     if condition and impact_txt:
-        return f"若{condition}继续维持，{range_target}，{impact_txt}"
+        return f"{condition}仍是主导约束，{impact_txt}"
     if condition:
-        return f"若{condition}继续维持，{range_target}"
+        return f"{condition}仍是主导约束"
     return ""
+
+
+def _push_reason_candidate(bucket: list[tuple[float, str]], score: float, text: str) -> None:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return
+    bucket.append((float(score), cleaned.rstrip("。")))
+
+
+def _is_generic_reason_text(text: str) -> bool:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return True
+    if any(key in cleaned for key in GENERIC_REASON_KEYS):
+        return True
+    if any(token in cleaned for token in DECISIVE_REASON_TOKENS):
+        return False
+    return any(all(fragment in cleaned for fragment in fragments) for fragments in GENERIC_REASON_FRAGMENTS)
+
+
+def _posterior_reasoning_line(snapshot: dict[str, Any], *, report_mode: str, unit: str) -> tuple[float, str]:
+    weather_posterior = dict(snapshot.get("weather_posterior") or {})
+    event_probs = dict(weather_posterior.get("event_probs") or {})
+    calibration = dict(weather_posterior.get("calibration") or {})
+    anchor = dict(weather_posterior.get("anchor") or {})
+    core = dict(weather_posterior.get("core") or {})
+    progress = dict(core.get("progress") or {})
+
+    lock_prob = _safe_float(event_probs.get("lock_by_window_end"))
+    new_high_prob = _safe_float(event_probs.get("new_high_next_60m"))
+    upper_tail_cap_c = _safe_float(calibration.get("upper_tail_cap_c"))
+    observed_anchor_c = _safe_float(progress.get("observed_anchor_c"))
+    modeled_headroom_c = _safe_float(progress.get("modeled_headroom_c"))
+    regime_shift_c = _safe_float(anchor.get("regime_median_shift_c"))
+
+    if report_mode in {"near_obs", "transition"}:
+        if (
+            lock_prob is not None
+            and new_high_prob is not None
+            and lock_prob >= 0.78
+            and new_high_prob <= 0.30
+        ):
+            if (
+                observed_anchor_c is not None
+                and upper_tail_cap_c is not None
+                and (upper_tail_cap_c - observed_anchor_c) <= 0.35
+            ):
+                return (
+                    0.95,
+                    f"综合判断已把上沿压回已观测高点附近（锁定约 {_format_prob_pct(lock_prob)}，再创新高约 {_format_prob_pct(new_high_prob)}）",
+                )
+            return (
+                0.90,
+                f"综合判断已明显转向高点锁定（约 {_format_prob_pct(lock_prob)}），再创新高空间只剩尾段机动",
+            )
+        if (
+            new_high_prob is not None
+            and new_high_prob >= 0.68
+            and (lock_prob is None or lock_prob <= 0.45)
+        ):
+            if modeled_headroom_c is not None and modeled_headroom_c <= 0.55:
+                return (
+                    0.88,
+                    f"综合判断仍保留再创新高路径（约 {_format_prob_pct(new_high_prob)}），但剩余上冲空间已不大",
+                )
+            return (
+                0.90,
+                f"综合判断仍把再创新高当主情景（约 {_format_prob_pct(new_high_prob)}），上沿不能过早压掉",
+            )
+    if report_mode != "near_obs" and regime_shift_c is not None and abs(regime_shift_c) >= 0.45:
+        shift_abs = abs(regime_shift_c)
+        shift_text = f"{shift_abs:.1f}°{unit}"
+        if regime_shift_c > 0.0:
+            return 0.76, f"站点特征和天气型修正把中值往暖侧推了一档（约 {shift_text}）"
+        return 0.76, f"站点特征和天气型修正把中值往冷侧压了一档（约 {shift_text}）"
+
+    return 0.0, ""
+
+
+def _phase_structure_reasoning_line(snapshot: dict[str, Any], *, report_mode: str, unit: str) -> tuple[float, str]:
+    if report_mode == "far_synoptic":
+        return 0.0, ""
+
+    temp_phase = dict(snapshot.get("temp_phase_decision") or {})
+    timing = dict(temp_phase.get("timing") or {})
+    station = dict(temp_phase.get("station") or {})
+    shape = dict(temp_phase.get("shape") or {})
+
+    daily_peak_state = str(temp_phase.get("daily_peak_state") or "open")
+    second_peak_potential = str(temp_phase.get("second_peak_potential") or "none")
+    rebound_mode = str(temp_phase.get("rebound_mode") or "")
+    should_discuss_second_peak = bool(temp_phase.get("should_discuss_second_peak"))
+    before_typical_peak = bool(timing.get("before_typical_peak"))
+    future_candidate_role = str(shape.get("future_candidate_role") or "")
+    future_gap_vs_obs = _safe_float(shape.get("future_gap_vs_obs"))
+    future_gap_vs_current = _safe_float(shape.get("future_gap_vs_current"))
+    late_peak_share = _safe_float(station.get("late_peak_share")) or 0.0
+    very_late_peak_share = _safe_float(station.get("very_late_peak_share")) or 0.0
+    warm_peak_hour_median = _safe_float(station.get("warm_peak_hour_median"))
+
+    if daily_peak_state == "open" and should_discuss_second_peak and second_peak_potential in {"moderate", "high"}:
+        if future_candidate_role == "secondary_peak_candidate" and future_gap_vs_obs is not None and future_gap_vs_obs >= 0.25:
+            return 0.91, f"后段仍留着可挑战前高的二峰窗口，次峰候选还高出已观测高点约 {future_gap_vs_obs:.1f}°{unit}"
+        if future_gap_vs_current is not None and future_gap_vs_current >= 0.45:
+            return 0.88, f"后段仍留着补涨段，次峰候选还高出当前约 {future_gap_vs_current:.1f}°{unit}"
+        if rebound_mode == "second_peak":
+            return 0.84, "当前更像早峰后的二峰观察段，还不能按已经锁定理解"
+
+    if (
+        daily_peak_state == "open"
+        and before_typical_peak
+        and late_peak_share >= 0.55
+        and second_peak_potential in {"none", "weak"}
+    ):
+        peak_clock = _format_hour_of_day(warm_peak_hour_median)
+        if very_late_peak_share >= 0.35 and peak_clock:
+            return 0.79, f"这个站常见拖到 {peak_clock} 前后才更像见顶，眼前高点不宜直接当终点"
+        if peak_clock:
+            return 0.76, f"这个站常见高点偏晚，通常要到 {peak_clock} 前后才更像见顶"
+        return 0.74, "这个站常见偏晚见顶，眼前高点不宜直接当终点"
+
+    return 0.0, ""
 
 
 def _parse_market_tagged_rows(poly_block: str) -> list[dict[str, str]]:
@@ -1108,8 +1299,6 @@ def _build_range_rationale_block(
         mechanism = coastal_mechanism
 
     live_path_line = _build_live_path_reference_line(snapshot, report_mode=report_mode)
-    if live_path_line:
-        lines.append(f"• {live_path_line}。")
 
     obs_line = _obs_reasoning_line(latest_temp, trend, unit)
     obs_signal_strong = bool(
@@ -1136,39 +1325,59 @@ def _build_range_rationale_block(
         )
     )
 
-    range_target = _range_target_text(
-        unit=unit,
-        display_lo=display_lo,
-        display_hi=display_hi,
-        core_lo=core_lo,
-        core_hi=core_hi,
-    )
-
     concise_impact = _impact_reasoning_text(impact)
 
     mechanism_repeated = bool(mechanism and background_txt and mechanism in background_txt)
     impact_repeated = bool(concise_impact and background_txt and concise_impact in background_txt)
+    reason_candidates: list[tuple[float, str]] = []
+
+    posterior_score, posterior_line = _posterior_reasoning_line(
+        snapshot,
+        report_mode=report_mode,
+        unit=unit,
+    )
+    if posterior_line:
+        _push_reason_candidate(reason_candidates, posterior_score, posterior_line)
+
+    phase_structure_score, phase_structure_line = _phase_structure_reasoning_line(
+        snapshot,
+        report_mode=report_mode,
+        unit=unit,
+    )
+    if phase_structure_line:
+        _push_reason_candidate(reason_candidates, phase_structure_score, phase_structure_line)
+
+    if live_path_line:
+        _push_reason_candidate(reason_candidates, 0.97, live_path_line)
 
     if mechanism and not mechanism_repeated:
-        detail_line = _mechanism_reasoning_line(mechanism, impact, range_target)
-        if detail_line:
-            lines.append(f"• {detail_line}。")
-        else:
-            lines.append(f"• {range_target}。")
+        mechanism_line = _mechanism_basis_line(mechanism, impact)
+        if mechanism_line:
+            _push_reason_candidate(reason_candidates, 0.78, mechanism_line)
     elif concise_impact and not impact_repeated:
-        lines.append(f"• 眼下更像是{concise_impact}，所以{range_target}。")
+        _push_reason_candidate(reason_candidates, 0.62, concise_impact)
     elif impact:
-        lines.append(f"• 从当前链路看，{impact}，所以{range_target}。")
-    else:
-        lines.append(f"• {range_target}。")
+        _push_reason_candidate(reason_candidates, 0.52, impact)
 
-    if should_use_obs_line:
-        lines.insert(1, f"• {obs_line}。")
+    if should_use_obs_line and not live_path_line:
+        _push_reason_candidate(reason_candidates, 0.72, obs_line)
 
-    if len(lines) > 3:
-        lines = lines[:3]
-    if len(lines) == 1:
+    selected_lines: list[str] = []
+    seen: set[str] = set()
+    for _, line in sorted(reason_candidates, key=lambda item: item[0], reverse=True):
+        if line in seen:
+            continue
+        if _is_generic_reason_text(line):
+            continue
+        seen.add(line)
+        selected_lines.append(line)
+        if len(selected_lines) >= 2:
+            break
+
+    if not selected_lines:
         return ""
+    for line in selected_lines:
+        lines.append(f"• {line}。")
     return "\n".join(lines)
 
 
@@ -1410,6 +1619,7 @@ def choose_section_text(
                 polymarket_event_url,
                 primary_window,
                 weather_anchor=market_weather_anchor,
+                weather_posterior=snapshot.get("weather_posterior") or {},
                 range_hint=range_hint,
                 allow_best_label=bool(label_policy.get("allow_best_label", True)),
                 allow_alpha_label=bool(label_policy.get("allow_alpha_label", True)),

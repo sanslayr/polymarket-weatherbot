@@ -16,31 +16,11 @@ def _normalize_messages(raw_message: str) -> list[dict[str, Any]]:
         payload = json.loads(raw_message)
     except Exception:
         return []
-    items: list[dict[str, Any]]
     if isinstance(payload, list):
-        items = [item for item in payload if isinstance(item, dict)]
-    elif isinstance(payload, dict):
-        items = [payload]
-    else:
-        return []
-
-    normalized: list[dict[str, Any]] = []
-    for item in items:
-        if isinstance(item.get("price_changes"), list):
-            parent_timestamp = item.get("timestamp") or item.get("timestampMs")
-            for child in item.get("price_changes") or []:
-                if not isinstance(child, dict):
-                    continue
-                normalized.append(
-                    {
-                        **child,
-                        "event_type": "price_change",
-                        "timestamp": child.get("timestamp") or child.get("timestampMs") or parent_timestamp,
-                    }
-                )
-            continue
-        normalized.append(item)
-    return normalized
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        return [payload]
+    return []
 
 
 def _websocket_module():
@@ -122,7 +102,6 @@ def stream_market_state(
         "subscribed_asset_ids": list(subscribe_payload["assets_ids"]),
         "messages": messages,
         "state": store.snapshot(),
-        "quote_trace": store.quote_trace_snapshot(),
     }
 
 
@@ -151,26 +130,6 @@ def monitor_market_state(
         "assets_ids": [str(item) for item in asset_ids if str(item).strip()],
         "custom_feature_enabled": bool(custom_feature_enabled),
     }
-
-    def _maybe_emit_update(*, elapsed: float) -> bool:
-        nonlocal triggered_payload
-        if baseline_state is None or on_update is None:
-            return False
-        observed_at_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        maybe_payload = on_update(
-            {
-                "baseline_state": baseline_state,
-                "current_state": store.snapshot(),
-                "quote_trace": store.quote_trace_snapshot(),
-                "messages": messages,
-                "observed_at_utc": observed_at_utc,
-                "elapsed_seconds": elapsed,
-            }
-        )
-        if maybe_payload:
-            triggered_payload = dict(maybe_payload)
-            return True
-        return False
 
     try:
         while time.time() < deadline:
@@ -203,24 +162,27 @@ def monitor_market_state(
                 _close_ws(ws)
                 ws = None
                 continue
-            processed_messages = False
             if raw is not None:
                 for msg in _normalize_messages(raw):
-                    processed_messages = True
                     messages.append(msg)
                     store.apply_message(msg)
-                    elapsed = time.time() - started
-                    if baseline_state is None and elapsed >= float(baseline_seconds):
-                        baseline_state = store.snapshot()
-                    if _maybe_emit_update(elapsed=elapsed):
-                        break
-            if triggered_payload is not None:
-                break
             elapsed = time.time() - started
             if baseline_state is None and elapsed >= float(baseline_seconds):
                 baseline_state = store.snapshot()
-            if not processed_messages and _maybe_emit_update(elapsed=elapsed):
-                break
+            if baseline_state is not None and on_update is not None:
+                observed_at_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                maybe_payload = on_update(
+                    {
+                        "baseline_state": baseline_state,
+                        "current_state": store.snapshot(),
+                        "messages": messages,
+                        "observed_at_utc": observed_at_utc,
+                        "elapsed_seconds": elapsed,
+                    }
+                )
+                if maybe_payload:
+                    triggered_payload = dict(maybe_payload)
+                    break
     finally:
         _close_ws(ws)
 
@@ -228,7 +190,6 @@ def monitor_market_state(
         "subscribed_asset_ids": list(subscribe_payload["assets_ids"]),
         "messages": messages,
         "state": store.snapshot(),
-        "quote_trace": store.quote_trace_snapshot(),
         "baseline_state": baseline_state or {},
         "triggered_payload": triggered_payload,
     }

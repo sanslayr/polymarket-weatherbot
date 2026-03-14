@@ -64,30 +64,24 @@ def _bucket_display_threshold(bucket: dict[str, Any]) -> tuple[float | None, str
     native = _to_float(bucket.get("threshold_native"))
     if native is not None:
         return native, unit
+    lower_native = _to_float(bucket.get("lower_bound_native"))
+    if lower_native is not None:
+        return lower_native, unit
     threshold_c = _to_float(bucket.get("threshold_c"))
+    if threshold_c is None:
+        threshold_c = _bucket_lower_bound_c(bucket)
+    if threshold_c is None:
+        return None, unit
+    if unit == "F":
+        return (threshold_c * 9.0 / 5.0) + 32.0, "F"
     return threshold_c, "C"
 
 
-def _filter_scan_candidates_by_observed(
-    buckets: list[dict[str, Any]],
-    latest_observed_temp_c: float,
-) -> list[dict[str, Any]]:
-    observed = float(latest_observed_temp_c)
-    eligible: list[dict[str, Any]] = []
-    closest_lower_bucket: dict[str, Any] | None = None
-    closest_lower_upper_bound = float("-inf")
-    for bucket in buckets:
-        upper_bound = _bucket_upper_bound_c(bucket)
-        if upper_bound is None or float(upper_bound) >= observed:
-            eligible.append(bucket)
-            continue
-        if float(upper_bound) > closest_lower_upper_bound:
-            closest_lower_upper_bound = float(upper_bound)
-            closest_lower_bucket = bucket
-    if closest_lower_bucket is not None:
-        eligible.append(closest_lower_bucket)
-    eligible.sort(key=lambda item: float(_bucket_lower_bound_c(item) or 0.0))
-    return eligible
+def _bucket_signal_threshold_c(bucket: dict[str, Any]) -> float | None:
+    threshold_c = _to_float(bucket.get("threshold_c"))
+    if threshold_c is not None:
+        return threshold_c
+    return _bucket_lower_bound_c(bucket)
 
 
 def _increment_display_threshold(value: float | None, unit: str) -> float | None:
@@ -116,7 +110,7 @@ def _signal_confidence(
         score += 1.0
     if prev_bid is not None and prev_bid >= 0.02:
         score += 0.9
-    if bid_now is not None and bid_now <= _collapsed_bid_threshold():
+    if bid_now is not None and bid_now <= 0.001:
         score += 0.8
     if ask_now is not None and ask_now <= 0.02:
         score += 0.6
@@ -131,10 +125,6 @@ def _signal_confidence(
     return "low"
 
 
-def _collapsed_bid_threshold() -> float:
-    return 0.01
-
-
 def _bucket_triggered(
     bucket: dict[str, Any],
     *,
@@ -143,8 +133,10 @@ def _bucket_triggered(
 ) -> bool:
     prev_bid = _to_float(bucket.get("prev_best_bid"))
     bid_now = _to_float(bucket.get("best_bid"))
-    no_bid = bool(bucket.get("no_bid")) or (bid_now is not None and bid_now <= _collapsed_bid_threshold())
-    return prev_bid is not None and prev_bid >= float(price_floor) and no_bid
+    ask_now = _to_float(bucket.get("best_ask"))
+    no_bid = bool(bucket.get("no_bid")) or (bid_now is not None and bid_now <= 0.001)
+    ask_collapsed = ask_now is not None and ask_now <= float(ask_collapse_threshold)
+    return prev_bid is not None and prev_bid >= float(price_floor) and (no_bid or ask_collapsed)
 
 
 def _bucket_dead_now(
@@ -155,10 +147,14 @@ def _bucket_dead_now(
 ) -> bool:
     prev_bid = _to_float(bucket.get("prev_best_bid"))
     bid_now = _to_float(bucket.get("best_bid"))
+    ask_now = _to_float(bucket.get("best_ask"))
+    trade_price_now = _to_float(bucket.get("last_trade_price"))
     if prev_bid is None or prev_bid < float(price_floor):
         return False
-    exhausted_bid = bid_now is None or bid_now <= _collapsed_bid_threshold()
-    return exhausted_bid
+    exhausted_bid = bid_now is None or bid_now <= min(0.005, float(price_floor) / 4.0)
+    ask_collapsed = ask_now is not None and ask_now <= float(ask_collapse_threshold)
+    trade_collapsed = trade_price_now is not None and trade_price_now <= float(ask_collapse_threshold)
+    return exhausted_bid and (ask_collapsed or trade_collapsed)
 
 
 def _bucket_live_now(
@@ -169,14 +165,6 @@ def _bucket_live_now(
 ) -> bool:
     bid_now = _to_float(bucket.get("best_bid"))
     return bid_now is not None and bid_now >= float(price_floor)
-
-
-def _bucket_is_strictly_below_threshold(bucket: dict[str, Any], threshold_c: float) -> bool:
-    upper_bound = _bucket_upper_bound_c(bucket)
-    if upper_bound is not None:
-        return float(upper_bound) < float(threshold_c)
-    lower_bound = _bucket_lower_bound_c(bucket)
-    return lower_bound is not None and float(lower_bound) < float(threshold_c)
 
 
 def _build_live_ladder_rows(buckets: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -212,7 +200,7 @@ def _build_ascending_scan_signal(
     consistency_with_observed: str,
     trigger_mode: str,
 ) -> dict[str, Any]:
-    first_live_threshold = _to_float(first_live_bucket.get("threshold_c"))
+    first_live_threshold = _bucket_signal_threshold_c(first_live_bucket)
     first_live_label = str(first_live_bucket.get("bucket_label") or "")
     first_live_kind = str(first_live_bucket.get("bucket_kind") or "")
     first_live_display_value, display_unit = _bucket_display_threshold(first_live_bucket)
@@ -306,13 +294,17 @@ def infer_market_implied_report_signal(
     scan_candidates = [
         bucket
         for bucket in normalized_buckets
-        if str(bucket.get("bucket_kind") or "").strip().lower() in {"exact", "range", "at_or_below", "or_below", "at_or_above", "or_higher"}
+        if str(bucket.get("bucket_kind") or "").strip().lower() in {"exact", "range", "at_or_above", "or_higher"}
         and _bucket_lower_bound_c(bucket) is not None
     ]
     if within_trigger_window and scan_candidates:
         scan_candidates.sort(key=lambda item: float(_bucket_lower_bound_c(item) or 0.0))
         if latest_observed_temp_c is not None:
-            scan_candidates = _filter_scan_candidates_by_observed(scan_candidates, float(latest_observed_temp_c))
+            scan_candidates = [
+                bucket
+                for bucket in scan_candidates
+                if (_bucket_upper_bound_c(bucket) is None or float(_bucket_upper_bound_c(bucket)) >= float(latest_observed_temp_c))
+            ]
         triggered_prefix: list[dict[str, Any]] = []
         first_live_bucket: dict[str, Any] | None = None
         for bucket in scan_candidates:
@@ -390,18 +382,14 @@ def infer_market_implied_report_signal(
             lower_buckets = [
                 bucket
                 for bucket in normalized_buckets
-                if _bucket_is_strictly_below_threshold(bucket, float(top_threshold))
+                if _to_float(bucket.get("threshold_c")) is not None and float(bucket.get("threshold_c")) < top_threshold
             ]
             if lower_buckets:
                 lower_dead = []
                 for bucket in lower_buckets:
                     if _bucket_triggered(bucket, price_floor=price_floor, ask_collapse_threshold=ask_collapse_threshold):
                         lower_dead.append(bucket)
-                if len(lower_dead) == len(lower_buckets) and _bucket_live_now(
-                    top_higher,
-                    price_floor=price_floor,
-                    ask_collapse_threshold=ask_collapse_threshold,
-                ):
+                if len(lower_dead) == len(lower_buckets):
                     return {
                         "schema_version": MARKET_IMPLIED_WEATHER_SIGNAL_SCHEMA_VERSION,
                         "signal_type": "report_temp_top_bucket_lock_in",
@@ -453,13 +441,14 @@ def infer_market_implied_report_signal(
         ask_now = _to_float(bucket.get("best_ask"))
         trade_price_now = _to_float(bucket.get("last_trade_price"))
         trade_count_3m = _to_float(bucket.get("trade_count_3m"))
-        no_bid = bool(bucket.get("no_bid")) or (bid_now is not None and bid_now <= _collapsed_bid_threshold())
+        no_bid = bool(bucket.get("no_bid")) or (bid_now is not None and bid_now <= 0.001)
+        ask_collapsed = ask_now is not None and ask_now <= float(ask_collapse_threshold)
 
         if prev_bid is None or prev_bid < float(price_floor):
             continue
         if not within_trigger_window:
             continue
-        if not no_bid:
+        if not (no_bid or ask_collapsed):
             continue
 
         if latest_observed_temp_c is not None and float(latest_observed_temp_c) > threshold_c:
@@ -473,13 +462,15 @@ def infer_market_implied_report_signal(
             within_trigger_window=within_trigger_window,
             prev_bid=prev_bid,
             bid_now=bid_now,
-            ask_now=None,
+            ask_now=ask_now,
             trade_price_now=trade_price_now,
             trade_count_3m=trade_count_3m,
         )
 
         score = prev_bid
         score += 0.6
+        if ask_collapsed:
+            score += 0.3
         if trade_count_3m is not None:
             score += min(0.3, trade_count_3m * 0.1)
 
@@ -511,7 +502,7 @@ def infer_market_implied_report_signal(
                 "price_floor": float(price_floor),
                 "ask_collapse_threshold": float(ask_collapse_threshold),
                 "temperature_unit": display_unit,
-                "trigger_mode": "bid_swept",
+                "trigger_mode": "bid_swept_or_ask_collapsed",
             },
             "message": (
                 f"盘口归零异动：市场大概率已按“最新报 > {_format_temp_value(display_threshold)}°{display_unit}”交易，"
