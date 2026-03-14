@@ -58,6 +58,36 @@ class MarketSignalAlertServiceTest(unittest.TestCase):
         )
         self.assertIn("• *推测最新报最高温：12°C or higher*", text)
 
+    def test_observed_floor_sweep_formats_dead_bucket_and_promoted_bucket(self) -> None:
+        text = format_market_signal_alert(
+            city="Buenos Aires",
+            station_icao="SABE",
+            signal={
+                "signal_type": "observed_temp_floor_sweep",
+                "target_bucket_label": "28°C",
+                "observed_at_utc": "2026-03-13T19:04:05Z",
+                "evidence": {
+                    "dead_bucket_label": "27°C",
+                    "first_live_bucket_label": "28°C",
+                    "first_live_bucket_bid": 0.41,
+                    "first_live_bucket_ask": 0.45,
+                    "collapsed_prefix_labels": ["27°C"],
+                    "collapsed_prefix_prev_bids": {"27°C": 0.08},
+                    "collapsed_prefix_current_bids": {"27°C": 0.0},
+                    "collapsed_prefix_current_asks": {"27°C": 0.001},
+                },
+            },
+            observed_max_temp_c=27.0,
+            observed_max_temp_quantized=True,
+            observed_max_time_local="2026-03-13T16:00:00-03:00",
+            observed_at_local="2026-03-13T16:04:05-03:00",
+            local_tz_label="Local",
+        )
+        self.assertIn("• *27°C 归零，当前最低有效盘口上移至 28°C*", text)
+        self.assertIn("• 已知METAR最高温：27°C（16:00）；", text)
+        self.assertIn("• 盘口观察：27°C Yes 由 8¢ 短时间跌至接近归零。", text)
+        self.assertIn("• 28°C：Bid 41¢ | Ask 45¢", text)
+
     def test_lower_bound_jump_mentions_observed_bucket(self) -> None:
         text = format_market_signal_alert(
             city="Ankara",

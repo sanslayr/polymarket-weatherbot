@@ -126,7 +126,7 @@ class MarketMonitorServiceTest(unittest.TestCase):
             )
 
         self.assertTrue(result["signal"]["triggered"])
-        self.assertEqual(result["signal"]["signal_type"], "report_temp_scan_floor_stop")
+        self.assertEqual(result["signal"]["signal_type"], "observed_temp_floor_sweep")
         self.assertEqual(result["signal"]["implied_report_temp_lower_bound_c"], 11.0)
         self.assertEqual(result["reference_state"]["a"]["best_bid"], 0.05)
 
@@ -206,6 +206,7 @@ class MarketMonitorServiceTest(unittest.TestCase):
             )
 
         self.assertTrue(result["signal"]["triggered"])
+        self.assertEqual(result["signal"]["signal_type"], "observed_temp_floor_sweep")
         self.assertEqual(result["signal"]["implied_report_temp_lower_bound_c"], 11.0)
 
     def test_event_window_subscribes_all_live_buckets_when_observed_reference_missing(self) -> None:
@@ -262,6 +263,63 @@ class MarketMonitorServiceTest(unittest.TestCase):
 
         self.assertTrue(result["monitor_ok"])
         self.assertEqual(result["monitor_status"], "ok")
+
+    def test_event_window_returns_quote_trace_for_debug_review(self) -> None:
+        catalog = {
+            "markets": [
+                {
+                    "bucket_label": "27°C",
+                    "bucket_kind": "exact",
+                    "threshold_c": 27,
+                    "yes_token_id": "a",
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "bucket_label": "28°C",
+                    "bucket_kind": "exact",
+                    "threshold_c": 28,
+                    "yes_token_id": "b",
+                    "active": True,
+                    "closed": False,
+                },
+            ]
+        }
+
+        with patch("market_monitor_service._load_catalog", return_value=catalog), patch(
+            "market_monitor_service.monitor_market_state",
+            return_value={
+                "messages": [],
+                "state": {
+                    "a": {"best_bid": None, "best_ask": 0.001},
+                    "b": {"best_bid": 0.07, "best_ask": 0.09},
+                },
+                "quote_trace": {
+                    "a": [
+                        {"timestamp": 1.0, "event_type": "book", "best_bid": 0.06, "best_ask": 0.08},
+                        {"timestamp": 2.0, "event_type": "best_bid_ask", "best_bid": None, "best_ask": 0.001},
+                    ]
+                },
+                "baseline_state": {
+                    "a": {"best_bid": 0.06, "best_ask": 0.08},
+                    "b": {"best_bid": 0.05, "best_ask": 0.07},
+                },
+                "triggered_payload": None,
+            },
+        ):
+            result = run_market_monitor_event_window(
+                polymarket_event_url="https://example.com/event",
+                observed_max_temp_c=27.0,
+                scheduled_report_utc="2026-03-09T09:30:00Z",
+                stream_seconds=60.0,
+                baseline_seconds=2.0,
+                core_only=False,
+            )
+
+        self.assertIn("a", result["quote_trace"])
+        self.assertEqual(result["quote_trace"]["a"][-1]["event_type"], "best_bid_ask")
+        self.assertIsNone(result["quote_trace"]["a"][-1]["best_bid"])
+        self.assertEqual(result["quote_trace"]["a"][-1]["best_ask"], 0.001)
 
     def test_event_window_marks_no_market_data_as_monitor_failure(self) -> None:
         catalog = {
@@ -375,10 +433,444 @@ class MarketMonitorServiceTest(unittest.TestCase):
             )
 
         self.assertTrue(result["signal"]["triggered"])
-        self.assertEqual(result["signal"]["signal_type"], "report_temp_scan_floor_stop")
+        self.assertEqual(result["signal"]["signal_type"], "observed_temp_floor_sweep")
         self.assertEqual(result["signal"]["implied_report_temp_lower_bound_c"], 20.0)
         self.assertEqual(result["reference_state"]["a"]["best_bid"], 0.06)
         self.assertEqual(result["final_state"]["b"]["best_bid"], 0.07)
+
+    def test_event_window_floor_sweep_treats_high_baseline_bid_at_one_cent_as_dead(self) -> None:
+        catalog = {
+            "markets": [
+                {
+                    "bucket_label": "27°C",
+                    "bucket_kind": "exact",
+                    "temperature_unit": "C",
+                    "threshold_native": 27,
+                    "threshold_c": 27,
+                    "lower_bound_c": 26.5,
+                    "upper_bound_c": 27.49,
+                    "yes_token_id": "a",
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "bucket_label": "28°C",
+                    "bucket_kind": "exact",
+                    "temperature_unit": "C",
+                    "threshold_native": 28,
+                    "threshold_c": 28,
+                    "lower_bound_c": 27.5,
+                    "upper_bound_c": 28.49,
+                    "yes_token_id": "b",
+                    "active": True,
+                    "closed": False,
+                },
+            ]
+        }
+
+        def fake_monitor_market_state(*, on_update, **_kwargs):
+            on_update(
+                {
+                    "baseline_state": {},
+                    "current_state": {
+                        "a": {"best_bid": 0.009, "best_ask": 0.17},
+                        "b": {"best_bid": 0.43, "best_ask": 0.48},
+                    },
+                    "messages": [],
+                    "observed_at_utc": "2026-03-09T09:50:20Z",
+                    "elapsed_seconds": 20.0,
+                }
+            )
+            return {
+                "messages": [],
+                "state": {
+                    "a": {"best_bid": 0.009, "best_ask": 0.17},
+                    "b": {"best_bid": 0.43, "best_ask": 0.48},
+                },
+                "baseline_state": {},
+                "triggered_payload": None,
+            }
+
+        with patch("market_monitor_service._load_catalog", return_value=catalog), patch(
+            "market_monitor_service.monitor_market_state",
+            side_effect=fake_monitor_market_state,
+        ):
+            result = run_market_monitor_event_window(
+                polymarket_event_url="https://example.com/event",
+                observed_max_temp_c=27.0,
+                scheduled_report_utc="2026-03-09T09:30:00Z",
+                stream_seconds=60.0,
+                baseline_seconds=2.0,
+                core_only=False,
+                previous_state={
+                    "a": {"best_bid": 0.12, "best_ask": 0.19, "last_trade_price": 0.16},
+                    "b": {"best_bid": 0.18, "best_ask": 0.23, "last_trade_price": 0.20},
+                },
+                continuous_mode=True,
+            )
+
+        self.assertEqual(len(result["signals"]), 1)
+        self.assertEqual(result["signals"][0]["signal_type"], "observed_temp_floor_sweep")
+        self.assertEqual(result["signals"][0]["evidence"]["dead_bucket_label"], "27°C")
+        self.assertEqual(result["signals"][0]["target_bucket_label"], "28°C")
+
+    def test_event_window_emits_two_floor_sweep_alerts_when_adjacent_buckets_die_in_sequence(self) -> None:
+        catalog = {
+            "markets": [
+                {
+                    "bucket_label": "27°C",
+                    "bucket_kind": "exact",
+                    "temperature_unit": "C",
+                    "threshold_native": 27,
+                    "threshold_c": 27,
+                    "lower_bound_c": 26.5,
+                    "upper_bound_c": 27.49,
+                    "yes_token_id": "a",
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "bucket_label": "28°C",
+                    "bucket_kind": "exact",
+                    "temperature_unit": "C",
+                    "threshold_native": 28,
+                    "threshold_c": 28,
+                    "lower_bound_c": 27.5,
+                    "upper_bound_c": 28.49,
+                    "yes_token_id": "b",
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "bucket_label": "29°C",
+                    "bucket_kind": "exact",
+                    "temperature_unit": "C",
+                    "threshold_native": 29,
+                    "threshold_c": 29,
+                    "lower_bound_c": 28.5,
+                    "upper_bound_c": 29.49,
+                    "yes_token_id": "c",
+                    "active": True,
+                    "closed": False,
+                },
+            ]
+        }
+
+        def fake_monitor_market_state(*, asset_ids, on_update, **_kwargs):
+            self.assertEqual(asset_ids, ["a", "b", "c"])
+            on_update(
+                {
+                    "baseline_state": {},
+                    "current_state": {
+                        "a": {"best_bid": 0.06, "best_ask": 0.08},
+                        "b": {"best_bid": 0.05, "best_ask": 0.07},
+                        "c": {"best_bid": 0.04, "best_ask": 0.06},
+                    },
+                    "messages": [],
+                    "observed_at_utc": "2026-03-09T09:29:55Z",
+                    "elapsed_seconds": 5.0,
+                }
+            )
+            on_update(
+                {
+                    "baseline_state": {},
+                    "current_state": {
+                        "a": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                        "b": {"best_bid": 0.07, "best_ask": 0.09},
+                        "c": {"best_bid": 0.04, "best_ask": 0.06},
+                    },
+                    "messages": [],
+                    "observed_at_utc": "2026-03-09T09:30:40Z",
+                    "elapsed_seconds": 50.0,
+                }
+            )
+            on_update(
+                {
+                    "baseline_state": {},
+                    "current_state": {
+                        "a": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                        "b": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                        "c": {"best_bid": 0.08, "best_ask": 0.10},
+                    },
+                    "messages": [],
+                    "observed_at_utc": "2026-03-09T09:31:35Z",
+                    "elapsed_seconds": 105.0,
+                }
+            )
+            return {
+                "messages": [],
+                "state": {
+                    "a": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                    "b": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                    "c": {"best_bid": 0.08, "best_ask": 0.10},
+                },
+                "baseline_state": {},
+                "triggered_payload": None,
+            }
+
+        with patch("market_monitor_service._load_catalog", return_value=catalog), patch(
+            "market_monitor_service.monitor_market_state",
+            side_effect=fake_monitor_market_state,
+        ):
+            result = run_market_monitor_event_window(
+                polymarket_event_url="https://example.com/event",
+                observed_max_temp_c=27.0,
+                scheduled_report_utc="2026-03-09T09:30:00Z",
+                stream_seconds=120.0,
+                baseline_seconds=2.0,
+                core_only=False,
+            )
+
+        self.assertEqual(len(result["signals"]), 2)
+        self.assertEqual(result["signals"][0]["signal_type"], "observed_temp_floor_sweep")
+        self.assertEqual(result["signals"][0]["evidence"]["dead_bucket_label"], "27°C")
+        self.assertEqual(result["signals"][0]["target_bucket_label"], "28°C")
+        self.assertEqual(result["signals"][1]["evidence"]["dead_bucket_label"], "28°C")
+        self.assertEqual(result["signals"][1]["target_bucket_label"], "29°C")
+        self.assertEqual(result["signal"]["target_bucket_label"], "29°C")
+
+    def test_event_window_continuous_mode_keeps_emitting_floor_sweep_alerts_for_resident_monitoring(self) -> None:
+        catalog = {
+            "markets": [
+                {
+                    "bucket_label": "27°C",
+                    "bucket_kind": "exact",
+                    "temperature_unit": "C",
+                    "threshold_native": 27,
+                    "threshold_c": 27,
+                    "lower_bound_c": 26.5,
+                    "upper_bound_c": 27.49,
+                    "yes_token_id": "a",
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "bucket_label": "28°C",
+                    "bucket_kind": "exact",
+                    "temperature_unit": "C",
+                    "threshold_native": 28,
+                    "threshold_c": 28,
+                    "lower_bound_c": 27.5,
+                    "upper_bound_c": 28.49,
+                    "yes_token_id": "b",
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "bucket_label": "29°C",
+                    "bucket_kind": "exact",
+                    "temperature_unit": "C",
+                    "threshold_native": 29,
+                    "threshold_c": 29,
+                    "lower_bound_c": 28.5,
+                    "upper_bound_c": 29.49,
+                    "yes_token_id": "c",
+                    "active": True,
+                    "closed": False,
+                },
+            ]
+        }
+
+        def fake_monitor_market_state(*, on_update, **_kwargs):
+            on_update(
+                {
+                    "baseline_state": {},
+                    "current_state": {
+                        "a": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                        "b": {"best_bid": 0.06, "best_ask": 0.08},
+                        "c": {"best_bid": 0.05, "best_ask": 0.07},
+                    },
+                    "messages": [],
+                    "observed_at_utc": "2026-03-09T09:50:20Z",
+                    "elapsed_seconds": 20.0,
+                }
+            )
+            on_update(
+                {
+                    "baseline_state": {},
+                    "current_state": {
+                        "a": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                        "b": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                        "c": {"best_bid": 0.07, "best_ask": 0.09},
+                    },
+                    "messages": [],
+                    "observed_at_utc": "2026-03-09T09:51:05Z",
+                    "elapsed_seconds": 65.0,
+                }
+            )
+            return {
+                "messages": [],
+                "state": {
+                    "a": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                    "b": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                    "c": {"best_bid": 0.07, "best_ask": 0.09},
+                },
+                "baseline_state": {},
+                "triggered_payload": None,
+            }
+
+        with patch("market_monitor_service._load_catalog", return_value=catalog), patch(
+            "market_monitor_service.monitor_market_state",
+            side_effect=fake_monitor_market_state,
+        ):
+            result = run_market_monitor_event_window(
+                polymarket_event_url="https://example.com/event",
+                observed_max_temp_c=27.0,
+                scheduled_report_utc="2026-03-09T09:30:00Z",
+                stream_seconds=120.0,
+                baseline_seconds=2.0,
+                core_only=False,
+                previous_state={
+                    "a": {"best_bid": 0.06, "best_ask": 0.08, "last_trade_price": 0.07},
+                    "b": {"best_bid": 0.05, "best_ask": 0.07, "last_trade_price": 0.06},
+                    "c": {"best_bid": 0.04, "best_ask": 0.06, "last_trade_price": 0.05},
+                },
+                continuous_mode=True,
+            )
+
+        self.assertEqual(len(result["signals"]), 2)
+        self.assertEqual(result["signals"][0]["evidence"]["dead_bucket_label"], "27°C")
+        self.assertEqual(result["signals"][0]["target_bucket_label"], "28°C")
+        self.assertEqual(result["signals"][1]["evidence"]["dead_bucket_label"], "28°C")
+        self.assertEqual(result["signals"][1]["target_bucket_label"], "29°C")
+
+    def test_event_window_continuous_mode_restores_floor_watch_state_across_resident_blocks(self) -> None:
+        catalog = {
+            "markets": [
+                {
+                    "bucket_label": "27°C",
+                    "bucket_kind": "exact",
+                    "temperature_unit": "C",
+                    "threshold_native": 27,
+                    "threshold_c": 27,
+                    "lower_bound_c": 26.5,
+                    "upper_bound_c": 27.49,
+                    "yes_token_id": "a",
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "bucket_label": "28°C",
+                    "bucket_kind": "exact",
+                    "temperature_unit": "C",
+                    "threshold_native": 28,
+                    "threshold_c": 28,
+                    "lower_bound_c": 27.5,
+                    "upper_bound_c": 28.49,
+                    "yes_token_id": "b",
+                    "active": True,
+                    "closed": False,
+                },
+                {
+                    "bucket_label": "29°C",
+                    "bucket_kind": "exact",
+                    "temperature_unit": "C",
+                    "threshold_native": 29,
+                    "threshold_c": 29,
+                    "lower_bound_c": 28.5,
+                    "upper_bound_c": 29.49,
+                    "yes_token_id": "c",
+                    "active": True,
+                    "closed": False,
+                },
+            ]
+        }
+
+        def first_block_monitor(*, on_update, **_kwargs):
+            on_update(
+                {
+                    "baseline_state": {},
+                    "current_state": {
+                        "a": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                        "b": {"best_bid": 0.06, "best_ask": 0.08},
+                        "c": {"best_bid": 0.05, "best_ask": 0.07},
+                    },
+                    "messages": [],
+                    "observed_at_utc": "2026-03-09T09:50:20Z",
+                    "elapsed_seconds": 20.0,
+                }
+            )
+            return {
+                "messages": [],
+                "state": {
+                    "a": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                    "b": {"best_bid": 0.06, "best_ask": 0.08},
+                    "c": {"best_bid": 0.05, "best_ask": 0.07},
+                },
+                "baseline_state": {},
+                "triggered_payload": None,
+            }
+
+        with patch("market_monitor_service._load_catalog", return_value=catalog), patch(
+            "market_monitor_service.monitor_market_state",
+            side_effect=first_block_monitor,
+        ):
+            first_result = run_market_monitor_event_window(
+                polymarket_event_url="https://example.com/event",
+                observed_max_temp_c=27.0,
+                scheduled_report_utc="2026-03-09T09:30:00Z",
+                stream_seconds=60.0,
+                baseline_seconds=2.0,
+                core_only=False,
+                previous_state={
+                    "a": {"best_bid": 0.06, "best_ask": 0.08, "last_trade_price": 0.07},
+                    "b": {"best_bid": 0.05, "best_ask": 0.07, "last_trade_price": 0.06},
+                    "c": {"best_bid": 0.04, "best_ask": 0.06, "last_trade_price": 0.05},
+                },
+                continuous_mode=True,
+            )
+
+        self.assertEqual(first_result["signals"][0]["evidence"]["dead_bucket_label"], "27°C")
+        self.assertEqual(first_result["signals"][0]["target_bucket_label"], "28°C")
+
+        def second_block_monitor(*, on_update, **_kwargs):
+            on_update(
+                {
+                    "baseline_state": {},
+                    "current_state": {
+                        "a": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                        "b": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                        "c": {"best_bid": 0.07, "best_ask": 0.09},
+                    },
+                    "messages": [],
+                    "observed_at_utc": "2026-03-09T09:54:15Z",
+                    "elapsed_seconds": 15.0,
+                }
+            )
+            return {
+                "messages": [],
+                "state": {
+                    "a": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                    "b": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                    "c": {"best_bid": 0.07, "best_ask": 0.09},
+                },
+                "baseline_state": {},
+                "triggered_payload": None,
+            }
+
+        with patch("market_monitor_service._load_catalog", return_value=catalog), patch(
+            "market_monitor_service.monitor_market_state",
+            side_effect=second_block_monitor,
+        ):
+            second_result = run_market_monitor_event_window(
+                polymarket_event_url="https://example.com/event",
+                observed_max_temp_c=27.0,
+                scheduled_report_utc="2026-03-09T09:34:00Z",
+                stream_seconds=60.0,
+                baseline_seconds=2.0,
+                core_only=False,
+                previous_state={
+                    "a": {"best_bid": 0.0, "best_ask": 0.001, "last_trade_price": 0.001},
+                    "b": {"best_bid": 0.06, "best_ask": 0.08, "last_trade_price": 0.07},
+                    "c": {"best_bid": 0.05, "best_ask": 0.07, "last_trade_price": 0.06},
+                },
+                continuous_mode=True,
+                floor_watch_state=first_result["floor_watch_state"],
+            )
+
+        self.assertEqual(len(second_result["signals"]), 1)
+        self.assertEqual(second_result["signals"][0]["evidence"]["dead_bucket_label"], "28°C")
+        self.assertEqual(second_result["signals"][0]["target_bucket_label"], "29°C")
 
 
 if __name__ == "__main__":

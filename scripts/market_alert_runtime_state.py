@@ -79,17 +79,18 @@ def load_worker_state() -> dict[str, Any]:
             "last_window_results": {},
             "last_errors": {},
             "day_disabled_events": {},
+            "resident_floor_watch_states": {},
         }
     try:
         payload = json.loads(STATE_PATH.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("worker state must be object")
-        payload.pop("resident_previous_states", None)
         payload.setdefault("last_alerts", {})
         payload.setdefault("last_window_runs", {})
         payload.setdefault("last_window_results", {})
         payload.setdefault("last_errors", {})
         payload.setdefault("day_disabled_events", {})
+        payload.setdefault("resident_floor_watch_states", {})
         return payload
     except Exception:
         return {
@@ -98,6 +99,7 @@ def load_worker_state() -> dict[str, Any]:
             "last_window_results": {},
             "last_errors": {},
             "day_disabled_events": {},
+            "resident_floor_watch_states": {},
         }
 
 

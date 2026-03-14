@@ -94,6 +94,36 @@ class MarketStateStoreTest(unittest.TestCase):
         self.assertIsNone(snap["best_bid"])
         self.assertEqual(snap["best_ask"], 0.001)
 
+    def test_apply_best_bid_ask_updates_and_can_clear_quotes(self) -> None:
+        store = MarketStateStore()
+        store.apply_message(
+            {
+                "event_type": "book",
+                "asset_id": "abc",
+                "bids": [{"price": "0.38", "size": "12"}],
+                "asks": [{"price": "0.52", "size": "9"}],
+                "timestamp": "2026-03-13T19:00:00Z",
+            }
+        )
+        store.apply_message(
+            {
+                "event_type": "best_bid_ask",
+                "asset_id": "abc",
+                "best_bid": "0",
+                "best_ask": "0.001",
+                "timestamp": "2026-03-13T19:00:01Z",
+            }
+        )
+        snap = store.snapshot()["abc"]
+        self.assertIsNone(snap["best_bid"])
+        self.assertEqual(snap["best_ask"], 0.001)
+        self.assertEqual(snap["event_type"], "best_bid_ask")
+        trace = store.quote_trace_snapshot()["abc"]
+        self.assertEqual(len(trace), 2)
+        self.assertEqual(trace[-1]["event_type"], "best_bid_ask")
+        self.assertIsNone(trace[-1]["best_bid"])
+        self.assertEqual(trace[-1]["best_ask"], 0.001)
+
     def test_last_trade_price_tracks_trade_counts_and_volume(self) -> None:
         store = MarketStateStore()
         store.apply_message(

@@ -133,6 +133,30 @@ def _record_update(state: dict[str, Any], *, timestamp: Any) -> None:
     state["last_update_timestamp"] = ts
 
 
+def _record_quote_trace(
+    state: dict[str, Any],
+    *,
+    timestamp: Any,
+    event_type: str,
+    best_bid: Any,
+    best_ask: Any,
+) -> None:
+    ts = _to_timestamp_seconds(timestamp)
+    if ts is None:
+        return
+    trace = list(state.get("_recent_quote_trace") or [])
+    trace.append(
+        {
+            "timestamp": ts,
+            "event_type": str(event_type or "").strip().lower() or None,
+            "best_bid": _to_float(best_bid),
+            "best_ask": _to_float(best_ask),
+        }
+    )
+    trace = _trim_recent(trace, now_ts=ts, window_seconds=600.0, max_items=256)
+    state["_recent_quote_trace"] = trace
+
+
 @dataclass
 class MarketStateStore:
     assets: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -178,6 +202,7 @@ class MarketStateStore:
                 }
             )
             _record_update(state, timestamp=book_timestamp)
+            _record_quote_trace(state, timestamp=book_timestamp, event_type="book", best_bid=best_bid, best_ask=best_ask)
             _recompute_book_metrics(state)
             return
 
@@ -204,6 +229,45 @@ class MarketStateStore:
             if side == "sell" and size == 0 and state.get("best_ask") == price:
                 state["best_ask"] = None
             _record_update(state, timestamp=timestamp)
+            _record_quote_trace(
+                state,
+                timestamp=timestamp,
+                event_type="price_change",
+                best_bid=state.get("best_bid"),
+                best_ask=state.get("best_ask"),
+            )
+            _recompute_book_metrics(state)
+            return
+
+        if event_type == "best_bid_ask":
+            timestamp = payload.get("timestamp") or payload.get("timestampMs")
+            best_bid = _to_float(payload.get("best_bid"))
+            best_ask = _to_float(payload.get("best_ask"))
+            state.update(
+                {
+                    "event_type": "best_bid_ask",
+                    "book_timestamp": timestamp,
+                    "top_bid_size": None,
+                    "top_ask_size": None,
+                    "top_bid_levels": [],
+                    "top_ask_levels": [],
+                    "bid_depth_3": None,
+                    "ask_depth_3": None,
+                    "last_message": payload,
+                }
+            )
+            if best_bid is not None:
+                state["best_bid"] = best_bid if best_bid > 0 else None
+            if best_ask is not None:
+                state["best_ask"] = best_ask if best_ask > 0 else None
+            _record_update(state, timestamp=timestamp)
+            _record_quote_trace(
+                state,
+                timestamp=timestamp,
+                event_type="best_bid_ask",
+                best_bid=state.get("best_bid"),
+                best_ask=state.get("best_ask"),
+            )
             _recompute_book_metrics(state)
             return
 
@@ -250,3 +314,21 @@ class MarketStateStore:
             _recompute_book_metrics(state)
             snapshot[asset_id] = state
         return snapshot
+
+    def quote_trace_snapshot(self) -> dict[str, list[dict[str, Any]]]:
+        out: dict[str, list[dict[str, Any]]] = {}
+        for asset_id, raw_state in self.assets.items():
+            rows = []
+            for item in list(raw_state.get("_recent_quote_trace") or []):
+                if not isinstance(item, dict):
+                    continue
+                rows.append(
+                    {
+                        "timestamp": item.get("timestamp"),
+                        "event_type": item.get("event_type"),
+                        "best_bid": _to_float(item.get("best_bid")),
+                        "best_ask": _to_float(item.get("best_ask")),
+                    }
+                )
+            out[asset_id] = rows
+        return out

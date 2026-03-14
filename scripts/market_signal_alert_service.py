@@ -218,7 +218,54 @@ def format_market_signal_alert(
             return ""
         return f"盘口观察：{bucket_label} " + "，".join(parts) + "。"
 
-    if signal_type == "report_temp_scan_floor_stop":
+    if signal_type == "observed_temp_floor_sweep":
+        collapsed = [str(x).strip() for x in (evidence.get("collapsed_prefix_labels") or []) if str(x).strip()]
+        collapsed_prev_bids = dict(evidence.get("collapsed_prefix_prev_bids") or {})
+        collapsed_current_bids = dict(evidence.get("collapsed_prefix_current_bids") or {})
+        collapsed_current_asks = dict(evidence.get("collapsed_prefix_current_asks") or {})
+        tick_cents = infer_market_tick_cents(
+            evidence.get("first_live_bucket_bid"),
+            evidence.get("first_live_bucket_ask"),
+            *collapsed_prev_bids.values(),
+            *collapsed_current_bids.values(),
+            *collapsed_current_asks.values(),
+            *[row.get("best_bid") for row in live_ladder_rows],
+            *[row.get("best_ask") for row in live_ladder_rows],
+        )
+        for collapsed_label in collapsed:
+            collapsed_label_text = f"{collapsed_label} Yes"
+            collapsed_prev_bid_value = _to_float(collapsed_prev_bids.get(collapsed_label))
+            collapsed_bid_now_value = _to_float(collapsed_current_bids.get(collapsed_label))
+            collapsed_ask_now_value = _to_float(collapsed_current_asks.get(collapsed_label))
+            if collapsed_prev_bid_value is not None and collapsed_prev_bid_value > 0.0:
+                collapse_clauses.append(
+                    f"{collapsed_label_text} 由 "
+                    f"{format_price_cents(collapsed_prev_bid_value, tick_cents=tick_cents, none_text='N/A')} "
+                    "短时间跌至接近归零"
+                )
+                continue
+            collapse_parts: list[str] = []
+            if collapsed_bid_now_value is None or collapsed_bid_now_value <= 0.001:
+                collapse_parts.append("盘口短时归零")
+            if collapsed_ask_now_value is not None and collapsed_ask_now_value <= 0.01:
+                collapse_parts.append("卖盘压到 1¢ 或更低")
+            collapse_body = "，".join(collapse_parts) if collapse_parts else "当前接近归零"
+            if len(collapse_parts) >= 2 and collapse_parts[0] == "盘口短时归零":
+                collapse_body = f"盘口短时归零（{collapse_parts[1]}）"
+            collapse_clauses.append(f"{collapsed_label_text} {collapse_body}")
+        for row in live_ladder_rows:
+            label = str(row.get("bucket_label") or "").strip()
+            if not label:
+                continue
+            ladder_lines.append(
+                _format_ladder_row(
+                    label,
+                    bid_value=row.get("best_bid"),
+                    ask_value=row.get("best_ask"),
+                    tick_cents=tick_cents,
+                )
+            )
+    elif signal_type == "report_temp_scan_floor_stop":
         collapsed = [str(x).strip() for x in (evidence.get("collapsed_prefix_labels") or []) if str(x).strip()]
         collapsed_prev_bids = dict(evidence.get("collapsed_prefix_prev_bids") or {})
         collapsed_current_bids = dict(evidence.get("collapsed_prefix_current_bids") or {})
@@ -309,7 +356,15 @@ def format_market_signal_alert(
         display_unit=temperature_unit,
     )
     effective_bucket_label = first_live_label or top_bucket_label or target_bucket_label
-    if signal_type == "report_temp_top_bucket_lock_in":
+    if signal_type == "observed_temp_floor_sweep":
+        dead_bucket_label = str(evidence.get("dead_bucket_label") or "").strip()
+        if dead_bucket_label and effective_bucket_label:
+            lines.append(f"• *{dead_bucket_label} 归零，当前最低有效盘口上移至 {effective_bucket_label}*")
+        elif effective_bucket_label:
+            lines.append(f"• *当前最低有效盘口：{effective_bucket_label}*")
+        elif message:
+            lines.append(f"• {message}")
+    elif signal_type == "report_temp_top_bucket_lock_in":
         if effective_bucket_label:
             lines.append(f"• *推测最新报最高温：{effective_bucket_label}*")
         else:
