@@ -112,7 +112,7 @@ python3 scripts/market_alert_worker.py
 If you want the weatherbot virtualenv explicitly:
 
 ```bash
-./.venv_gfs/bin/python scripts/market_alert_worker.py
+./.venv_nwp/bin/python scripts/market_alert_worker.py
 ```
 
 ## Verification

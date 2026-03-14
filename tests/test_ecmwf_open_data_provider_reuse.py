@@ -11,7 +11,13 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from ecmwf_open_data_provider import _fetch_pair, build_2d_grid_payload_ecmwf  # noqa: E402
+from ecmwf_open_data_provider import (  # noqa: E402
+    _active_fetch_cooldown,
+    _fetch_pair,
+    _record_fetch_cooldown,
+    _retrieve_grib,
+    build_2d_grid_payload_ecmwf,
+)
 
 
 class EcmwfOpenDataProviderReuseTest(unittest.TestCase):
@@ -37,7 +43,7 @@ class EcmwfOpenDataProviderReuseTest(unittest.TestCase):
     def test_full_profile_parser_receives_surface_paths(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            venv_py = root / ".venv_gfs" / "bin" / "python"
+            venv_py = root / ".venv_nwp" / "bin" / "python"
             venv_py.parent.mkdir(parents=True, exist_ok=True)
             venv_py.write_text("", encoding="utf-8")
             pressure_a = root / "a_pl.grib2"
@@ -86,6 +92,83 @@ class EcmwfOpenDataProviderReuseTest(unittest.TestCase):
 
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0][3:7], [str(pressure_a), str(surface_a), str(pressure_p), str(surface_p)])
+
+    def test_retrieve_grib_respects_active_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            venv_py = root / ".venv_nwp" / "bin" / "python"
+            venv_py.parent.mkdir(parents=True, exist_ok=True)
+            venv_py.write_text("", encoding="utf-8")
+            request = {
+                "stream": "enfo",
+                "type": "pf",
+                "levtype": "pl",
+                "step": 12,
+                "date": "2026-03-14",
+                "time": 0,
+            }
+            _record_fetch_cooldown(
+                root=root,
+                source="azure",
+                model="ifs",
+                request=request,
+                seconds=300,
+                reason="429 test",
+            )
+            with (
+                patch("ecmwf_open_data_provider._repo_root", return_value=root),
+                patch("ecmwf_open_data_provider.repo_venv_python", return_value=venv_py),
+                patch("ecmwf_open_data_provider.subprocess.run") as mocked,
+            ):
+                with self.assertRaises(RuntimeError) as ctx:
+                    _retrieve_grib(
+                        target=root / "test.grib2",
+                        request=request,
+                        source="azure",
+                        model="ifs",
+                        root=root,
+                    )
+            self.assertIn("cooldown active", str(ctx.exception))
+            mocked.assert_not_called()
+
+    def test_retrieve_grib_records_rate_limit_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            venv_py = root / ".venv_nwp" / "bin" / "python"
+            venv_py.parent.mkdir(parents=True, exist_ok=True)
+            venv_py.write_text("", encoding="utf-8")
+            request = {
+                "stream": "enfo",
+                "type": "pf",
+                "levtype": "pl",
+                "step": 12,
+                "date": "2026-03-14",
+                "time": 0,
+            }
+            with (
+                patch("ecmwf_open_data_provider._repo_root", return_value=root),
+                patch("ecmwf_open_data_provider.repo_venv_python", return_value=venv_py),
+                patch(
+                    "ecmwf_open_data_provider.subprocess.run",
+                    return_value=SimpleNamespace(returncode=1, stdout="", stderr="429 Too Many Requests"),
+                ),
+            ):
+                with self.assertRaises(RuntimeError):
+                    _retrieve_grib(
+                        target=root / "test.grib2",
+                        request=request,
+                        source="azure",
+                        model="ifs",
+                        root=root,
+                    )
+            active, reason = _active_fetch_cooldown(
+                root=root,
+                source="azure",
+                model="ifs",
+                request=request,
+            )
+            self.assertTrue(active)
+            self.assertIn("429", reason)
 
 
 if __name__ == "__main__":

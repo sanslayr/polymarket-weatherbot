@@ -159,6 +159,41 @@ class MetarObservationServiceTest(unittest.TestCase):
         self.assertIsNotNone(diag["temp_trend_effective_c"])
         self.assertLess(abs(diag["temp_trend_effective_c"]), abs(diag["temp_trend_smooth_c"]))
 
+    def test_cloud_appearance_from_cavok_is_described_as_cloud_appearance(self) -> None:
+        metar24 = [
+            {
+                "reportTime": "2026-03-11T12:20:00Z",
+                "rawOb": "METAR TEST 111220Z VRB03KT 9999 CAVOK 12/M04 Q1011",
+                "temp": "12",
+                "dewp": "-4",
+                "altim": "1011",
+                "wdir": None,
+                "wspd": 3,
+            },
+            {
+                "reportTime": "2026-03-11T12:50:00Z",
+                "rawOb": "METAR TEST 111250Z VRB04KT 9999 SCT040 BKN200 12/M06 Q1012",
+                "temp": "12",
+                "dewp": "-6",
+                "altim": "1012",
+                "wdir": None,
+                "wspd": 4,
+                "clouds": [{"cover": "SCT", "base": 4000}, {"cover": "BKN", "base": 20000}],
+            },
+        ]
+        hourly_local = {
+            "time": ["2026-03-11T12:00"],
+            "temperature_2m": [12.0],
+            "pressure_msl": [1012.0],
+        }
+
+        block, _diag = metar_observation_block(metar24, hourly_local, "UTC")
+
+        self.assertIn("云层出现", block)
+        self.assertNotIn("云层重排", block)
+        self.assertNotIn("上一报CAVOK", block)
+        self.assertIn("较上一报 +1 hPa", block)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -157,9 +157,9 @@ def _path_label(path_name: str, path_detail: str) -> str:
     key = str(path_detail or "").strip() if str(path_name or "").strip() == "transition" else str(path_name or "").strip()
     return {
         "warm_support": "暖侧路径",
-        "weak_warm_transition": "暖侧试探",
+        "weak_warm_transition": "暖风抬温未站稳",
         "cold_suppression": "冷侧压制路径",
-        "weak_cold_transition": "冷侧回摆",
+        "weak_cold_transition": "冷压温未站稳",
         "neutral_stable": "中性过渡",
         "transition": "中性过渡",
     }.get(key, "当前路径")
@@ -279,7 +279,30 @@ def _path_context_focus_line(
     return max(0.86, float(significant_detail_score)), significant_detail_text
 
 
-def _phase_structure_focus_line(temp_phase: dict[str, Any], *, display_phase: str) -> tuple[float, str]:
+def _is_current_fresh_high_rising(metar_diag: dict[str, Any]) -> bool:
+    latest_temp = _safe_float(metar_diag.get("latest_temp"))
+    if latest_temp is None:
+        latest_temp = _safe_float(metar_diag.get("latest_temp_c"))
+    observed_max = _safe_float(metar_diag.get("observed_max_temp_c"))
+    temp_trend = _safe_float(metar_diag.get("temp_trend_1step_c"))
+    if temp_trend is None:
+        temp_trend = _safe_float(metar_diag.get("temp_trend_smooth_c"))
+    if temp_trend is None:
+        temp_trend = _safe_float(metar_diag.get("temp_trend_c"))
+    return bool(
+        latest_temp is not None
+        and observed_max is not None
+        and float(latest_temp) >= float(observed_max) - 0.05
+        and (temp_trend is None or float(temp_trend) >= 0.08)
+    )
+
+
+def _phase_structure_focus_line(
+    temp_phase: dict[str, Any],
+    *,
+    display_phase: str,
+    metar_diag: dict[str, Any] | None = None,
+) -> tuple[float, str]:
     timing = dict(temp_phase.get("timing") or {})
     station = dict(temp_phase.get("station") or {})
     shape = dict(temp_phase.get("shape") or {})
@@ -295,12 +318,14 @@ def _phase_structure_focus_line(temp_phase: dict[str, Any], *, display_phase: st
     late_peak_share = _safe_float(station.get("late_peak_share")) or 0.0
     very_late_peak_share = _safe_float(station.get("very_late_peak_share")) or 0.0
     warm_peak_hour_median = _safe_float(station.get("warm_peak_hour_median"))
+    fresh_high_rising = _is_current_fresh_high_rising(dict(metar_diag or {}))
 
     if (
         display_phase in {"far", "near_window", "in_window", "post", "early_peak_watch"}
         and daily_peak_state == "open"
         and should_discuss_second_peak
         and second_peak_potential in {"moderate", "high"}
+        and not fresh_high_rising
     ):
         if future_candidate_role == "secondary_peak_candidate" and future_gap_vs_obs is not None and future_gap_vs_obs >= 0.25:
             return 0.94, "后段二峰还开着，次峰仍有机会挑战前高，重点看温度会不会重新贴近并翻过前高。"
@@ -430,6 +455,7 @@ def build_report_focus_bundle(
     phase_structure_score, phase_structure_line = _phase_structure_focus_line(
         temp_phase,
         display_phase=display_phase,
+        metar_diag=metar_diag,
     )
     if phase_structure_line:
         _push_focus_candidate(focus_candidates, phase_structure_score, phase_structure_line)

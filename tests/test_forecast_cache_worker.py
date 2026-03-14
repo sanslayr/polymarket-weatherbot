@@ -135,6 +135,7 @@ class ForecastCacheWorkerTests(unittest.TestCase):
             return_value=(
                 {},
                 {"time": ["2026-03-11T00:00"]},
+                [],
                 {"observed_max_temp_c": 11.2},
                 {"peak_local": "2026-03-11T15:00"},
                 {"peak_local": "2026-03-11T15:00"},

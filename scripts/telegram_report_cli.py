@@ -21,12 +21,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from venv_utils import repo_venv_python
+
 
 def _reexec_into_skill_venv() -> None:
     if str(os.getenv("WEATHERBOT_SKIP_VENV_REEXEC", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}:
         return
     script_path = Path(__file__).resolve()
-    venv_python = script_path.parent.parent / ".venv_gfs" / "bin" / "python"
+    venv_python = repo_venv_python(script_path.parent.parent)
     if not venv_python.exists():
         return
     current_python = Path(sys.executable).resolve() if sys.executable else None

@@ -38,7 +38,7 @@ class AnalysisSnapshotViewTests(unittest.TestCase):
                         "posterior_median_c": 23.4,
                     },
                     "path_context": {
-                        "significant_forecast_detail_text": "当前匹配的是暖输送待接地这支",
+                        "significant_forecast_detail_text": "当前匹配的是暖风抬温未站稳这支",
                     },
                 }
             }
@@ -47,7 +47,7 @@ class AnalysisSnapshotViewTests(unittest.TestCase):
         anchor = snapshot_weather_posterior_anchor(snapshot)
         path_context = snapshot_path_context(snapshot)
         self.assertEqual(anchor["posterior_median_c"], 23.4)
-        self.assertIn("暖输送待接地", path_context["significant_forecast_detail_text"])
+        self.assertIn("暖风抬温未站稳", path_context["significant_forecast_detail_text"])
 
 
 if __name__ == "__main__":

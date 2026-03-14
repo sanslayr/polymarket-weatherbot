@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from runtime_utils import runtime_dt_from_tag, runtime_tag_from_dt
+from venv_utils import repo_venv_python
 
 
 def _repo_root(root: Path) -> Path:
@@ -19,7 +20,7 @@ def _repo_root(root: Path) -> Path:
         Path(__file__).resolve().parent.parent,
     ]
     for candidate in candidates:
-        if (candidate / ".venv_gfs").exists():
+        if (candidate / ".venv_nwp").exists() or (candidate / ".venv_gfs").exists():
             return candidate
     return Path(__file__).resolve().parent.parent
 
@@ -29,6 +30,116 @@ def _ecmwf_workspace(root: Path, subdir: str):
     path = _repo_root(root) / "cache" / "runtime" / subdir
     path.mkdir(parents=True, exist_ok=True)
     yield path
+
+
+def _cooldown_store_path(root: Path) -> Path:
+    path = _repo_root(root) / "cache" / "runtime" / "ecmwf_open_data_cooldowns.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _read_cooldown_store(root: Path) -> dict[str, Any]:
+    path = _cooldown_store_path(root)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_cooldown_store(root: Path, payload: dict[str, Any]) -> None:
+    path = _cooldown_store_path(root)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _prune_cooldowns(payload: dict[str, Any]) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    entries = dict(payload.get("entries") or {})
+    kept: dict[str, Any] = {}
+    for key, raw in entries.items():
+        if not isinstance(raw, dict):
+            continue
+        try:
+            expires_at = datetime.fromisoformat(str(raw.get("expires_at") or "").replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if expires_at > now:
+            kept[str(key)] = raw
+    return {"entries": kept}
+
+
+def _request_cooldown_key(*, source: str, model: str, request: dict[str, Any]) -> str:
+    stream = str(request.get("stream") or "")
+    req_type = str(request.get("type") or "")
+    levtype = str(request.get("levtype") or "")
+    return f"{source}:{model}:{stream}:{req_type}:{levtype}"
+
+
+def _active_fetch_cooldown(*, root: Path, source: str, model: str, request: dict[str, Any]) -> tuple[bool, str]:
+    store = _prune_cooldowns(_read_cooldown_store(root))
+    entry = dict((store.get("entries") or {}).get(_request_cooldown_key(source=source, model=model, request=request)) or {})
+    if not entry:
+        return False, ""
+    expires_at = str(entry.get("expires_at") or "").strip()
+    reason = str(entry.get("reason") or "").strip()
+    if not expires_at:
+        return False, ""
+    return True, f"ecmwf open data cooldown active until {expires_at}: {reason or 'cooldown'}"
+
+
+def _record_fetch_cooldown(
+    *,
+    root: Path,
+    source: str,
+    model: str,
+    request: dict[str, Any],
+    seconds: int,
+    reason: str,
+) -> None:
+    if seconds <= 0:
+        return
+    store = _prune_cooldowns(_read_cooldown_store(root))
+    entries = dict(store.get("entries") or {})
+    now = datetime.now(timezone.utc)
+    entries[_request_cooldown_key(source=source, model=model, request=request)] = {
+        "created_at": now.isoformat().replace("+00:00", "Z"),
+        "expires_at": (now + timedelta(seconds=int(seconds))).isoformat().replace("+00:00", "Z"),
+        "reason": str(reason or "").strip(),
+        "request": {
+            "stream": str(request.get("stream") or ""),
+            "type": str(request.get("type") or ""),
+            "levtype": str(request.get("levtype") or ""),
+        },
+    }
+    _write_cooldown_store(root, {"entries": entries})
+
+
+def _clear_fetch_cooldown(*, root: Path, source: str, model: str, request: dict[str, Any]) -> None:
+    store = _prune_cooldowns(_read_cooldown_store(root))
+    entries = dict(store.get("entries") or {})
+    key = _request_cooldown_key(source=source, model=model, request=request)
+    if key not in entries:
+        return
+    entries.pop(key, None)
+    _write_cooldown_store(root, {"entries": entries})
+
+
+def _cooldown_seconds_for_error(*, err_text: str, request: dict[str, Any]) -> int:
+    text = str(err_text or "").lower()
+    stream = str(request.get("stream") or "").strip().lower()
+    req_type = str(request.get("type") or "").strip().lower()
+    if "429" in text or "too many requests" in text or "rate_limit" in text or "rate limited" in text:
+        return int(os.getenv("ECMWF_OPEN_DATA_RATE_LIMIT_COOLDOWN_SECONDS", "900") or "900")
+    if "timeout" in text or "timed out" in text:
+        default = "240" if stream == "enfo" and req_type in {"pf", "cf"} else "120"
+        return int(os.getenv("ECMWF_OPEN_DATA_TIMEOUT_COOLDOWN_SECONDS", default) or default)
+    if any(token in text for token in ("connection", "ssl", "dns")):
+        return int(os.getenv("ECMWF_OPEN_DATA_TRANSIENT_COOLDOWN_SECONDS", "180") or "180")
+    return 0
 
 
 def _ecmwf_step_valid(runtime_hour: int, fh: int) -> bool:
@@ -108,9 +219,17 @@ def _retrieve_grib(
     root: Path,
 ) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    py = _repo_root(root) / ".venv_gfs" / "bin" / "python"
+    py = repo_venv_python(_repo_root(root))
     if not py.exists():
-        raise RuntimeError("ecmwf-opendata runtime missing (.venv_gfs/bin/python)")
+        raise RuntimeError("ecmwf-opendata runtime missing (.venv_nwp/bin/python)")
+    cooldown_active, cooldown_reason = _active_fetch_cooldown(
+        root=root,
+        source=source,
+        model=model,
+        request=request,
+    )
+    if cooldown_active:
+        raise RuntimeError(cooldown_reason)
     code = r'''
 import json, sys
 from ecmwf.opendata import Client
@@ -149,6 +268,12 @@ client.retrieve(request=request, target=target)
                 err_text = proc.stderr.strip() or proc.stdout.strip()
                 raise RuntimeError(f"ecmwf open data fetch failed: {err_text}")
             tmp_target.replace(target)
+            _clear_fetch_cooldown(
+                root=root,
+                source=source,
+                model=model,
+                request=request,
+            )
             return
         except Exception as exc:
             last_err = exc
@@ -166,6 +291,16 @@ client.retrieve(request=request, target=target)
                 or "ssl" in err_text
                 or "dns" in err_text
             )
+            cooldown_seconds = _cooldown_seconds_for_error(err_text=err_text, request=request)
+            if cooldown_seconds > 0:
+                _record_fetch_cooldown(
+                    root=root,
+                    source=source,
+                    model=model,
+                    request=request,
+                    seconds=cooldown_seconds,
+                    reason=str(exc),
+                )
             if is_rate_limit:
                 raise RuntimeError(f"ecmwf open data rate limited: {exc}") from exc
             if (not is_transient) or attempt >= retries:
@@ -255,7 +390,7 @@ def _ensure_pair_with_cycle_fallback(
         except Exception as exc:
             last_err = exc
             msg = str(exc).lower()
-            if "429" in msg or "too many requests" in msg or "rate limited" in msg:
+            if "429" in msg or "too many requests" in msg or "rate limited" in msg or "cooldown active" in msg:
                 raise RuntimeError(str(exc)) from exc
             continue
     raise RuntimeError(f"ecmwf cycle fallback exhausted: {last_err}")
@@ -311,9 +446,9 @@ def build_2d_grid_payload_ecmwf(
             root=root,
         )
 
-        py = _repo_root(root) / ".venv_gfs" / "bin" / "python"
+        py = repo_venv_python(_repo_root(root))
         if not py.exists():
-            raise RuntimeError("grib parser venv missing (.venv_gfs)")
+            raise RuntimeError("grib parser venv missing (.venv_nwp)")
 
         if profile == "outer500":
             code = r'''

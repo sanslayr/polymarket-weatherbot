@@ -32,6 +32,15 @@ def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, float(value)))
 
 
+def _angular_gap_deg(left: Any, right: Any) -> float | None:
+    left_v = _safe_float(left)
+    right_v = _safe_float(right)
+    if left_v is None or right_v is None:
+        return None
+    gap = abs(float(left_v) - float(right_v)) % 360.0
+    return min(gap, 360.0 - gap)
+
+
 def _coerce_same_tz(a: datetime | None, b: datetime | None) -> tuple[datetime | None, datetime | None]:
     if a is None or b is None:
         return a, b
@@ -126,6 +135,320 @@ def _surface_bias_polarity(value: str) -> str:
     if ("neutral" in text) or ("中性" in text):
         return "neutral"
     return ""
+
+
+def _median(values: list[float]) -> float | None:
+    clean = sorted(float(value) for value in values if value is not None)
+    if not clean:
+        return None
+    mid = len(clean) // 2
+    if len(clean) % 2 == 1:
+        return clean[mid]
+    return (clean[mid - 1] + clean[mid]) / 2.0
+
+
+def _weighted_mean_pairs(pairs: list[tuple[float, float | None]]) -> float | None:
+    clean = [(float(weight), float(value)) for weight, value in pairs if weight is not None and value is not None and float(weight) > 0.0]
+    if not clean:
+        return None
+    total_weight = sum(weight for weight, _value in clean)
+    if total_weight <= 0.0:
+        return None
+    return round(sum(weight * value for weight, value in clean) / total_weight, 3)
+
+
+def _history_alignment_member_map(member_history_alignment: dict[str, Any] | None) -> dict[int, dict[str, Any]]:
+    out: dict[int, dict[str, Any]] = {}
+    payload = dict(member_history_alignment or {})
+    for raw in payload.get("members") or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            number = int(raw.get("number"))
+        except Exception:
+            continue
+        out[number] = dict(raw)
+    return out
+
+
+def _history_alignment_summary(
+    *,
+    members: list[dict[str, Any]],
+    member_history_alignment: dict[str, Any] | None,
+) -> dict[str, Any]:
+    rows = [dict(raw) for raw in members if isinstance(raw, dict)]
+    history_payload = dict(member_history_alignment or {})
+    history_map = _history_alignment_member_map(history_payload)
+    matched_time_count = int(history_payload.get("matched_time_count") or 0)
+    if not rows or not history_map or matched_time_count <= 0:
+        return {
+            "history_supported": False,
+            "matched_time_count": matched_time_count,
+        }
+
+    path_scores: dict[str, float] = {}
+    detail_scores: dict[str, float] = {}
+    path_member_counts: dict[str, int] = {}
+    weighted_alignment_by_path: dict[str, list[tuple[float, float]]] = {}
+    weighted_temp_mae_by_path: dict[str, list[tuple[float, float]]] = {}
+    weighted_trend_bias_by_path: dict[str, list[tuple[float, float]]] = {}
+    used_members = 0
+    total_weight = 0.0
+
+    for raw in rows:
+        try:
+            number = int(raw.get("number"))
+        except Exception:
+            continue
+        history_row = history_map.get(number)
+        if not history_row:
+            continue
+        alignment_score = _safe_float(history_row.get("history_alignment_score"))
+        match_count = _safe_float(history_row.get("history_match_count"))
+        temp_mae_c = _safe_float(history_row.get("history_temp_mae_c"))
+        trend_bias_c = _safe_float(history_row.get("history_trend_bias_c"))
+        if alignment_score is None:
+            continue
+
+        weight = float(alignment_score)
+        if match_count is not None:
+            if match_count >= 5:
+                weight += 0.12
+            elif match_count >= 3:
+                weight += 0.08
+            elif match_count >= 2:
+                weight += 0.04
+        if temp_mae_c is not None:
+            if temp_mae_c <= 0.55:
+                weight += 0.10
+            elif temp_mae_c <= 0.95:
+                weight += 0.05
+            elif temp_mae_c >= 2.4:
+                weight -= 0.18
+            elif temp_mae_c >= 1.7:
+                weight -= 0.10
+        if trend_bias_c is not None:
+            abs_bias = abs(float(trend_bias_c))
+            if abs_bias <= 0.35:
+                weight += 0.08
+            elif abs_bias <= 0.70:
+                weight += 0.04
+            elif abs_bias >= 1.6:
+                weight -= 0.14
+            elif abs_bias >= 1.1:
+                weight -= 0.08
+        weight = _clamp(weight, 0.04, 1.55)
+
+        row_path = str(raw.get("path_label") or "")
+        row_detail = str(raw.get("path_detail") or row_path or "")
+        if not row_path:
+            continue
+        path_scores[row_path] = path_scores.get(row_path, 0.0) + float(weight)
+        detail_scores[row_detail] = detail_scores.get(row_detail, 0.0) + float(weight)
+        path_member_counts[row_path] = path_member_counts.get(row_path, 0) + 1
+        weighted_alignment_by_path.setdefault(row_path, []).append((float(weight), float(alignment_score)))
+        if temp_mae_c is not None:
+            weighted_temp_mae_by_path.setdefault(row_path, []).append((float(weight), float(temp_mae_c)))
+        if trend_bias_c is not None:
+            weighted_trend_bias_by_path.setdefault(row_path, []).append((float(weight), float(trend_bias_c)))
+        total_weight += float(weight)
+        used_members += 1
+
+    if total_weight <= 0.0 or not path_scores:
+        return {
+            "history_supported": False,
+            "matched_time_count": matched_time_count,
+        }
+
+    dominant_path, dominant_weight = max(path_scores.items(), key=lambda item: item[1])
+    dominant_path_detail = dominant_path
+    dominant_detail_weight = -1.0
+    for detail, value in detail_scores.items():
+        if value <= 0.0:
+            continue
+        if not any(
+            str(raw.get("path_label") or "") == dominant_path and str(raw.get("path_detail") or dominant_path) == detail
+            for raw in rows
+        ):
+            continue
+        if value > dominant_detail_weight:
+            dominant_path_detail = detail
+            dominant_detail_weight = value
+    dominant_prob = round(dominant_weight / total_weight, 3)
+    remaining = sorted((value for key, value in path_scores.items() if key != dominant_path), reverse=True)
+    margin = dominant_weight - (remaining[0] if remaining else 0.0)
+    dominant_margin_prob = round(margin / total_weight, 3)
+    dominant_alignment_score = _weighted_mean_pairs(weighted_alignment_by_path.get(dominant_path, []))
+    dominant_temp_mae_c = _weighted_mean_pairs(weighted_temp_mae_by_path.get(dominant_path, []))
+    dominant_trend_bias_c = _weighted_mean_pairs(weighted_trend_bias_by_path.get(dominant_path, []))
+
+    history_supported = bool(
+        matched_time_count >= 2
+        and used_members >= 4
+        and dominant_prob >= 0.56
+        and dominant_margin_prob >= 0.10
+        and (dominant_alignment_score is None or dominant_alignment_score >= 0.56)
+    )
+    history_path_locked = bool(
+        history_supported
+        and dominant_prob >= 0.68
+        and dominant_margin_prob >= 0.16
+    )
+
+    return {
+        "history_supported": history_supported,
+        "history_path_locked": history_path_locked,
+        "matched_time_count": matched_time_count,
+        "used_member_count": used_members,
+        "dominant_path": dominant_path,
+        "dominant_path_detail": dominant_path_detail,
+        "dominant_prob": dominant_prob,
+        "dominant_margin_prob": dominant_margin_prob,
+        "dominant_alignment_score": dominant_alignment_score,
+        "dominant_temp_mae_c": dominant_temp_mae_c,
+        "dominant_trend_bias_c": dominant_trend_bias_c,
+        "path_member_count": float(path_member_counts.get(dominant_path) or 0),
+        "path_member_share": round(float(path_member_counts.get(dominant_path) or 0) / float(len(rows)), 3),
+    }
+
+
+def _member_matches_branch(raw: dict[str, Any], *, branch_path: str, branch_path_detail: str, branch_side: str) -> bool:
+    row_path = str(raw.get("path_label") or "")
+    row_detail = str(raw.get("path_detail") or row_path or "")
+    if branch_path_detail and row_detail == branch_path_detail:
+        return True
+    if branch_path and row_path == branch_path:
+        return True
+    if branch_side and _path_side(row_path, path_detail=row_detail) == branch_side:
+        return True
+    return False
+
+
+def _build_branch_circulation_signature(
+    *,
+    members: list[dict[str, Any]],
+    branch_path: str,
+    branch_path_detail: str,
+    branch_side: str,
+    transport_state: str,
+    warm_landing_pending: bool,
+    warm_landing_ready: bool,
+    cold_landing_ready: bool,
+    dry_mix_support: bool,
+    cloud_locked: bool,
+    precip_active: bool,
+    cap_hold: bool,
+) -> tuple[str, float]:
+    rows = [dict(raw) for raw in members if isinstance(raw, dict)]
+    if not rows:
+        return "", 0.0
+
+    branch_rows = [
+        raw
+        for raw in rows
+        if _member_matches_branch(
+            raw,
+            branch_path=branch_path,
+            branch_path_detail=branch_path_detail,
+            branch_side=branch_side,
+        )
+    ]
+    if len(branch_rows) < 2:
+        return "", 0.0
+
+    has_ens_vertical_detail = any(
+        any(raw.get(key) not in (None, "") for key in ("z500_gpm", "rh700_pct", "t850_c", "t925_c", "wind_speed_925_kmh"))
+        for raw in rows
+    )
+    if not has_ens_vertical_detail:
+        return "", 0.0
+
+    def _med(source: list[dict[str, Any]], key: str) -> float | None:
+        return _median([
+            _safe_float(item.get(key))
+            for item in source
+            if _safe_float(item.get(key)) is not None
+        ])
+
+    all_z500 = _med(rows, "z500_gpm")
+    branch_z500 = _med(branch_rows, "z500_gpm")
+    all_rh700 = _med(rows, "rh700_pct")
+    branch_rh700 = _med(branch_rows, "rh700_pct")
+    all_t850 = _med(rows, "t850_c")
+    branch_t850 = _med(branch_rows, "t850_c")
+    all_t925 = _med(rows, "t925_c")
+    branch_t925 = _med(branch_rows, "t925_c")
+    branch_wind925 = _med(branch_rows, "wind_speed_925_kmh")
+
+    parts: list[str] = []
+    score = 0.0
+
+    if branch_z500 is not None and all_z500 is not None:
+        dz500 = float(branch_z500) - float(all_z500)
+        if dz500 >= 18.0:
+            parts.append("500hPa 高度场偏高，脊性背景更占优")
+            score += 0.18
+        elif dz500 <= -18.0:
+            parts.append("500hPa 高度场偏低，槽性背景更占优")
+            score += 0.18
+
+    if dry_mix_support or (
+        branch_rh700 is not None and (
+            float(branch_rh700) <= 45.0
+            or (all_rh700 is not None and float(branch_rh700) <= float(all_rh700) - 8.0)
+        )
+    ):
+        parts.append("700hPa 干层混合信号更明显")
+        score += 0.22
+    elif precip_active or (
+        branch_rh700 is not None and float(branch_rh700) >= 72.0
+    ):
+        parts.append("700hPa 湿层偏厚")
+        score += 0.16
+
+    warm_low_level_signal = bool(
+        transport_state == "warm"
+        and (
+            (branch_t925 is not None and all_t925 is not None and float(branch_t925) >= float(all_t925) + 0.35)
+            or (branch_t850 is not None and all_t850 is not None and float(branch_t850) >= float(all_t850) + 0.45)
+            or (branch_wind925 is not None and float(branch_wind925) >= 18.0)
+        )
+    )
+    cold_low_level_signal = bool(
+        transport_state == "cold"
+        and (
+            (branch_t925 is not None and all_t925 is not None and float(branch_t925) <= float(all_t925) - 0.35)
+            or (branch_t850 is not None and all_t850 is not None and float(branch_t850) <= float(all_t850) - 0.45)
+        )
+    )
+
+    if transport_state == "warm" and (warm_low_level_signal or warm_landing_pending or warm_landing_ready):
+        if warm_landing_ready:
+            parts.append("925-850hPa 偏暖输送已开始落到地面")
+        elif warm_landing_pending:
+            parts.append("925-850hPa 偏暖输送仍在，但地面抬温还没完全跟上")
+        else:
+            parts.append("925-850hPa 偏暖输送更占优")
+        score += 0.26
+    elif transport_state == "cold" and (cold_low_level_signal or cold_landing_ready):
+        if cold_landing_ready:
+            parts.append("925-850hPa 冷输送已开始落地")
+        else:
+            parts.append("925-850hPa 冷输送更占优")
+        score += 0.24
+
+    if cloud_locked and not precip_active:
+        parts.append("云层约束还在压着地面增温")
+        score += 0.18
+    elif cap_hold and not precip_active:
+        parts.append("低层稳层还在压着混合")
+        score += 0.14
+
+    if len(parts) < 2:
+        return "", 0.0
+
+    text = "当前更匹配的环流特征是" + "、".join(parts[:3])
+    return text, round(_clamp(0.58 + score, 0.0, 0.92), 2)
 
 
 def _live_ensemble_path_alignment(
@@ -549,11 +872,647 @@ def _build_observation_matched_subset(
     }
 
 
+def _branch_member_count(
+    *,
+    members: list[dict[str, Any]],
+    branch_path: str,
+    branch_path_detail: str,
+) -> tuple[int | None, float | None]:
+    rows = [dict(raw) for raw in members if str((raw or {}).get("path_label") or "").strip()]
+    if not rows:
+        return None, None
+
+    path_label = str(branch_path or "").strip()
+    path_detail = str(branch_path_detail or "").strip()
+    if not path_label:
+        return None, None
+
+    matched_count = 0
+    for raw in rows:
+        row_path = str(raw.get("path_label") or "").strip()
+        row_detail = str(raw.get("path_detail") or row_path or "").strip()
+        if path_label == "transition":
+            if row_path == "transition" and (not path_detail or row_detail == path_detail):
+                matched_count += 1
+            continue
+        if row_path == path_label:
+            matched_count += 1
+
+    total_count = len(rows)
+    if total_count <= 0 or matched_count <= 0:
+        return 0, 0.0
+    return matched_count, round(float(matched_count) / float(total_count), 3)
+
+
+def _effective_member_count(weights: list[float]) -> float:
+    valid = [max(0.0, float(weight)) for weight in weights if float(weight) > 0.0]
+    if not valid:
+        return 0.0
+    total = sum(valid)
+    sq_total = sum(weight * weight for weight in valid)
+    if total <= 0.0 or sq_total <= 0.0:
+        return 0.0
+    return (total * total) / sq_total
+
+
+def _trajectory_member_map(member_trajectory: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    out: dict[int, dict[str, Any]] = {}
+    for raw in (member_trajectory or {}).get("members") or []:
+        try:
+            out[int(raw.get("number"))] = dict(raw)
+        except Exception:
+            continue
+    return out
+
+
+def _member_future_traits(
+    *,
+    row_path: str,
+    row_detail: str,
+    row_side: str,
+    delta_t850_c: float | None,
+    wind_speed_850_kmh: float | None,
+    trajectory_row: dict[str, Any],
+    branch_outlook_state: dict[str, Any],
+    cloud_effective_cover: float | None,
+    radiation_eff: float | None,
+    precip_state: str,
+) -> tuple[str, str, float, float, float]:
+    delta = float(delta_t850_c) if delta_t850_c is not None else 0.0
+    speed = float(wind_speed_850_kmh) if wind_speed_850_kmh is not None else 0.0
+    branch = dict(branch_outlook_state or {})
+    warm_pending = bool(branch.get("warm_landing_pending"))
+    warm_ready = bool(branch.get("warm_landing_ready"))
+    cold_ready = bool(branch.get("cold_landing_ready"))
+    second_peak_retest_ready = bool(branch.get("second_peak_retest_ready"))
+    precip_active = str(precip_state or "").strip().lower() not in {"", "none"}
+    cloud_locked = bool(
+        cloud_effective_cover is not None
+        and radiation_eff is not None
+        and float(cloud_effective_cover) >= 0.68
+        and float(radiation_eff) <= 0.58
+    )
+    trajectory = dict(trajectory_row or {})
+    prior_delta = _safe_float(trajectory.get("prior3h_t850_delta_c"))
+    next_delta = _safe_float(trajectory.get("next3h_t850_delta_c"))
+    prior_surface_delta = _safe_float(trajectory.get("prior3h_t2m_delta_c"))
+    next_surface_delta = _safe_float(trajectory.get("next3h_t2m_delta_c"))
+    trajectory_accel = _safe_float(trajectory.get("trajectory_accel_c"))
+    future_room_c = _safe_float(trajectory.get("future_room_c"))
+    future_cooling_c = _safe_float(trajectory.get("future_cooling_c"))
+    next_wind10_delta = _safe_float(trajectory.get("next3h_wind10_delta_kmh"))
+    next_msl_delta = _safe_float(trajectory.get("next3h_msl_delta_hpa"))
+    trajectory_shape = str(trajectory.get("trajectory_shape") or "")
+    next_signal_delta = next_surface_delta if next_surface_delta is not None else next_delta
+    prior_signal_delta = prior_surface_delta if prior_surface_delta is not None else prior_delta
+
+    if next_signal_delta is not None:
+        if second_peak_retest_ready and row_side in {"warm", "neutral"} and next_signal_delta >= 0.08:
+            future_family = "second_peak_retest"
+        elif precip_active and row_side == "warm" and next_signal_delta <= 0.12:
+            future_family = "convective_interrupt_risk"
+        elif precip_active and row_side == "cold" and next_signal_delta <= -0.15:
+            future_family = "cold_hold"
+        elif row_path == "warm_support":
+            if next_signal_delta >= 0.38 and (trajectory_accel is None or trajectory_accel >= -0.18):
+                future_family = "warm_follow_through"
+            elif next_signal_delta >= 0.12:
+                future_family = "warm_landing_pending"
+            elif future_cooling_c is not None and future_cooling_c >= 0.22:
+                future_family = "volatile_transition"
+            else:
+                future_family = "neutral_plateau"
+        elif row_detail == "weak_warm_transition":
+            if next_signal_delta >= 0.22:
+                future_family = "warm_landing_pending"
+            elif next_signal_delta <= -0.18:
+                future_family = "volatile_transition"
+            else:
+                future_family = "neutral_plateau"
+        elif row_path == "cold_suppression":
+            if next_signal_delta <= -0.25:
+                future_family = "cold_hold"
+            elif next_signal_delta <= -0.08:
+                future_family = "cold_landing_pending"
+            elif future_room_c is not None and future_room_c >= 0.20:
+                future_family = "volatile_transition"
+            else:
+                future_family = "neutral_plateau"
+        elif row_detail == "weak_cold_transition":
+            if next_signal_delta <= -0.14:
+                future_family = "cold_landing_pending"
+            elif next_signal_delta >= 0.16:
+                future_family = "volatile_transition"
+            else:
+                future_family = "neutral_plateau"
+        elif abs(next_signal_delta) <= 0.10:
+            future_family = "neutral_plateau"
+        else:
+            future_family = "volatile_transition"
+    elif second_peak_retest_ready and row_side in {"warm", "neutral"}:
+        future_family = "second_peak_retest"
+    elif precip_active and row_side == "warm":
+        future_family = "convective_interrupt_risk"
+    elif precip_active and row_side == "cold":
+        future_family = "cold_hold"
+    elif row_path == "warm_support":
+        future_family = "warm_follow_through" if warm_ready or delta >= 0.60 else "warm_landing_pending"
+    elif row_detail == "weak_warm_transition":
+        future_family = "warm_landing_pending"
+    elif row_path == "cold_suppression":
+        future_family = "cold_hold" if cold_ready or delta <= -0.60 else "cold_landing_pending"
+    elif row_detail == "weak_cold_transition":
+        future_family = "cold_landing_pending"
+    elif row_detail == "neutral_stable":
+        future_family = "neutral_plateau"
+    else:
+        future_family = "volatile_transition"
+
+    if trajectory_shape in {"warming_follow_through", "reaccelerating"}:
+        pace_state = "accelerating"
+    elif trajectory_shape in {"warming_but_slowing"}:
+        pace_state = "building"
+    elif trajectory_shape in {"cooling_follow_through", "warm_reversal"}:
+        pace_state = "cooling"
+    elif trajectory_shape in {"plateau_after_warming", "flat_hold"}:
+        pace_state = "flat"
+    elif delta >= 0.90 and speed >= 18.0:
+        pace_state = "accelerating"
+    elif delta >= 0.25:
+        pace_state = "building"
+    elif delta <= -0.75:
+        pace_state = "cooling"
+    elif abs(delta) <= 0.20:
+        pace_state = "flat"
+    else:
+        pace_state = "mixed"
+
+    if next_signal_delta is not None:
+        future_room_seed = max(0.0, future_room_c if future_room_c is not None else next_signal_delta)
+        accel_bonus = max(0.0, trajectory_accel or 0.0)
+        prior_support = max(0.0, prior_signal_delta or 0.0)
+        room_factor = {
+            "warm_follow_through": 0.86 + future_room_seed * 0.58 + accel_bonus * 0.18 + prior_support * 0.08,
+            "warm_landing_pending": 0.68 + future_room_seed * 0.52 + prior_support * 0.06,
+            "second_peak_retest": 0.72 + future_room_seed * 0.50,
+            "neutral_plateau": 0.26 + future_room_seed * 0.22,
+            "volatile_transition": 0.38 + future_room_seed * 0.28 + abs(trajectory_accel or 0.0) * 0.18,
+            "cold_landing_pending": 0.18 + future_room_seed * 0.08,
+            "cold_hold": 0.10 + future_room_seed * 0.04,
+            "convective_interrupt_risk": 0.24 + future_room_seed * 0.16,
+        }.get(future_family, 0.40)
+        overshoot_factor = {
+            "warm_follow_through": max(0.0, future_room_seed - 0.22) * 0.34 + accel_bonus * 0.10,
+            "warm_landing_pending": max(0.0, future_room_seed - 0.28) * 0.20,
+            "second_peak_retest": max(0.0, future_room_seed - 0.12) * 0.18,
+            "volatile_transition": max(0.0, future_room_seed - 0.35) * 0.12,
+        }.get(future_family, 0.0)
+    else:
+        room_factor = {
+            "warm_follow_through": 1.06 + max(0.0, delta) * 0.24 + max(0.0, speed - 18.0) * 0.010,
+            "warm_landing_pending": 0.82 + max(0.0, delta) * 0.20 + max(0.0, speed - 16.0) * 0.008,
+            "second_peak_retest": 0.88 + max(0.0, delta) * 0.18,
+            "neutral_plateau": 0.48 + delta * 0.10,
+            "volatile_transition": 0.58 + delta * 0.12,
+            "cold_landing_pending": 0.26 + max(0.0, delta) * 0.06,
+            "cold_hold": 0.12 + max(0.0, delta) * 0.04,
+            "convective_interrupt_risk": 0.54 + max(0.0, delta) * 0.10,
+        }.get(future_family, 0.48)
+        overshoot_factor = {
+            "warm_follow_through": max(0.0, delta - 0.20) * 0.34 + max(0.0, speed - 22.0) * 0.010,
+            "warm_landing_pending": max(0.0, delta - 0.30) * 0.20,
+            "second_peak_retest": max(0.0, delta - 0.10) * 0.18,
+            "volatile_transition": max(0.0, delta - 0.40) * 0.12,
+        }.get(future_family, 0.0)
+
+    stall_risk = 0.0
+    if future_family in {"warm_follow_through", "warm_landing_pending", "second_peak_retest"}:
+        if cloud_locked:
+            stall_risk += 0.24
+        if warm_pending and future_family == "warm_landing_pending":
+            stall_risk += 0.16
+        if next_signal_delta is not None and next_signal_delta <= 0.08:
+            stall_risk += 0.16
+        if trajectory_accel is not None and trajectory_accel <= -0.18:
+            stall_risk += 0.12
+        if next_wind10_delta is not None and next_wind10_delta <= -4.0:
+            stall_risk += 0.08
+    if future_family in {"convective_interrupt_risk", "cold_hold"}:
+        stall_risk += 0.12
+    if future_cooling_c is not None and future_cooling_c >= 0.22:
+        stall_risk += 0.14
+    if next_msl_delta is not None and next_msl_delta >= 1.2 and row_side == "warm":
+        stall_risk += 0.08
+    if future_family == "neutral_plateau":
+        stall_risk += 0.18
+    if precip_active and future_family in {"warm_follow_through", "warm_landing_pending", "convective_interrupt_risk"}:
+        stall_risk += 0.18
+
+    return (
+        future_family,
+        pace_state,
+        round(_clamp(room_factor, 0.05, 1.75), 3),
+        round(_clamp(overshoot_factor, 0.0, 0.65), 3),
+        round(_clamp(stall_risk, 0.0, 0.65), 3),
+    )
+
+
+def _member_compatibility_weight(
+    *,
+    match_tier: str,
+    row_path: str,
+    row_detail: str,
+    row_side: str,
+    future_family: str,
+    branch_outlook_state: dict[str, Any],
+    matched_subset_active: bool,
+    temp_trend_c: float | None,
+    temp_bias_c: float | None,
+    cloud_effective_cover: float | None,
+    radiation_eff: float | None,
+    precip_state: str,
+    surface_temp_gap_c: float | None,
+    surface_temp_bias_c: float | None,
+    surface_alignment_score: float | None,
+    history_alignment_score: float | None,
+    history_temp_mae_c: float | None,
+    history_trend_bias_c: float | None,
+    history_match_count: float | None,
+) -> float:
+    branch = dict(branch_outlook_state or {})
+    branch_family = str(branch.get("branch_family") or "")
+    branch_path = str(branch.get("branch_path") or "")
+    branch_path_detail = str(branch.get("branch_path_detail") or "")
+    branch_side = str(branch.get("branch_side") or "")
+    weight = {
+        "exact": 0.74,
+        "path": 0.54,
+        "side": 0.30,
+        "": 0.10,
+    }.get(str(match_tier or ""), 0.10)
+
+    if row_path == branch_path:
+        weight += 0.10
+    if row_detail and row_detail == branch_path_detail:
+        weight += 0.08
+    if row_side and row_side == branch_side:
+        weight += 0.06
+
+    if branch_family == "warm_landing_watch":
+        if future_family == "warm_landing_pending":
+            weight += 0.22
+        elif future_family == "warm_follow_through":
+            weight += 0.16
+        elif future_family == "neutral_plateau":
+            weight += 0.05
+        else:
+            weight -= 0.14
+    elif branch_family == "warm_support_track":
+        if future_family == "warm_follow_through":
+            weight += 0.20
+        elif future_family == "warm_landing_pending":
+            weight += 0.08
+        elif future_family in {"cold_hold", "cold_landing_pending"}:
+            weight -= 0.16
+    elif branch_family in {"cold_suppression_track", "convective_cold_hold"}:
+        if future_family in {"cold_hold", "cold_landing_pending"}:
+            weight += 0.18
+        elif row_side == "warm":
+            weight -= 0.16
+    elif branch_family == "volatile_split":
+        if future_family == "volatile_transition":
+            weight += 0.12
+    elif branch_family == "neutral_plateau":
+        if future_family == "neutral_plateau":
+            weight += 0.16
+        elif row_side == "warm":
+            weight += 0.04
+    elif branch_family == "second_peak_retest":
+        if future_family == "second_peak_retest":
+            weight += 0.22
+
+    positive_trend = max(0.0, _safe_float(temp_trend_c) or 0.0)
+    negative_trend = max(0.0, -(_safe_float(temp_trend_c) or 0.0))
+    positive_bias = max(0.0, _safe_float(temp_bias_c) or 0.0)
+    negative_bias = max(0.0, -(_safe_float(temp_bias_c) or 0.0))
+
+    if row_side == "warm":
+        weight += positive_trend * 0.28 + positive_bias * 0.10
+        weight -= negative_trend * 0.22 + negative_bias * 0.08
+    elif row_side == "cold":
+        weight += negative_trend * 0.24 + negative_bias * 0.08
+        weight -= positive_trend * 0.22 + positive_bias * 0.08
+    else:
+        weight += min(0.06, abs(positive_trend - negative_trend) * 0.08)
+
+    if surface_alignment_score is not None:
+        weight += (_clamp(surface_alignment_score, 0.0, 1.0) - 0.55) * 0.28
+    if history_alignment_score is not None:
+        weight += (_clamp(history_alignment_score, 0.0, 1.0) - 0.55) * 0.34
+    if history_match_count is not None:
+        if history_match_count >= 5:
+            weight += 0.08
+        elif history_match_count >= 3:
+            weight += 0.05
+        elif history_match_count >= 2:
+            weight += 0.03
+    if surface_temp_gap_c is not None:
+        gap = abs(float(surface_temp_gap_c))
+        if gap <= 0.45:
+            weight += 0.12
+        elif gap <= 0.85:
+            weight += 0.06
+        elif gap >= 2.8:
+            weight -= 0.24
+        elif gap >= 1.8:
+            weight -= 0.12
+    if surface_temp_bias_c is not None:
+        if row_side == "warm":
+            if float(surface_temp_bias_c) <= -0.9:
+                weight -= 0.12
+            elif float(surface_temp_bias_c) >= 0.35:
+                weight += 0.04
+        elif row_side == "cold":
+            if float(surface_temp_bias_c) >= 0.9:
+                weight -= 0.12
+            elif float(surface_temp_bias_c) <= -0.35:
+                weight += 0.04
+    if history_temp_mae_c is not None:
+        if float(history_temp_mae_c) <= 0.60:
+            weight += 0.10
+        elif float(history_temp_mae_c) <= 1.00:
+            weight += 0.05
+        elif float(history_temp_mae_c) >= 2.40:
+            weight -= 0.18
+        elif float(history_temp_mae_c) >= 1.70:
+            weight -= 0.10
+    if history_trend_bias_c is not None:
+        abs_trend_bias = abs(float(history_trend_bias_c))
+        if abs_trend_bias <= 0.40:
+            weight += 0.08
+        elif abs_trend_bias <= 0.75:
+            weight += 0.04
+        elif abs_trend_bias >= 1.60:
+            weight -= 0.14
+        elif abs_trend_bias >= 1.10:
+            weight -= 0.08
+        if row_side == "warm":
+            if float(history_trend_bias_c) >= 0.30:
+                weight += 0.03
+            elif float(history_trend_bias_c) <= -0.90:
+                weight -= 0.06
+        elif row_side == "cold":
+            if float(history_trend_bias_c) <= -0.30:
+                weight += 0.03
+            elif float(history_trend_bias_c) >= 0.90:
+                weight -= 0.06
+
+    if (
+        cloud_effective_cover is not None
+        and radiation_eff is not None
+        and float(cloud_effective_cover) >= 0.68
+        and float(radiation_eff) <= 0.58
+    ):
+        if future_family in {"warm_follow_through", "warm_landing_pending"}:
+            weight -= 0.12
+        elif future_family == "neutral_plateau":
+            weight += 0.06
+    if str(precip_state or "").strip().lower() not in {"", "none"}:
+        if row_side == "warm":
+            weight -= 0.16
+        elif row_side == "cold":
+            weight += 0.08
+
+    if matched_subset_active:
+        if match_tier in {"exact", "path", "side"}:
+            weight += 0.08
+        else:
+            weight *= 0.55
+
+    return round(_clamp(weight, 0.02, 1.45), 3)
+
+
+def _build_member_evolution_state(
+    *,
+    members: list[dict[str, Any]],
+    member_trajectory: dict[str, Any],
+    phase: str,
+    observed_path: str,
+    observed_path_detail: str,
+    branch_outlook_state: dict[str, Any],
+    matched_subset: dict[str, Any],
+    latest_temp_c: float | None,
+    latest_dewpoint_c: float | None,
+    latest_rh_pct: float | None,
+    latest_wspd_kmh: float | None,
+    latest_wdir_deg: float | None,
+    latest_pressure_hpa: float | None,
+    temp_trend_c: float | None,
+    temp_bias_c: float | None,
+    cloud_effective_cover: float | None,
+    radiation_eff: float | None,
+    precip_state: str,
+    member_history_alignment: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    rows = [dict(raw) for raw in members if str((raw or {}).get("path_label") or "").strip()]
+    if not rows:
+        return {}
+    trajectory_by_number = _trajectory_member_map(member_trajectory)
+
+    branch_source = str(branch_outlook_state.get("branch_source") or "")
+    active_source = branch_source or (
+        "matched_subset" if bool(matched_subset.get("matched_subset_active")) else (
+            "observed_path" if observed_path else "full_ensemble"
+        )
+    )
+    weighted_path_scores = {"warm_support": 0.0, "transition": 0.0, "cold_suppression": 0.0}
+    weighted_family_scores: dict[str, float] = {}
+    member_rows: list[dict[str, Any]] = []
+    weights: list[float] = []
+    history_map = _history_alignment_member_map(member_history_alignment)
+
+    for raw in rows:
+        row_path = str(raw.get("path_label") or "")
+        row_detail = str(raw.get("path_detail") or row_path or "")
+        row_side = _path_side(row_path, path_detail=row_detail)
+        trajectory_row = trajectory_by_number.get(int(raw.get("number") or 0), {})
+        t2m_current_c = _safe_float(trajectory_row.get("t2m_current_c"))
+        td2m_current_c = _safe_float(trajectory_row.get("td2m_current_c"))
+        rh2m_current_pct = _safe_float(raw.get("rh2m_pct"))
+        wind_10m_current_kmh = _safe_float(trajectory_row.get("wind_10m_current_kmh"))
+        wind_dir_10m_current_deg = _safe_float(raw.get("wind_direction_10m_deg"))
+        msl_current_hpa = _safe_float(trajectory_row.get("msl_current_hpa"))
+        surface_temp_gap_c = None if latest_temp_c is None or t2m_current_c is None else round(float(latest_temp_c) - float(t2m_current_c), 2)
+        surface_temp_bias_c = None if latest_temp_c is None or t2m_current_c is None else round(float(t2m_current_c) - float(latest_temp_c), 2)
+        surface_dewpoint_gap_c = None if latest_dewpoint_c is None or td2m_current_c is None else round(float(latest_dewpoint_c) - float(td2m_current_c), 2)
+        surface_rh_gap_pct = None if latest_rh_pct is None or rh2m_current_pct is None else round(float(latest_rh_pct) - float(rh2m_current_pct), 1)
+        wind_gap_kmh = None if latest_wspd_kmh is None or wind_10m_current_kmh is None else abs(float(latest_wspd_kmh) - float(wind_10m_current_kmh))
+        wind_dir_gap_deg = _angular_gap_deg(latest_wdir_deg, wind_dir_10m_current_deg)
+        pressure_gap_hpa = None if latest_pressure_hpa is None or msl_current_hpa is None else abs(float(latest_pressure_hpa) - float(msl_current_hpa))
+        surface_alignment_score = None
+        alignment_terms: list[float] = []
+        alignment_weights: list[float] = []
+        if surface_temp_gap_c is not None:
+            alignment_terms.append(_clamp(1.0 - abs(float(surface_temp_gap_c)) / 3.2, 0.0, 1.0))
+            alignment_weights.append(0.62)
+        if surface_dewpoint_gap_c is not None:
+            alignment_terms.append(_clamp(1.0 - abs(float(surface_dewpoint_gap_c)) / 4.0, 0.0, 1.0))
+            alignment_weights.append(0.08)
+        if surface_rh_gap_pct is not None:
+            alignment_terms.append(_clamp(1.0 - abs(float(surface_rh_gap_pct)) / 28.0, 0.0, 1.0))
+            alignment_weights.append(0.06)
+        if wind_gap_kmh is not None:
+            alignment_terms.append(_clamp(1.0 - float(wind_gap_kmh) / 18.0, 0.0, 1.0))
+            alignment_weights.append(0.20)
+        if wind_dir_gap_deg is not None:
+            alignment_terms.append(_clamp(1.0 - float(wind_dir_gap_deg) / 90.0, 0.0, 1.0))
+            alignment_weights.append(0.08)
+        if pressure_gap_hpa is not None:
+            alignment_terms.append(_clamp(1.0 - float(pressure_gap_hpa) / 3.5, 0.0, 1.0))
+            alignment_weights.append(0.18)
+        if alignment_terms and alignment_weights and sum(alignment_weights) > 0.0:
+            surface_alignment_score = round(
+                sum(term * weight for term, weight in zip(alignment_terms, alignment_weights))
+                / sum(alignment_weights),
+                3,
+            )
+        history_row = history_map.get(int(raw.get("number") or 0), {})
+        history_alignment_score = _safe_float(history_row.get("history_alignment_score"))
+        history_temp_mae_c = _safe_float(history_row.get("history_temp_mae_c"))
+        history_trend_bias_c = _safe_float(history_row.get("history_trend_bias_c"))
+        history_match_count = _safe_float(history_row.get("history_match_count"))
+        match_tier = _member_match_tier(
+            raw,
+            observed_path=observed_path,
+            observed_path_detail=observed_path_detail,
+        )
+        future_family, pace_state, room_factor, overshoot_factor, stall_risk = _member_future_traits(
+            row_path=row_path,
+            row_detail=row_detail,
+            row_side=row_side,
+            delta_t850_c=_safe_float(raw.get("delta_t850_c")),
+            wind_speed_850_kmh=_safe_float(raw.get("wind_speed_850_kmh")),
+            trajectory_row=trajectory_row,
+            branch_outlook_state=branch_outlook_state,
+            cloud_effective_cover=cloud_effective_cover,
+            radiation_eff=radiation_eff,
+            precip_state=precip_state,
+        )
+        compatibility_weight = _member_compatibility_weight(
+            match_tier=match_tier,
+            row_path=row_path,
+            row_detail=row_detail,
+            row_side=row_side,
+            future_family=future_family,
+            branch_outlook_state=branch_outlook_state,
+            matched_subset_active=bool(matched_subset.get("matched_subset_active")),
+            temp_trend_c=temp_trend_c,
+            temp_bias_c=temp_bias_c,
+            cloud_effective_cover=cloud_effective_cover,
+            radiation_eff=radiation_eff,
+            precip_state=precip_state,
+            surface_temp_gap_c=surface_temp_gap_c,
+            surface_temp_bias_c=surface_temp_bias_c,
+            surface_alignment_score=surface_alignment_score,
+            history_alignment_score=history_alignment_score,
+            history_temp_mae_c=history_temp_mae_c,
+            history_trend_bias_c=history_trend_bias_c,
+            history_match_count=history_match_count,
+        )
+        weighted_path_scores[row_path] = weighted_path_scores.get(row_path, 0.0) + compatibility_weight
+        weighted_family_scores[future_family] = weighted_family_scores.get(future_family, 0.0) + compatibility_weight
+        weights.append(compatibility_weight)
+        member_rows.append(
+            {
+                "number": int(raw.get("number") or 0),
+                "path_label": row_path,
+                "path_detail": row_detail,
+                "path_side": row_side,
+                "match_tier": match_tier,
+                "future_family": future_family,
+                "pace_state": pace_state,
+                "compatibility_weight": compatibility_weight,
+                "room_factor": room_factor,
+                "overshoot_factor": overshoot_factor,
+                "stall_risk": stall_risk,
+                "delta_t850_c": _safe_float(raw.get("delta_t850_c")),
+                "wind_speed_850_kmh": _safe_float(raw.get("wind_speed_850_kmh")),
+                "trajectory_shape": str(trajectory_row.get("trajectory_shape") or ""),
+                "t2m_current_c": t2m_current_c,
+                "td2m_current_c": td2m_current_c,
+                "rh2m_current_pct": rh2m_current_pct,
+                "wind_10m_current_kmh": wind_10m_current_kmh,
+                "wind_direction_10m_current_deg": wind_dir_10m_current_deg,
+                "msl_current_hpa": msl_current_hpa,
+                "surface_temp_gap_c": surface_temp_gap_c,
+                "surface_temp_bias_c": surface_temp_bias_c,
+                "surface_dewpoint_gap_c": surface_dewpoint_gap_c,
+                "surface_rh_gap_pct": surface_rh_gap_pct,
+                "surface_alignment_score": surface_alignment_score,
+                "history_alignment_score": history_alignment_score,
+                "history_temp_mae_c": history_temp_mae_c,
+                "history_trend_bias_c": history_trend_bias_c,
+                "history_match_count": history_match_count,
+                "wind_gap_kmh": round(float(wind_gap_kmh), 2) if wind_gap_kmh is not None else None,
+                "wind_dir_gap_deg": round(float(wind_dir_gap_deg), 1) if wind_dir_gap_deg is not None else None,
+                "pressure_gap_hpa": round(float(pressure_gap_hpa), 2) if pressure_gap_hpa is not None else None,
+                "prior3h_t850_delta_c": _safe_float(trajectory_row.get("prior3h_t850_delta_c")),
+                "next3h_t850_delta_c": _safe_float(trajectory_row.get("next3h_t850_delta_c")),
+                "prior3h_t2m_delta_c": _safe_float(trajectory_row.get("prior3h_t2m_delta_c")),
+                "next3h_t2m_delta_c": _safe_float(trajectory_row.get("next3h_t2m_delta_c")),
+                "next3h_td2m_delta_c": _safe_float(trajectory_row.get("next3h_td2m_delta_c")),
+                "trajectory_accel_c": _safe_float(trajectory_row.get("trajectory_accel_c")),
+                "future_room_c": _safe_float(trajectory_row.get("future_room_c")),
+                "future_cooling_c": _safe_float(trajectory_row.get("future_cooling_c")),
+                "next3h_wind10_delta_kmh": _safe_float(trajectory_row.get("next3h_wind10_delta_kmh")),
+                "next3h_msl_delta_hpa": _safe_float(trajectory_row.get("next3h_msl_delta_hpa")),
+            }
+        )
+
+    total_weight = sum(weights)
+    if total_weight <= 0.0:
+        return {}
+
+    weighted_path_share = {
+        key: round(value / total_weight, 3)
+        for key, value in weighted_path_scores.items()
+        if value > 0.0
+    }
+    dominant_weighted_path = max(weighted_path_scores.items(), key=lambda item: item[1])[0]
+    dominant_future_family = max(weighted_family_scores.items(), key=lambda item: item[1])[0]
+    branch_side = str(branch_outlook_state.get("branch_side") or "")
+    branch_weight_share = round(
+        sum(
+            float(row.get("compatibility_weight") or 0.0)
+            for row in member_rows
+            if str(row.get("path_side") or "") == branch_side
+        ) / total_weight,
+        3,
+    ) if branch_side else None
+
+    return {
+        "active_source": active_source,
+        "dominant_weighted_path": dominant_weighted_path,
+        "dominant_weighted_future_family": dominant_future_family,
+        "effective_member_count": round(_effective_member_count(weights), 2),
+        "branch_side_weight_share": branch_weight_share,
+        "weighted_path_share": weighted_path_share,
+        "weighted_future_family_share": {
+            key: round(value / total_weight, 3)
+            for key, value in weighted_family_scores.items()
+            if value > 0.0
+        },
+        "members": member_rows,
+    }
+
+
 def _build_matched_branch_outlook(
     *,
     phase: str,
     hours_to_peak: float | None,
     hours_to_window_end: float | None,
+    ensemble_member_count: float | None,
+    members: list[dict[str, Any]],
     observed_path: str,
     observed_path_detail: str,
     alignment_confidence: str,
@@ -573,7 +1532,15 @@ def _build_matched_branch_outlook(
     precip_state: str,
     second_peak_potential: str,
     multi_peak_state: str,
+    rebound_mode: str,
+    should_discuss_second_peak: bool,
+    future_candidate_role: str,
+    latest_temp_c: float | None,
+    observed_max_temp_c: float | None,
+    temp_trend_c: float | None,
+    history_alignment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    history_state = dict(history_alignment or {})
     matched_subset_active = bool(matched_subset.get("matched_subset_active"))
     active_source = "ensemble_dominant"
     active_path = str(ensemble_summary.get("dominant_path") or "")
@@ -591,12 +1558,42 @@ def _build_matched_branch_outlook(
         p90 = _safe_float(matched_subset.get("matched_delta_t850_p90_c"))
         if p10 is not None and p90 is not None:
             active_signal_dispersion_c = round(float(p90) - float(p10), 2)
+    elif bool(history_state.get("history_supported")) and str(history_state.get("dominant_path") or ""):
+        history_path = str(history_state.get("dominant_path") or "")
+        history_detail = str(history_state.get("dominant_path_detail") or history_path)
+        history_prob = _safe_float(history_state.get("dominant_prob"))
+        history_margin = _safe_float(history_state.get("dominant_margin_prob"))
+        history_override = bool(
+            not observed_path
+            or alignment_confidence not in {"high", "partial"}
+            or history_path == observed_path
+            or history_detail == observed_path_detail
+            or bool(history_state.get("history_path_locked"))
+            or (
+                history_prob is not None
+                and history_prob >= 0.70
+                and history_margin is not None
+                and history_margin >= 0.16
+            )
+        )
+        if history_override:
+            active_source = "history_surface_match"
+            active_path = history_path
+            active_path_detail = history_detail
+            active_dominant_prob = history_prob
+            if history_margin is not None:
+                active_signal_dispersion_c = round(max(0.28, 2.1 * (1.0 - float(history_margin))), 2)
     elif alignment_confidence in {"high", "partial"} and observed_path:
         active_source = "observed_path"
         active_path = str(observed_path or "")
         active_path_detail = str(observed_path_detail or active_path or "")
 
     active_side = _path_side(active_path, path_detail=active_path_detail)
+    branch_member_count, branch_member_share = _branch_member_count(
+        members=members,
+        branch_path=active_path,
+        branch_path_detail=active_path_detail,
+    )
     precip_key = str(precip_state or "").strip().lower()
     precip_active = precip_key not in {"", "none"}
     cloud_locked = bool(
@@ -646,6 +1643,22 @@ def _build_matched_branch_outlook(
         str(second_peak_potential or "").strip().lower() in {"moderate", "high"}
         or str(multi_peak_state or "").strip().lower() == "likely"
     )
+    current_fresh_high = bool(
+        latest_temp_c is not None
+        and observed_max_temp_c is not None
+        and float(latest_temp_c) >= float(observed_max_temp_c) - 0.05
+    )
+    fresh_high_still_rising = bool(
+        current_fresh_high
+        and (temp_trend_c is None or float(temp_trend_c) >= 0.08)
+    )
+    second_peak_retest_ready = bool(
+        second_peak_watch
+        and bool(should_discuss_second_peak)
+        and str(rebound_mode or "").strip().lower() in {"second_peak", "retest"}
+        and str(future_candidate_role or "").strip().lower() == "secondary_peak_candidate"
+        and not fresh_high_still_rising
+    )
 
     volatility_score = 0
     if active_split_state == "split":
@@ -682,7 +1695,7 @@ def _build_matched_branch_outlook(
     fallback_family = "neutral_plateau"
     fallback_stage = "holding"
 
-    if second_peak_watch:
+    if second_peak_retest_ready:
         family = "second_peak_retest"
         stage_now = "watch"
         next_gate = "rebreak_signal"
@@ -837,6 +1850,20 @@ def _build_matched_branch_outlook(
     if family == "volatile_split":
         fallback_prob = max(fallback_prob, 0.42)
     fallback_prob = round(_clamp(fallback_prob, 0.14, 0.68), 3)
+    circulation_signature_text, circulation_signature_score = _build_branch_circulation_signature(
+        members=members,
+        branch_path=active_path,
+        branch_path_detail=active_path_detail,
+        branch_side=active_side,
+        transport_state=transport_state,
+        warm_landing_pending=warm_landing_pending,
+        warm_landing_ready=warm_landing_ready,
+        cold_landing_ready=cold_landing_ready,
+        dry_mix_support=dry_mix_support,
+        cloud_locked=cloud_locked,
+        precip_active=precip_active,
+        cap_hold=cap_hold,
+    )
 
     return {
         "branch_source": active_source,
@@ -865,9 +1892,26 @@ def _build_matched_branch_outlook(
         "dry_mix_support": dry_mix_support,
         "cap_hold": cap_hold,
         "second_peak_watch": second_peak_watch,
+        "second_peak_retest_ready": second_peak_retest_ready,
         "matched_subset_active": matched_subset_active,
+        "ensemble_member_count": _safe_float(ensemble_member_count),
+        "branch_member_count": _safe_float(branch_member_count),
+        "branch_member_share": _safe_float(branch_member_share),
+        "matched_member_count": _safe_float(matched_subset.get("matched_member_count")),
         "matched_member_share": _safe_float(matched_subset.get("matched_member_share")),
         "rejected_member_share": _safe_float(matched_subset.get("rejected_member_share")),
+        "circulation_signature_text": circulation_signature_text,
+        "circulation_signature_score": circulation_signature_score,
+        "history_supported": bool(history_state.get("history_supported")),
+        "history_path_locked": bool(history_state.get("history_path_locked")),
+        "history_matched_time_count": _safe_float(history_state.get("matched_time_count")),
+        "history_dominant_path": str(history_state.get("dominant_path") or ""),
+        "history_dominant_path_detail": str(history_state.get("dominant_path_detail") or ""),
+        "history_dominant_prob": _safe_float(history_state.get("dominant_prob")),
+        "history_dominant_margin_prob": _safe_float(history_state.get("dominant_margin_prob")),
+        "history_alignment_score": _safe_float(history_state.get("dominant_alignment_score")),
+        "history_temp_mae_c": _safe_float(history_state.get("dominant_temp_mae_c")),
+        "history_trend_bias_c": _safe_float(history_state.get("dominant_trend_bias_c")),
     }
 
 
@@ -893,6 +1937,7 @@ def build_posterior_feature_vector(
     ensemble_summary = dict(ensemble_factor.get("summary") or {})
     ensemble_probs = dict(ensemble_factor.get("probabilities") or {})
     ensemble_diag = dict(ensemble_factor.get("diagnostics") or {})
+    member_history_alignment = dict(ensemble_factor.get("member_history_alignment") or {})
     h850_review = dict(forecast.get("h850_review") or {})
     h700 = dict(forecast.get("h700") or {})
     h925 = dict(forecast.get("h925") or {})
@@ -997,10 +2042,16 @@ def build_posterior_feature_vector(
         match_state=str(ensemble_alignment.get("observed_alignment_match_state") or ""),
         confidence=str(ensemble_alignment.get("observed_alignment_confidence") or ""),
     )
+    history_alignment_summary = _history_alignment_summary(
+        members=list(ensemble_factor.get("members") or []),
+        member_history_alignment=member_history_alignment,
+    )
     matched_branch_outlook = _build_matched_branch_outlook(
         phase=phase_name,
         hours_to_peak=hours_to_peak,
         hours_to_window_end=hours_to_window_end,
+        ensemble_member_count=_safe_float(ensemble_factor.get("member_count")),
+        members=list(ensemble_factor.get("members") or []),
         observed_path=str(ensemble_alignment.get("observed_path") or ""),
         observed_path_detail=str(ensemble_alignment.get("observed_path_detail") or ""),
         alignment_confidence=str(ensemble_alignment.get("observed_alignment_confidence") or ""),
@@ -1020,6 +2071,42 @@ def build_posterior_feature_vector(
         precip_state=precip_state,
         second_peak_potential=str(phase.get("second_peak_potential") or ""),
         multi_peak_state=str(shape_forecast.get("multi_peak_state") or ""),
+        rebound_mode=str(phase.get("rebound_mode") or ""),
+        should_discuss_second_peak=bool(phase.get("should_discuss_second_peak")),
+        future_candidate_role=str((phase.get("shape") or {}).get("future_candidate_role") or ""),
+        latest_temp_c=latest_temp_c,
+        observed_max_temp_c=observed_max_temp_c,
+        temp_trend_c=_safe_float(obs.get("temp_trend_effective_c"))
+        if _safe_float(obs.get("temp_trend_effective_c")) is not None
+        else _safe_float(obs.get("temp_trend_c")),
+        history_alignment=history_alignment_summary,
+    )
+    member_evolution_state = _build_member_evolution_state(
+        members=list(ensemble_factor.get("members") or []),
+        member_trajectory=dict(ensemble_factor.get("member_trajectory") or {}),
+        phase=phase_name,
+        observed_path=str(ensemble_alignment.get("observed_path") or ""),
+        observed_path_detail=str(ensemble_alignment.get("observed_path_detail") or ""),
+        branch_outlook_state=matched_branch_outlook,
+        matched_subset=matched_subset,
+        latest_temp_c=latest_temp_c,
+        latest_dewpoint_c=dewpoint_c,
+        latest_rh_pct=_safe_float(obs.get("latest_rh")),
+        latest_wspd_kmh=(
+            _safe_float(obs.get("latest_wspd_kt")) * 1.852
+            if _safe_float(obs.get("latest_wspd_kt")) is not None
+            else None
+        ),
+        latest_wdir_deg=_safe_float(obs.get("latest_wdir_deg")),
+        latest_pressure_hpa=_safe_float(obs.get("latest_pressure_hpa")),
+        temp_trend_c=_safe_float(obs.get("temp_trend_effective_c"))
+        if _safe_float(obs.get("temp_trend_effective_c")) is not None
+        else _safe_float(obs.get("temp_trend_c")),
+        temp_bias_c=_safe_float(obs.get("temp_bias_c")),
+        cloud_effective_cover=cloud_effective_cover,
+        radiation_eff=radiation_eff,
+        precip_state=precip_state,
+        member_history_alignment=member_history_alignment,
     )
 
     return {
@@ -1227,6 +2314,17 @@ def build_posterior_feature_vector(
             "rejected_dominant_path": str(matched_subset.get("rejected_dominant_path") or ""),
             "rejected_dominant_prob": _safe_float(matched_subset.get("rejected_dominant_prob")),
             "matched_side": str(matched_subset.get("matched_side") or ""),
+            "history_supported": bool(history_alignment_summary.get("history_supported")),
+            "history_path_locked": bool(history_alignment_summary.get("history_path_locked")),
+            "history_matched_time_count": _safe_float(history_alignment_summary.get("matched_time_count")),
+            "history_used_member_count": _safe_float(history_alignment_summary.get("used_member_count")),
+            "history_dominant_path": str(history_alignment_summary.get("dominant_path") or ""),
+            "history_dominant_path_detail": str(history_alignment_summary.get("dominant_path_detail") or ""),
+            "history_dominant_prob": _safe_float(history_alignment_summary.get("dominant_prob")),
+            "history_dominant_margin_prob": _safe_float(history_alignment_summary.get("dominant_margin_prob")),
+            "history_alignment_score": _safe_float(history_alignment_summary.get("dominant_alignment_score")),
+            "history_temp_mae_c": _safe_float(history_alignment_summary.get("dominant_temp_mae_c")),
+            "history_trend_bias_c": _safe_float(history_alignment_summary.get("dominant_trend_bias_c")),
         },
         "matched_branch_outlook_state": {
             "branch_source": str(matched_branch_outlook.get("branch_source") or ""),
@@ -1255,8 +2353,37 @@ def build_posterior_feature_vector(
             "dry_mix_support": bool(matched_branch_outlook.get("dry_mix_support")),
             "cap_hold": bool(matched_branch_outlook.get("cap_hold")),
             "second_peak_watch": bool(matched_branch_outlook.get("second_peak_watch")),
+            "second_peak_retest_ready": bool(matched_branch_outlook.get("second_peak_retest_ready")),
             "matched_subset_active": bool(matched_branch_outlook.get("matched_subset_active")),
+            "ensemble_member_count": _safe_float(matched_branch_outlook.get("ensemble_member_count")),
+            "branch_member_count": _safe_float(matched_branch_outlook.get("branch_member_count")),
+            "branch_member_share": _safe_float(matched_branch_outlook.get("branch_member_share")),
+            "matched_member_count": _safe_float(matched_branch_outlook.get("matched_member_count")),
             "matched_member_share": _safe_float(matched_branch_outlook.get("matched_member_share")),
             "rejected_member_share": _safe_float(matched_branch_outlook.get("rejected_member_share")),
+            "circulation_signature_text": str(matched_branch_outlook.get("circulation_signature_text") or ""),
+            "circulation_signature_score": _safe_float(matched_branch_outlook.get("circulation_signature_score")),
+            "history_supported": bool(matched_branch_outlook.get("history_supported")),
+            "history_path_locked": bool(matched_branch_outlook.get("history_path_locked")),
+            "history_matched_time_count": _safe_float(matched_branch_outlook.get("history_matched_time_count")),
+            "history_dominant_path": str(matched_branch_outlook.get("history_dominant_path") or ""),
+            "history_dominant_path_detail": str(matched_branch_outlook.get("history_dominant_path_detail") or ""),
+            "history_dominant_prob": _safe_float(matched_branch_outlook.get("history_dominant_prob")),
+            "history_dominant_margin_prob": _safe_float(matched_branch_outlook.get("history_dominant_margin_prob")),
+            "history_alignment_score": _safe_float(matched_branch_outlook.get("history_alignment_score")),
+            "history_temp_mae_c": _safe_float(matched_branch_outlook.get("history_temp_mae_c")),
+            "history_trend_bias_c": _safe_float(matched_branch_outlook.get("history_trend_bias_c")),
+        },
+        "member_evolution_state": {
+            "active_source": str(member_evolution_state.get("active_source") or ""),
+            "dominant_weighted_path": str(member_evolution_state.get("dominant_weighted_path") or ""),
+            "dominant_weighted_future_family": str(member_evolution_state.get("dominant_weighted_future_family") or ""),
+            "effective_member_count": _safe_float(member_evolution_state.get("effective_member_count")),
+            "branch_side_weight_share": _safe_float(member_evolution_state.get("branch_side_weight_share")),
+            "history_matched_time_count": _safe_float(history_alignment_summary.get("matched_time_count")),
+            "history_supported": bool(history_alignment_summary.get("history_supported")),
+            "weighted_path_share": dict(member_evolution_state.get("weighted_path_share") or {}),
+            "weighted_future_family_share": dict(member_evolution_state.get("weighted_future_family_share") or {}),
+            "members": list(member_evolution_state.get("members") or []),
         },
     }

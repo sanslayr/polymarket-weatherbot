@@ -14,6 +14,7 @@ import requests
 
 from runtime_cache_policy import gfs_binary_cache_enabled
 from runtime_utils import resolve_runtime_for_valid_time, runtime_dt_from_tag
+from venv_utils import repo_venv_python
 
 
 def _nomads_url(runtime_dt: datetime, fh: int, lat: float, lon: float, span: float = 0.6) -> str:
@@ -54,7 +55,7 @@ def _repo_root(root: Path) -> Path:
         Path(__file__).resolve().parent.parent,
     ]
     for candidate in candidates:
-        if (candidate / ".venv_gfs").exists():
+        if (candidate / ".venv_nwp").exists() or (candidate / ".venv_gfs").exists():
             return candidate
     return Path(__file__).resolve().parent.parent
 
@@ -108,9 +109,9 @@ def _ensure_grib_with_cycle_fallback(
 
 
 def _extract_point_from_grib(grib_path: Path, lat: float, lon: float, root: Path) -> dict[str, Any]:
-    py = _repo_root(root) / ".venv_gfs" / "bin" / "python"
+    py = repo_venv_python(_repo_root(root))
     if not py.exists():
-        raise RuntimeError("gfs parser venv missing (.venv_gfs)")
+        raise RuntimeError("gfs parser venv missing (.venv_nwp)")
 
     code = r'''
 import json, sys, math
@@ -249,9 +250,9 @@ def build_2d_grid_payload_gfs(
             max_back_cycles=3,
         )
 
-        py = _repo_root(root) / ".venv_gfs" / "bin" / "python"
+        py = repo_venv_python(_repo_root(root))
         if not py.exists():
-            raise RuntimeError("gfs parser venv missing (.venv_gfs)")
+            raise RuntimeError("gfs parser venv missing (.venv_nwp)")
         if profile == "outer500":
             code = r'''
 import json, sys, xarray as xr

@@ -8,7 +8,9 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from market_alert_worker import _station_has_active_task  # noqa: E402
+from unittest.mock import patch
+
+from market_alert_worker import _station_has_active_task, _station_task  # noqa: E402
 from market_alert_worker import _is_day_disabled_for_event, _should_disable_station_for_event, _update_day_disabled_event  # noqa: E402
 from station_catalog import Station  # noqa: E402
 
@@ -52,6 +54,33 @@ class MarketAlertWorkerTest(unittest.TestCase):
                 "https://polymarket.com/event/highest-temperature-in-hong-kong-on-march-13-2026",
             )
         )
+
+    def test_station_task_exposes_detector_observed_temp_for_window_logging(self) -> None:
+        row = {"city": "Paris", "icao": "LFPG", "lat": "49.0097", "lon": "2.5479", "country": "France"}
+        metar_ctx = {
+            "observed_max_temp_c": 10.0,
+            "observed_max_temp_quantized": True,
+            "observed_max_time_local": "2026-03-14T14:20:00+01:00",
+        }
+        result = {
+            "signal": {"triggered": False},
+            "monitor_ok": True,
+            "monitor_status": "ok",
+            "monitor_diagnostics": {},
+            "final_state": {},
+            "catalog": {},
+        }
+        with patch("market_monitor_service.run_market_monitor_event_window", return_value=result):
+            payload = _station_task(
+                row,
+                metar_ctx,
+                "2026-03-14T13:20:00Z",
+                stream_seconds=60.0,
+            )
+
+        self.assertEqual(payload["detector_observed_temp_c"], 10.0)
+        self.assertTrue(payload["detector_observed_temp_quantized"])
+        self.assertEqual(payload["detector_observed_time_local"], "2026-03-14T14:20:00+01:00")
 
 
 if __name__ == "__main__":

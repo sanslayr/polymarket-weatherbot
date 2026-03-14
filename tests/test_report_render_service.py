@@ -9,7 +9,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from report_render_service import _background_compact_clause, _format_local_clock, _natural_flow_chain_line, choose_section_text  # noqa: E402
+from report_render_service import _background_compact_clause, _format_local_clock, _natural_flow_chain_line, _phase_structure_reasoning_line, choose_section_text  # noqa: E402
 
 
 def _snapshot_template() -> dict:
@@ -259,7 +259,7 @@ class ReportRenderServiceTest(unittest.TestCase):
         self.assertIn("今日已观测最高温：28.4°C（2026/03/09 11:30 Local）", text)
         self.assertNotIn("目标峰值窗仍远，区间先按模式峰值和环流修正理解", text)
         self.assertNotIn("最新报已经到", text)
-        self.assertNotIn("**判断依据**", text)
+        self.assertNotIn("**判断理由**", text)
 
     def test_near_window_drops_generic_background_when_no_clear_signal(self) -> None:
         snapshot = _snapshot_template()
@@ -369,11 +369,11 @@ class ReportRenderServiceTest(unittest.TestCase):
                 analysis_snapshot=snapshot,
             )
 
-        self.assertIn("**判断依据**", text)
+        self.assertIn("**判断理由**", text)
         self.assertNotIn("最新报还在 16°C 一带横着走", text)
         self.assertNotIn("区间先放在 17.0~18.4°C，下沿留给偏冷回摆", text)
         self.assertIn("锋后偏南气流仍在托住主路径", text)
-        self.assertLess(text.index("**判断依据**"), text.index("📈 **Polymarket 盘口与博弈**"))
+        self.assertLess(text.index("**判断理由**"), text.index("📈 **Polymarket 盘口与博弈**"))
 
     def test_transition_window_can_promote_to_near_obs_on_live_signal(self) -> None:
         snapshot = _snapshot_template()
@@ -502,7 +502,7 @@ class ReportRenderServiceTest(unittest.TestCase):
                 analysis_snapshot=snapshot,
             )
 
-        self.assertIn("**判断依据**", text)
+        self.assertIn("**判断理由**", text)
         self.assertNotIn("最新报还在 7°C 一带横着走", text)
         self.assertTrue(
             "若冷空气压制尚未解除" in text
@@ -559,8 +559,8 @@ class ReportRenderServiceTest(unittest.TestCase):
                 analysis_snapshot=snapshot,
             )
 
-        self.assertIn("**判断依据**", text)
-        self.assertIn("当前实况高度贴合系集主路径", text)
+        self.assertIn("**判断理由**", text)
+        self.assertIn("当前实况高度贴合系集主路径“偏暖风抬温未站稳”", text)
         self.assertIn("离峰值时点约4.5小时", text)
         self.assertIn("主路径约 68%", text)
 
@@ -570,6 +570,7 @@ class ReportRenderServiceTest(unittest.TestCase):
             "time_phase": {"hours_to_peak": 3.5, "hours_to_window_start": 1.5},
             "observation_state": {"latest_temp_c": 10.0},
             "ensemble_path_state": {
+                "member_count": 60,
                 "dominant_path": "warm_support",
                 "dominant_path_detail": "warm_support",
                 "dominant_prob": 0.94,
@@ -614,7 +615,8 @@ class ReportRenderServiceTest(unittest.TestCase):
                 analysis_snapshot=snapshot,
             )
 
-        self.assertIn("次支只剩暖侧试探 6%", text)
+        self.assertIn("约56/60支", text)
+        self.assertIn("次支只剩偏暖风抬温未站稳 6%", text)
         self.assertIn("主路径约 94%", text)
 
     def test_transition_rationale_can_surface_matched_warm_path_detail(self) -> None:
@@ -683,7 +685,7 @@ class ReportRenderServiceTest(unittest.TestCase):
                 analysis_snapshot=snapshot,
             )
 
-        self.assertIn("850偏暖输送还没完全接地", text)
+        self.assertIn("850偏暖背景还没完全转成地面抬温", text)
         self.assertIn("低层耦合能不能真正接上", text)
 
     def test_transition_rationale_can_surface_matched_cold_path_convective_detail(self) -> None:
@@ -744,8 +746,9 @@ class ReportRenderServiceTest(unittest.TestCase):
                 analysis_snapshot=snapshot,
             )
 
-        self.assertIn("对流和降水会不会继续压温", text)
-        self.assertIn("贴冷侧", text)
+        self.assertIn("雷达回波前沿", text)
+        self.assertIn("附近 PWS 的降温/阵风/雨强", text)
+        self.assertIn("雷雨冷风压温", text)
 
     def test_near_window_rationale_prefers_window_progress_detail_over_generic_warm_path(self) -> None:
         snapshot = _snapshot_template()
@@ -790,7 +793,7 @@ class ReportRenderServiceTest(unittest.TestCase):
                 analysis_snapshot=snapshot,
             )
 
-        self.assertIn("当前实况高度贴合系集主路径", text)
+        self.assertIn("当前实况高度贴合系集主路径“偏暖风抬温延续”", text)
         self.assertIn("距峰值窗开始", text)
         self.assertIn("比区间下沿低约 2.3°C", text)
         self.assertNotIn("正沿暖输送抬升演进", text)
@@ -838,7 +841,7 @@ class ReportRenderServiceTest(unittest.TestCase):
             )
 
         self.assertIn("当前实况正偏离系集主支", text)
-        self.assertIn("暖侧试探", text)
+        self.assertIn("偏暖风抬温未站稳", text)
         self.assertIn("主路径约 62%", text)
 
     def test_transition_rationale_can_surface_posterior_locking_basis(self) -> None:
@@ -887,7 +890,7 @@ class ReportRenderServiceTest(unittest.TestCase):
                 analysis_snapshot=snapshot,
             )
 
-        self.assertIn("**判断依据**", text)
+        self.assertIn("**判断理由**", text)
         self.assertIn("综合判断已把上沿压回已观测高点附近", text)
         self.assertIn("锁定约 84%", text)
         self.assertIn("再创新高约 18%", text)
@@ -938,6 +941,35 @@ class ReportRenderServiceTest(unittest.TestCase):
 
         self.assertIn("后段仍留着可挑战前高的二峰窗口", text)
         self.assertIn("0.4°C", text)
+
+    def test_phase_structure_reasoning_skips_retest_wording_for_fresh_high_still_rising(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["temp_phase_decision"] = {
+            "display_phase": "near_window",
+            "daily_peak_state": "open",
+            "second_peak_potential": "high",
+            "rebound_mode": "second_peak",
+            "should_discuss_second_peak": True,
+            "shape": {
+                "future_candidate_role": "secondary_peak_candidate",
+                "future_gap_vs_obs": 0.5,
+                "future_gap_vs_current": 0.5,
+            },
+        }
+
+        score, line = _phase_structure_reasoning_line(
+            snapshot,
+            report_mode="near_obs",
+            unit="C",
+            metar_diag={
+                "latest_temp": 24.2,
+                "observed_max_temp_c": 24.2,
+                "temp_trend_1step_c": 0.4,
+            },
+        )
+
+        self.assertEqual(score, 0.0)
+        self.assertEqual(line, "")
 
     def test_transition_rationale_can_surface_late_peak_station_bias(self) -> None:
         snapshot = _snapshot_template()
@@ -1258,8 +1290,8 @@ class ReportRenderServiceTest(unittest.TestCase):
             analysis_snapshot=snapshot,
         )
 
-        self.assertIn("几乎一边倒收敛到暖输送抬升路径", text)
-        self.assertIn("次支只剩暖侧试探 6%", text)
+        self.assertIn("几乎一边倒收敛到偏暖风抬温延续路径", text)
+        self.assertIn("次支只剩偏暖风抬温未站稳 6%", text)
         self.assertIn("暖支振幅大多落在 +3.6°C~+4.0°C", text)
 
     def test_transition_rationale_can_surface_obs_filtered_ensemble_subset(self) -> None:
@@ -1268,6 +1300,7 @@ class ReportRenderServiceTest(unittest.TestCase):
             "time_phase": {"hours_to_peak": 1.5, "hours_to_window_start": 0.3},
             "observation_state": {"latest_temp_c": 21.2},
             "ensemble_path_state": {
+                "member_count": 60,
                 "dominant_path": "cold_suppression",
                 "dominant_path_detail": "cold_suppression",
                 "dominant_prob": 0.51,
@@ -1282,6 +1315,7 @@ class ReportRenderServiceTest(unittest.TestCase):
                 "observed_alignment_confidence": "none",
                 "observed_path_locked": False,
                 "matched_subset_active": True,
+                "matched_member_count": 48,
                 "matched_dominant_path": "warm_support",
                 "matched_dominant_path_detail": "warm_support",
                 "matched_dominant_prob": 0.80,
@@ -1321,7 +1355,8 @@ class ReportRenderServiceTest(unittest.TestCase):
             )
 
         self.assertIn("当前实况已筛掉和实况不符的主支", text)
-        self.assertIn("保留下来的系集里，暖输送抬升约 80%", text)
+        self.assertIn("保留下来的 48/60支系集里，主路径是偏暖风抬温延续", text)
+        self.assertIn("子集内约 80%", text)
         self.assertIn("距峰值窗开始", text)
 
     def test_transition_rationale_prefers_significant_forecast_detail_from_posterior_context(self) -> None:
@@ -1343,7 +1378,7 @@ class ReportRenderServiceTest(unittest.TestCase):
         snapshot["weather_posterior"] = {
             "core": {
                 "path_context": {
-                    "significant_forecast_detail_text": "预报最关键的仍是 850 暖输送能不能真正接地；没接地前，上沿先别看满",
+                    "significant_forecast_detail_text": "预报最关键的仍是 850 偏暖背景能不能真正转成地面抬温；没转出来前，上沿先别看满",
                     "significant_forecast_detail_score": 0.89,
                 }
             },
@@ -1376,8 +1411,145 @@ class ReportRenderServiceTest(unittest.TestCase):
                 analysis_snapshot=snapshot,
             )
 
-        self.assertIn("850 暖输送能不能真正接地", text)
+        self.assertIn("850 偏暖背景能不能真正转成地面抬温", text)
         self.assertIn("上沿先别看满", text)
+
+    def test_transition_rationale_can_surface_circulation_signature(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["posterior_feature_vector"] = {
+            "time_phase": {"hours_to_peak": 1.2, "hours_to_window_start": 0.1},
+            "observation_state": {"latest_temp_c": 12.0},
+            "ensemble_path_state": {
+                "dominant_path": "warm_support",
+                "dominant_path_detail": "warm_support",
+                "dominant_prob": 0.88,
+                "observed_path": "warm_support",
+                "observed_path_detail": "warm_support",
+                "observed_alignment_match_state": "path",
+                "observed_alignment_confidence": "high",
+                "observed_path_locked": True,
+            },
+        }
+        snapshot["weather_posterior"] = {
+            "core": {
+                "path_context": {
+                    "surface_signature_text": "当前更贴近偏暖风抬温延续分支（48/51支）；匹配成员当前和实况贴得很近；未来1-3小时多数成员仍偏小幅补涨",
+                    "surface_signature_score": 0.86,
+                }
+            },
+            "event_probs": {},
+        }
+        snapshot["peak_data"]["summary"]["ranges"]["core"] = {"lo": 12.4, "hi": 13.6}
+        with patch(
+            "report_render_service._build_polymarket_section",
+            return_value=(
+                "📈 **Polymarket 盘口与博弈**\n"
+                "**博弈区间**\n"
+                "  • 13°C：Bid 39¢ | Ask 45¢"
+            ),
+        ):
+            text = choose_section_text(
+                primary_window={
+                    "peak_local": "2026-03-09T16:30",
+                    "start_local": "2026-03-09T13:00",
+                    "end_local": "2026-03-09T17:00",
+                    "peak_temp_c": 13.4,
+                },
+                metar_text="• **🌡️ 气温**：12°C",
+                metar_diag={
+                    "station_icao": "LTAC",
+                    "latest_report_local": "2026-03-09T14:20:00+03:00",
+                    "latest_temp": 12.0,
+                    "temp_trend_1step_c": 0.1,
+                },
+                polymarket_event_url="https://polymarket.com/event/test",
+                analysis_snapshot=snapshot,
+            )
+
+        self.assertIn("当前更贴近偏暖风抬温延续分支", text)
+        self.assertIn("未来1-3小时多数成员仍偏小幅补涨", text)
+
+    def test_transition_rationale_can_surface_ground_and_next3h_branch_detail(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["posterior_feature_vector"] = {
+            "time_phase": {"hours_to_peak": 0.9, "hours_to_window_start": 0.1},
+            "observation_state": {"latest_temp_c": 12.7},
+            "ensemble_path_state": {
+                "dominant_path": "warm_support",
+                "dominant_path_detail": "warm_support",
+                "dominant_prob": 0.91,
+                "observed_path": "warm_support",
+                "observed_path_detail": "warm_support",
+                "observed_alignment_match_state": "path",
+                "observed_alignment_confidence": "high",
+                "observed_path_locked": True,
+            },
+        }
+        snapshot["canonical_raw_state"] = {
+            "forecast": {
+                "context": {"bottleneck_code": "low_level_coupling_weak"},
+                "h850_review": {
+                    "advection_type": "warm",
+                    "thermal_advection_state": "probable",
+                    "surface_role": "background",
+                },
+            },
+            "observations": {"precip_state": "none", "cloud_trend": "stable", "latest_wx": ""},
+        }
+        snapshot["weather_posterior"] = {
+            "core": {
+                "path_context": {
+                    "active_path_label": "偏暖风抬温延续",
+                    "match_count_text": "（48/51支）",
+                    "has_surface_member_detail": True,
+                    "surface_temp_gap_c_p50": -0.22,
+                    "surface_alignment_score": 0.84,
+                    "surface_wind_gap_kmh_mean": 2.3,
+                    "surface_pressure_gap_hpa_mean": 0.6,
+                    "surface_signature_text": "当前更贴近偏暖风抬温延续分支（48/51支）；匹配成员当前和实况贴得很近；未来1-3小时多数成员仍偏小幅补涨",
+                    "surface_signature_score": 0.88,
+                    "next3h_t2m_delta_c_p50": 0.38,
+                    "next3h_wind10_delta_kmh_p50": 3.6,
+                    "next3h_msl_delta_hpa_p50": -0.9,
+                    "dominant_future_family": "warm_follow_through",
+                    "dominant_future_family_share": 0.67,
+                    "next_transition_gate_label": "地面偏暖风和升温能否真正续上",
+                    "observation_watch_text": "地面风向是否继续偏暖、最新1-2报升温能否续上和云量是否继续放开",
+                }
+            },
+            "event_probs": {},
+        }
+        snapshot["peak_data"]["summary"]["ranges"]["core"] = {"lo": 12.8, "hi": 13.8}
+        with patch(
+            "report_render_service._build_polymarket_section",
+            return_value=(
+                "📈 **Polymarket 盘口与博弈**\n"
+                "**博弈区间**\n"
+                "  • 13°C：Bid 39¢ | Ask 45¢"
+            ),
+        ):
+            text = choose_section_text(
+                primary_window={
+                    "peak_local": "2026-03-09T16:30",
+                    "start_local": "2026-03-09T13:00",
+                    "end_local": "2026-03-09T17:00",
+                    "peak_temp_c": 13.4,
+                },
+                metar_text="• **🌡️ 气温**：12.7°C",
+                metar_diag={
+                    "station_icao": "LTAC",
+                    "latest_report_local": "2026-03-09T14:20:00+03:00",
+                    "latest_temp": 12.7,
+                    "temp_trend_1step_c": 0.3,
+                },
+                polymarket_event_url="https://polymarket.com/event/test",
+                analysis_snapshot=snapshot,
+            )
+
+        self.assertIn("地面层上，匹配分支和实况贴得很近，2米气温中位只差约 0.2°C", text)
+        self.assertIn("未来1-3小时里，匹配成员仍偏小幅补涨，更像往偏暖风抬温延续", text)
+        self.assertNotIn("10米风中位还会再起约 4km/h", text)
+        self.assertIn("这支要继续成立，下一两报还要继续抬约 0.4°C、10米风再起约 4km/h、气压继续降约 0.9hPa", text)
 
     def test_transition_rationale_prefers_branch_evolution_detail_over_generic_rebreak_line(self) -> None:
         snapshot = _snapshot_template()
@@ -1397,14 +1569,14 @@ class ReportRenderServiceTest(unittest.TestCase):
         }
         snapshot["temp_phase_decision"] = {
             "display_phase": "near_window",
-            "dominant_shape": "single_peak",
-            "timing": {"before_typical_peak": True},
-            "shape": {"future_candidate_role": "primary_remaining_peak"},
+                "dominant_shape": "single_peak",
+                "timing": {"before_typical_peak": True},
+                "shape": {"future_candidate_role": "primary_remaining_peak"},
         }
         snapshot["weather_posterior"] = {
             "core": {
                 "path_context": {
-                    "significant_forecast_detail_text": "当前匹配的是暖输送待接地这支，下一步主看低层耦合；若接上，更可能转到暖输送兑现，若接不上，更容易转成平台过渡",
+                    "significant_forecast_detail_text": "当前实况更贴近系集里的偏暖风抬温延续分支，眼下偏暖风已进场，但地面抬温还没完全接上；这支要继续成立，下一两报还要继续抬约 0.4°C、10米风再起约 4km/h、气压继续降约 0.9hPa；否则更像先转成风热条件平台",
                     "significant_forecast_detail_score": 0.88,
                 }
             },
@@ -1440,7 +1612,9 @@ class ReportRenderServiceTest(unittest.TestCase):
                 analysis_snapshot=snapshot,
             )
 
-        self.assertIn("当前匹配的是暖输送待接地这支", text)
+        self.assertIn("当前实况高度贴合系集主路径“偏暖风抬温延续”", text)
+        self.assertIn("• 这支要继续成立，下一两报还要继续抬约 0.4°C、10米风再起约 4km/h、气压继续降约 0.9hPa", text)
+        self.assertIn("否则更像先转成风热条件平台", text)
         self.assertNotIn("综合判断仍保留再创新高路径", text)
 
     def test_compact_spacing_keeps_reminder_and_focus_tight(self) -> None:
@@ -1479,6 +1653,46 @@ class ReportRenderServiceTest(unittest.TestCase):
 
         self.assertNotIn("\n\n• 实况提醒：", text)
         self.assertNotIn("Local）\n\n⚠️ 关注：", text)
+
+    def test_focus_block_is_hidden_when_it_only_repeats_reasoning(self) -> None:
+        snapshot = _snapshot_template()
+        snapshot["temp_phase_decision"] = {
+            "display_phase": "near_window",
+            "daily_peak_state": "open",
+            "second_peak_potential": "weak",
+            "timing": {"before_typical_peak": True},
+            "station": {"late_peak_share": 0.62, "very_late_peak_share": 0.36, "warm_peak_hour_median": 16.83},
+            "shape": {"future_candidate_role": "primary_remaining_peak"},
+        }
+        snapshot["peak_data"]["summary"]["phase_now"] = "near_window"
+        with patch(
+            "report_render_service._build_polymarket_section",
+            return_value=(
+                "📈 **Polymarket 盘口与博弈**\n"
+                "**博弈区间**\n"
+                "  • 13°C：Bid 39¢ | Ask 45¢"
+            ),
+        ):
+            text = choose_section_text(
+                primary_window={
+                    "peak_local": "2026-03-09T16:30",
+                    "start_local": "2026-03-09T13:00",
+                    "end_local": "2026-03-09T17:00",
+                    "peak_temp_c": 13.4,
+                },
+                metar_text="• **🌡️ 气温**：11.8°C",
+                metar_diag={
+                    "station_icao": "LTAC",
+                    "latest_report_local": "2026-03-09T12:20:00+03:00",
+                    "latest_temp": 11.8,
+                    "temp_trend_1step_c": 0.8,
+                },
+                polymarket_event_url="https://polymarket.com/event/test",
+                analysis_snapshot=snapshot,
+            )
+
+        self.assertNotIn("⚠️ 关注", text)
+        self.assertIn("这个站常见拖到 16:50 前后见顶", text)
 
 
 if __name__ == "__main__":

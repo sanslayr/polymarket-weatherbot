@@ -14,12 +14,14 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from venv_utils import repo_venv_python
+
 
 def _reexec_into_skill_venv() -> None:
     if str(os.getenv("WEATHERBOT_SKIP_VENV_REEXEC", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}:
         return
     script_path = Path(__file__).resolve()
-    venv_python = script_path.parent.parent / ".venv_gfs" / "bin" / "python"
+    venv_python = repo_venv_python(script_path.parent.parent)
     if not venv_python.exists():
         return
     current_python = Path(os.path.realpath(os.sys.executable)) if os.sys.executable else None
@@ -45,9 +47,10 @@ from hourly_data_service import (
     slice_hourly_local_day,
 )
 from metar_analysis_service import metar_observation_block
-from metar_utils import fetch_metar_24h
+from metar_utils import fetch_metar_24h, metar_obs_time_utc
 from realtime_pipeline import classify_window_phase
 from forecast_analysis_cache import build_and_cache_forecast_analysis
+from ecmwf_ensemble_factor_service import build_ecmwf_ensemble_factor_batch
 from historical_context_provider import build_historical_context, historical_context_enabled
 from historical_payload import attach_historical_payload
 from station_catalog import (
@@ -330,7 +333,7 @@ def _build_analysis_window(
     station: Station,
     target_date: str,
     tz_name: str,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], str, str]:
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], str, str]:
     model = "ecmwf"
     hourly_payload = fetch_hourly_openmeteo(station, target_date, model)
     hourly_day = slice_hourly_local_day(hourly_payload["hourly"], target_date)
@@ -377,10 +380,10 @@ def _build_analysis_window(
     except Exception:
         analysis_window = dict(primary)
 
-    return hourly_payload, hourly_day, metar_diag, primary, analysis_window, temp_shape_analysis, unit_pref, model
+    return hourly_payload, hourly_day, metar24, metar_diag, primary, analysis_window, temp_shape_analysis, unit_pref, model
 
 
-def _prewarm_station_target(station: Station, target_date: str) -> dict[str, Any]:
+def _prepare_station_target_context(station: Station, target_date: str) -> dict[str, Any]:
     from forecast_pipeline import load_or_build_forecast_decision
     from synoptic_provider_router import DEFAULT_SYNOPTIC_PROVIDER, normalize_synoptic_provider
 
@@ -389,6 +392,7 @@ def _prewarm_station_target(station: Station, target_date: str) -> dict[str, Any
     (
         hourly_payload,
         hourly_day,
+        metar24,
         metar_diag,
         primary_window,
         analysis_window,
@@ -435,6 +439,56 @@ def _prewarm_station_target(station: Station, target_date: str) -> dict[str, Any
         or str((forecast_decision.get("meta") or {}).get("runtime") or "")
         or _ecmwf_cycle_runtime_tag(now_utc)
     )
+    return {
+        "station": station,
+        "target_date": target_date,
+        "tz_name": tz_name,
+        "hourly_payload": hourly_payload,
+        "hourly_day": hourly_day,
+        "metar24": metar24,
+        "metar_diag": metar_diag,
+        "primary_window": primary_window,
+        "analysis_window": analysis_window,
+        "temp_shape_analysis": temp_shape_analysis,
+        "unit_pref": unit_pref,
+        "model": model,
+        "now_utc": now_utc,
+        "now_local": now_local,
+        "synoptic_provider": synoptic_provider,
+        "forecast_decision": forecast_decision,
+        "synoptic": synoptic,
+        "synoptic_error": synoptic_error,
+        "quality": quality,
+        "runtime_state": runtime_state,
+        "historical_context": historical_context,
+        "runtime_pref": runtime_pref,
+    }
+
+
+def _finalize_station_target_context(
+    prepared: dict[str, Any],
+    *,
+    prefetched_ensemble_factor: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    station: Station = prepared["station"]
+    target_date = str(prepared["target_date"])
+    metar_diag = dict(prepared["metar_diag"] or {})
+    metar24 = list(prepared.get("metar24") or [])
+    hourly_day = dict(prepared.get("hourly_day") or {})
+    analysis_window = dict(prepared["analysis_window"] or {})
+    primary_window = dict(prepared["primary_window"] or {})
+    temp_shape_analysis = dict(prepared["temp_shape_analysis"] or {})
+    forecast_decision = dict(prepared["forecast_decision"] or {})
+    quality = dict(prepared["quality"] or {})
+    runtime_state = dict(prepared["runtime_state"] or {})
+    historical_context = dict(prepared["historical_context"] or {})
+    runtime_pref = str(prepared.get("runtime_pref") or "")
+    synoptic_provider = str(prepared.get("synoptic_provider") or "")
+    unit_pref = str(prepared.get("unit_pref") or "C")
+    model = str(prepared.get("model") or "ecmwf")
+    tz_name = str(prepared.get("tz_name") or "")
+    synoptic_error = prepared.get("synoptic_error")
+
     analysis_cache_payload: dict[str, Any] | None = None
     analysis_cache_error = ""
     try:
@@ -453,6 +507,8 @@ def _prewarm_station_target(station: Station, target_date: str) -> dict[str, Any
             temp_shape_analysis=temp_shape_analysis,
             temp_unit=unit_pref,
             tz_name=tz_name,
+            metar24=metar24,
+            prefetched_ensemble_factor=prefetched_ensemble_factor,
         )
     except Exception as exc:
         analysis_cache_error = str(exc)
@@ -469,6 +525,7 @@ def _prewarm_station_target(station: Station, target_date: str) -> dict[str, Any
         "analysis_peak_local": analysis_window.get("peak_local"),
         "hourly_points": len(hourly_day.get("time") or []),
         "observed_max_temp_c": metar_diag.get("observed_max_temp_c"),
+        "latest_report_local": metar_diag.get("latest_report_local"),
         "historical_context_available": bool((historical_context or {}).get("available", historical_context is not None)),
         "forecast_analysis_cached": bool(analysis_cache_payload),
         "analysis_snapshot_cached": bool((analysis_cache_payload or {}).get("analysis_snapshot")),
@@ -484,6 +541,69 @@ def _prewarm_station_target(station: Station, target_date: str) -> dict[str, Any
     }
 
 
+def _prewarm_station_target(station: Station, target_date: str) -> dict[str, Any]:
+    prepared = _prepare_station_target_context(station, target_date)
+    return _finalize_station_target_context(prepared)
+
+
+def _prefetch_surface_ens_for_prepared_tasks(
+    prepared_tasks: list[dict[str, Any]],
+    *,
+    log_handle,
+) -> dict[str, dict[str, Any]]:
+    requests: list[dict[str, Any]] = []
+    for prepared in prepared_tasks:
+        station: Station = prepared["station"]
+        analysis_window = dict(prepared.get("analysis_window") or {})
+        metar_diag = dict(prepared.get("metar_diag") or {})
+        model = str(prepared.get("model") or "")
+        runtime_pref = str(prepared.get("runtime_pref") or "")
+        target_date = str(prepared.get("target_date") or "")
+        tz_name = str(prepared.get("tz_name") or "")
+        peak_local = str(analysis_window.get("peak_local") or "").strip()
+        if model.lower() != "ecmwf" or not peak_local or not runtime_pref:
+            continue
+        requests.append(
+            {
+                "request_id": f"{station.icao}|{target_date}",
+                "station_icao": station.icao,
+                "station_lat": float(station.lat),
+                "station_lon": float(station.lon),
+                "peak_local": peak_local,
+                "analysis_local": str(metar_diag.get("latest_report_local") or ""),
+                "tz_name": tz_name,
+                "preferred_runtime_tag": runtime_pref,
+                "metar24": list(prepared.get("metar24") or []),
+            }
+        )
+
+    if not requests:
+        return {}
+
+    started_at = _utc_now().isoformat().replace("+00:00", "Z")
+    try:
+        payloads = build_ecmwf_ensemble_factor_batch(requests=requests, detail_stage="auto", root=ROOT)
+        ready_count = sum(
+            1
+            for payload in payloads.values()
+            if isinstance(payload, dict)
+            and str(((payload.get("source") or {}).get("detail_level") or "")) in {"surface_anchor", "surface_trajectory"}
+        )
+        log_handle.write(
+            f"{_utc_now().isoformat().replace('+00:00', 'Z')} ENS_SURFACE_BATCH "
+            f"{json.dumps({'requested': len(requests), 'ready': ready_count, 'started_at': started_at}, ensure_ascii=False)}\n"
+        )
+        log_handle.flush()
+        return payloads
+    except Exception as exc:
+        log_handle.write(
+            f"{_utc_now().isoformat().replace('+00:00', 'Z')} ENS_SURFACE_BATCH_ERROR "
+            f"{json.dumps({'requested': len(requests), 'error': str(exc), 'started_at': started_at}, ensure_ascii=False)}\n"
+        )
+        log_handle.flush()
+        return {}
+
+
 def _should_run(last_runs: dict[str, Any], run_key: str, interval_seconds: int) -> bool:
     last = dict(last_runs.get(run_key) or {})
     raw = str(last.get("started_at_utc") or "").strip()
@@ -496,6 +616,26 @@ def _should_run(last_runs: dict[str, Any], run_key: str, interval_seconds: int) 
     except Exception:
         return True
     return (_utc_now() - ts.astimezone(timezone.utc)).total_seconds() >= interval_seconds
+
+
+def _latest_metar_signature(station: Station) -> str:
+    try:
+        rows = fetch_metar_24h(station.icao, force_refresh=False)
+    except Exception:
+        return ""
+    latest_dt = None
+    for raw in rows or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            dt = metar_obs_time_utc(raw)
+        except Exception:
+            continue
+        if latest_dt is None or dt > latest_dt:
+            latest_dt = dt
+    if latest_dt is None:
+        return ""
+    return latest_dt.isoformat().replace("+00:00", "Z")
 
 
 def _purge_old_forecast_cache(*, station_icao: str, target_date: str, keep_runtime_tag: str) -> dict[str, int]:
@@ -569,6 +709,58 @@ def _purge_stale_forecast_cache(*, max_age_hours: int) -> dict[str, int]:
     return removed
 
 
+def _purge_legacy_surface_incompatible_cache() -> dict[str, int]:
+    removed = {
+        "forecast_analysis": 0,
+        "ecmwf_ensemble_factor": 0,
+    }
+    for path in CACHE_DIR.glob("forecast_analysis_*.json"):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
+            if not isinstance(payload, dict):
+                payload = {}
+            schema_version = str(payload.get("schema_version") or "")
+            ensemble_factor = dict(payload.get("ensemble_factor") or {})
+            if schema_version == "forecast-analysis-cache.v8":
+                detail_level = str(((ensemble_factor.get("source") or {}).get("detail_level") or "")).strip().lower()
+                has_surface = bool(ensemble_factor.get("members") or ensemble_factor.get("member_trajectory") or ensemble_factor.get("daily_surface_timeline"))
+                if detail_level in {"surface_anchor", "surface_trajectory"} and has_surface:
+                    continue
+            path.unlink()
+            removed["forecast_analysis"] += 1
+        except FileNotFoundError:
+            continue
+        except Exception:
+            try:
+                path.unlink()
+                removed["forecast_analysis"] += 1
+            except FileNotFoundError:
+                continue
+    for path in CACHE_DIR.glob("ecmwf_ensemble_factor_*.json"):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
+            if not isinstance(payload, dict):
+                payload = {}
+            schema_version = str(payload.get("schema_version") or "")
+            detail_level = str(((payload.get("source") or {}).get("detail_level") or "")).strip().lower()
+            has_surface = bool(payload.get("members") or payload.get("member_trajectory") or payload.get("daily_surface_timeline"))
+            if schema_version == "ecmwf-ensemble-factor.v6" and detail_level in {"surface_anchor", "surface_trajectory"} and has_surface:
+                continue
+            path.unlink()
+            removed["ecmwf_ensemble_factor"] += 1
+        except FileNotFoundError:
+            continue
+        except Exception:
+            try:
+                path.unlink()
+                removed["ecmwf_ensemble_factor"] += 1
+            except FileNotFoundError:
+                continue
+    return removed
+
+
 def main() -> None:
     _acquire_singleton_lock()
     PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
@@ -580,8 +772,17 @@ def main() -> None:
     cycle_poll_minutes = int(os.getenv("FORECAST_CACHE_PREWARM_CYCLE_POLL_MINUTES", "30") or "30")
     cycle_probe_stop_hours = int(os.getenv("FORECAST_CACHE_PREWARM_CYCLE_STOP_HOURS", "6") or "6")
     max_age_hours = int(os.getenv("FORECAST_CACHE_MAX_AGE_HOURS", "24") or "24")
+    always_on = str(os.getenv("FORECAST_CACHE_PREWARM_ALWAYS_ON", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+    continuous_interval_seconds = int(os.getenv("FORECAST_CACHE_CONTINUOUS_INTERVAL_SECONDS", "900") or "900")
 
     with LOG_PATH.open("a", encoding="utf-8") as log:
+        legacy_purged = _purge_legacy_surface_incompatible_cache()
+        if any(legacy_purged.values()):
+            log.write(
+                f"{_utc_now().isoformat().replace('+00:00', 'Z')} PURGE_LEGACY "
+                f"{json.dumps(legacy_purged, ensure_ascii=False)}\n"
+            )
+            log.flush()
         while True:
             now_utc = _utc_now()
             prune_runtime_cache(max_age_hours=max_age_hours)
@@ -592,49 +793,120 @@ def main() -> None:
                     f"{json.dumps(stale_purged, ensure_ascii=False)}\n"
                 )
                 log.flush()
-            active_cycle = _active_probe_cycle_tag(now_utc, cycle_probe_start_hours, cycle_probe_stop_hours)
-            if not active_cycle:
-                time.sleep(max(15, loop_sleep_seconds))
-                continue
-            last_cycle_tag = str((state.get("last_cycle") or {}).get("cycle_tag") or "")
-            if _cycle_tag_is_not_older(last_cycle_tag, active_cycle):
-                time.sleep(max(15, loop_sleep_seconds))
-                continue
-            if not _should_probe_cycle(state, active_cycle, now_utc, cycle_poll_minutes):
-                time.sleep(max(15, loop_sleep_seconds))
-                continue
-            state.setdefault("probe_state", {})[active_cycle] = {
-                "last_probe_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
-            }
-            _save_state(state)
-            tasks: list[tuple[Station, str]] = []
+
+            active_cycle = ""
+            target_cycle_label = "continuous"
+            if not always_on:
+                active_cycle = _active_probe_cycle_tag(now_utc, cycle_probe_start_hours, cycle_probe_stop_hours) or ""
+                if not active_cycle:
+                    time.sleep(max(15, loop_sleep_seconds))
+                    continue
+                target_cycle_label = active_cycle
+                last_cycle_tag = str((state.get("last_cycle") or {}).get("cycle_tag") or "")
+                if _cycle_tag_is_not_older(last_cycle_tag, active_cycle):
+                    time.sleep(max(15, loop_sleep_seconds))
+                    continue
+                if not _should_probe_cycle(state, active_cycle, now_utc, cycle_poll_minutes):
+                    time.sleep(max(15, loop_sleep_seconds))
+                    continue
+                state.setdefault("probe_state", {})[active_cycle] = {
+                    "last_probe_at_utc": now_utc.isoformat().replace("+00:00", "Z"),
+                }
+                _save_state(state)
+
+            tasks: list[tuple[Station, str, str]] = []
             for row in _load_station_rows():
                 station = _station_from_row(row)
+                latest_metar_sig = _latest_metar_signature(station) if always_on else ""
                 for target_date in _target_dates_for_station(station, now_utc=now_utc, days_ahead=days_ahead):
-                    tasks.append((station, target_date))
+                    if always_on:
+                        run_key = f"{station.icao}|{target_date}"
+                        last_run = dict((state.get("last_runs") or {}).get(run_key) or {})
+                        if (
+                            latest_metar_sig
+                            and str(last_run.get("latest_report_local") or "") != latest_metar_sig
+                        ) or _should_run(state.get("last_runs") or {}, run_key, continuous_interval_seconds):
+                            tasks.append((station, target_date, latest_metar_sig))
+                    else:
+                        tasks.append((station, target_date, latest_metar_sig))
 
             if not tasks:
                 time.sleep(max(15, loop_sleep_seconds))
                 continue
 
             cycle_success = True
+            prepared_task_records: list[tuple[dict[str, Any], str]] = []
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 future_map = {
-                    pool.submit(_prewarm_station_target, station, target_date): (station, target_date)
-                    for station, target_date in tasks
+                    pool.submit(_prepare_station_target_context, station, target_date): (station, target_date, metar_sig)
+                    for station, target_date, metar_sig in tasks
                 }
                 for future in as_completed(future_map):
-                    station, target_date = future_map[future]
+                    station, target_date, metar_sig = future_map[future]
+                    run_key = f"{station.icao}|{target_date}"
+                    started_at = _utc_now().isoformat().replace("+00:00", "Z")
+                    try:
+                        prepared = future.result()
+                        prepared_task_records.append((prepared, metar_sig))
+                    except Exception as exc:
+                        cycle_success = False
+                        payload = {
+                            "station": station,
+                            "target_date": target_date,
+                            "cycle_tag": target_cycle_label,
+                            "task_success": False,
+                            "success": False,
+                            "stage": "prepare",
+                            "error": str(exc),
+                        }
+                        state.setdefault("last_runs", {})[run_key] = {
+                            "started_at_utc": started_at,
+                            "completed_at_utc": _utc_now().isoformat().replace("+00:00", "Z"),
+                            "success": False,
+                            "task_success": False,
+                            "target_cycle_ready": False,
+                            "cycle_tag": target_cycle_label,
+                            "error": str(exc),
+                            "latest_report_local": str(metar_sig or ""),
+                        }
+                        log.write(
+                            f"{_utc_now().isoformat().replace('+00:00', 'Z')} PREWARM_ERROR "
+                            f"{json.dumps(_json_safe(payload), ensure_ascii=False)}\n"
+                        )
+                        log.flush()
+
+            prefetched_ens = _prefetch_surface_ens_for_prepared_tasks(
+                [prepared for prepared, _metar_sig in prepared_task_records],
+                log_handle=log,
+            )
+
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                future_map = {}
+                for prepared, metar_sig in prepared_task_records:
+                    station: Station = prepared["station"]
+                    target_date = str(prepared["target_date"])
+                    request_id = f"{station.icao}|{target_date}"
+                    future = pool.submit(
+                        _finalize_station_target_context,
+                        prepared,
+                        prefetched_ensemble_factor=dict(prefetched_ens.get(request_id) or {}),
+                    )
+                    future_map[future] = (prepared, metar_sig)
+
+                for future in as_completed(future_map):
+                    prepared, metar_sig = future_map[future]
+                    station: Station = prepared["station"]
+                    target_date = str(prepared["target_date"])
                     run_key = f"{station.icao}|{target_date}"
                     started_at = _utc_now().isoformat().replace("+00:00", "Z")
                     try:
                         payload = future.result()
                         actual_runtime_tag = _normalize_cycle_tag(payload.get("actual_runtime_tag"))
                         requested_runtime_tag = _normalize_cycle_tag(payload.get("requested_runtime_tag"))
-                        payload["target_cycle"] = active_cycle
-                        payload["runtime_match"] = actual_runtime_tag == active_cycle
+                        payload["target_cycle"] = target_cycle_label
+                        payload["runtime_match"] = bool(active_cycle) and actual_runtime_tag == active_cycle
                         payload["task_success"] = True
-                        payload["target_cycle_ready"] = _target_cycle_satisfied(payload, active_cycle)
+                        payload["target_cycle_ready"] = True if always_on else _target_cycle_satisfied(payload, active_cycle)
                         payload["success"] = bool(payload["task_success"])
                         if not payload["target_cycle_ready"]:
                             cycle_success = False
@@ -654,15 +926,16 @@ def main() -> None:
                             "success": True,
                             "task_success": True,
                             "target_cycle_ready": bool(payload["target_cycle_ready"]),
-                            "cycle_tag": active_cycle,
+                            "cycle_tag": target_cycle_label,
                             "requested_runtime_tag": requested_runtime_tag,
                             "runtime_tag": actual_runtime_tag,
-                            "runtime_match": actual_runtime_tag == active_cycle,
+                            "runtime_match": bool(active_cycle) and actual_runtime_tag == active_cycle,
                             "runtime_mixed": bool(payload.get("runtime_mixed")),
                             "synoptic_complete": bool(payload.get("synoptic_complete")),
                             "missing_layers": list(payload.get("missing_layers") or []),
                             "source_state": payload.get("source_state"),
                             "synoptic_provider_used": payload.get("synoptic_provider_used"),
+                            "latest_report_local": str(payload.get("latest_report_local") or metar_sig or ""),
                         }
                         log.write(
                             f"{_utc_now().isoformat().replace('+00:00', 'Z')} PREWARM "
@@ -673,9 +946,10 @@ def main() -> None:
                         payload = {
                             "station": station,
                             "target_date": target_date,
-                            "cycle_tag": active_cycle,
+                            "cycle_tag": target_cycle_label,
                             "task_success": False,
                             "success": False,
+                            "stage": "finalize",
                             "error": str(exc),
                         }
                         state.setdefault("last_runs", {})[run_key] = {
@@ -684,8 +958,9 @@ def main() -> None:
                             "success": False,
                             "task_success": False,
                             "target_cycle_ready": False,
-                            "cycle_tag": active_cycle,
+                            "cycle_tag": target_cycle_label,
                             "error": str(exc),
+                            "latest_report_local": str(metar_sig or ""),
                         }
                         log.write(
                             f"{_utc_now().isoformat().replace('+00:00', 'Z')} PREWARM_ERROR "
@@ -693,13 +968,13 @@ def main() -> None:
                         )
                     finally:
                         log.flush()
-            if cycle_success:
+            if cycle_success and not always_on:
                 state["last_cycle"] = {
                     "cycle_tag": active_cycle,
                     "completed_at_utc": _utc_now().isoformat().replace("+00:00", "Z"),
                     "success": True,
                 }
-            else:
+            elif not always_on:
                 state["probe_state"][active_cycle] = {
                     "last_probe_at_utc": _utc_now().isoformat().replace("+00:00", "Z"),
                     "last_result": "pending",

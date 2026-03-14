@@ -8,7 +8,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from report_focus_service import build_report_focus_bundle  # noqa: E402
+from report_focus_service import _phase_structure_focus_line, build_report_focus_bundle  # noqa: E402
 from synoptic_summary_service import build_synoptic_summary  # noqa: E402
 
 
@@ -105,6 +105,31 @@ class ReportFocusAndSynopticSummaryTest(unittest.TestCase):
         joined = "\n".join(bundle["vars_block"])
         self.assertIn("白天主峰仍未到来，先看后段升温何时真正展开", joined)
         self.assertNotIn("低云/雾层何时真正松动", joined)
+
+    def test_phase_structure_focus_skips_second_peak_wording_for_fresh_high_still_rising(self) -> None:
+        score, line = _phase_structure_focus_line(
+            {
+                "display_phase": "near_window",
+                "daily_peak_state": "open",
+                "second_peak_potential": "high",
+                "rebound_mode": "second_peak",
+                "should_discuss_second_peak": True,
+                "shape": {
+                    "future_candidate_role": "secondary_peak_candidate",
+                    "future_gap_vs_obs": 0.5,
+                    "future_gap_vs_current": 0.5,
+                },
+            },
+            display_phase="near_window",
+            metar_diag={
+                "latest_temp": 24.2,
+                "observed_max_temp_c": 24.2,
+                "temp_trend_1step_c": 0.4,
+            },
+        )
+
+        self.assertEqual(score, 0.0)
+        self.assertEqual(line, "")
 
     def test_report_focus_prefers_directional_fallback_over_cadence_note(self) -> None:
         bundle = build_report_focus_bundle(
@@ -224,7 +249,7 @@ class ReportFocusAndSynopticSummaryTest(unittest.TestCase):
                     },
                     "core": {
                         "path_context": {
-                            "significant_forecast_detail_text": "当前匹配的是暖输送待接地这支，下一步主看低层耦合；若接上，更可能转到暖输送兑现，若接不上，更容易转成平台过渡",
+                            "significant_forecast_detail_text": "当前实况更贴近系集里的暖输送抬升分支，眼下还卡在低层耦合没完全接上这一步；若下一两报还接不出新的抬温段，这支就更像先转成平台过渡",
                             "significant_forecast_detail_score": 0.88,
                         }
                     },
@@ -237,7 +262,8 @@ class ReportFocusAndSynopticSummaryTest(unittest.TestCase):
         )
 
         joined = "\n".join(bundle["vars_block"])
-        self.assertIn("当前匹配的是暖输送待接地这支", joined)
+        self.assertIn("当前实况更贴近系集里的暖输送抬升分支", joined)
+        self.assertIn("若下一两报还接不出新的抬温段", joined)
         self.assertNotIn("综合判断仍保留再创新高路径", joined)
 
     def test_report_focus_can_surface_second_peak_watch(self) -> None:
@@ -334,7 +360,7 @@ class ReportFocusAndSynopticSummaryTest(unittest.TestCase):
 
         joined = "\n".join(bundle["vars_block"])
         self.assertIn("偏离系集主支", joined)
-        self.assertIn("暖侧试探", joined)
+        self.assertIn("暖风抬温未站稳", joined)
 
     def test_synoptic_summary_skips_generic_front_wording_in_weak_background_case(self) -> None:
         summary = build_synoptic_summary(

@@ -79,6 +79,31 @@ def _format_temp_label(value: Any, unit: str | None, *, prefix: str = "") -> str
     return f"{prefix}{temp_text}°{normalized_unit}"
 
 
+def _infer_temperature_unit(signal: dict[str, Any], evidence: dict[str, Any]) -> str:
+    direct_unit = str(signal.get("temperature_unit") or "").strip().upper()
+    if direct_unit in {"C", "F"}:
+        return direct_unit
+    evidence_unit = str(evidence.get("temperature_unit") or "").strip().upper()
+    if evidence_unit in {"C", "F"}:
+        return evidence_unit
+
+    label_candidates = [
+        signal.get("target_bucket_label"),
+        evidence.get("first_live_bucket_label"),
+        evidence.get("top_bucket_label"),
+        evidence.get("bucket_label"),
+    ]
+    label_candidates.extend(evidence.get("collapsed_prefix_labels") or [])
+    label_candidates.extend(evidence.get("collapsed_lower_bucket_labels") or [])
+    for raw_label in label_candidates:
+        label = str(raw_label or "").strip().upper()
+        if "°F" in label or label.endswith("F") or " F" in label:
+            return "F"
+        if "°C" in label or label.endswith("C") or " C" in label:
+            return "C"
+    return "C"
+
+
 def _format_observed_temp_label(value_c: Any, display_unit: str | None, *, source_quantized: bool = False) -> str | None:
     try:
         if value_c in (None, ""):
@@ -174,10 +199,8 @@ def format_market_signal_alert(
     target_bucket_label = str(signal.get("target_bucket_label") or "").strip()
     target_bucket = signal.get("target_bucket_threshold_c")
     target_bucket_native = signal.get("target_bucket_threshold_native")
-    temperature_unit = str(signal.get("temperature_unit") or "").strip().upper() or str(
-        (signal.get("evidence") or {}).get("temperature_unit") or "C"
-    ).strip().upper()
     evidence = dict(signal.get("evidence") or {})
+    temperature_unit = _infer_temperature_unit(signal, evidence)
     first_live_label = str(evidence.get("first_live_bucket_label") or "").strip()
     top_bucket_label = str(evidence.get("top_bucket_label") or "").strip()
     live_ladder_rows = [row for row in (evidence.get("live_ladder_rows") or []) if isinstance(row, dict)]

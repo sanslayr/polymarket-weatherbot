@@ -30,6 +30,8 @@ python3 scripts/forecast_cache_worker.py
 - `FORECAST_CACHE_PREWARM_POLL_SECONDS=60`
 - `FORECAST_CACHE_PREWARM_DAYS_AHEAD=1`
 - `FORECAST_CACHE_PREWARM_MAX_WORKERS=2`
+- `FORECAST_CACHE_PREWARM_ALWAYS_ON=1`
+- `FORECAST_CACHE_CONTINUOUS_INTERVAL_SECONDS=900`
 - `FORECAST_CACHE_PREWARM_CYCLE_START_HOURS=3`
 - `FORECAST_CACHE_PREWARM_CYCLE_POLL_MINUTES=30`
 - `FORECAST_CACHE_PREWARM_CYCLE_STOP_HOURS=6`
@@ -37,7 +39,13 @@ python3 scripts/forecast_cache_worker.py
 
 ## Scheduling
 
-The worker is cycle-driven, not interval-driven.
+The worker now defaults to continuous mode.
+
+- In continuous mode, it keeps refreshing station/date caches on an interval and also reacts to METAR updates.
+- The default interval is `900` seconds.
+- Set `FORECAST_CACHE_PREWARM_ALWAYS_ON=0` if you explicitly want the older cycle-driven behavior.
+
+When continuous mode is disabled, the worker is cycle-driven, not interval-driven.
 
 - It watches the ECMWF 6-hour runtime buckets: `00Z`, `06Z`, `12Z`, `18Z`
 - It starts probing a new cycle only after the configured post-cycle delay

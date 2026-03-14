@@ -221,6 +221,20 @@ class MarketSignalAlertServiceTest(unittest.TestCase):
         self.assertIn("已知METAR最高温：50°F；", text)
         self.assertNotIn("50.0°F", text)
 
+    def test_observed_max_temp_infers_fahrenheit_from_bucket_label_when_signal_unit_missing(self) -> None:
+        text = format_market_signal_alert(
+            city="Dallas",
+            signal={
+                "signal_type": "report_temp_scan_floor_stop",
+                "target_bucket_label": "50-51°F",
+                "observed_at_utc": "2026-03-10T22:53:30Z",
+                "evidence": {},
+            },
+            observed_max_temp_c=10.0,
+            observed_max_temp_quantized=True,
+        )
+        self.assertIn("已知METAR最高温：50°F；", text)
+
     def test_scan_floor_stop_prefers_bucket_label_for_range_market_output(self) -> None:
         text = format_market_signal_alert(
             city="Dallas",

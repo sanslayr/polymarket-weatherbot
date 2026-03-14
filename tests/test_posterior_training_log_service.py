@@ -15,18 +15,18 @@ from posterior_training_log_service import append_posterior_learning_sample, rea
 
 def _sample_snapshot() -> dict:
     return {
-        "schema_version": "analysis-snapshot.v10",
+        "schema_version": "analysis-snapshot.v17",
         "unit": "C",
         "canonical_raw_state": {
             "schema_version": "canonical-raw-state.v3",
             "observations": {"latest_report_local": "2026-03-14T12:20:00+03:00"},
             "forecast": {"meta": {"station": "LTAC", "date": "2026-03-14", "model": "ecmwf", "synoptic_provider": "ecmwf-open-data", "runtime": "2026031400"}},
         },
-        "posterior_feature_vector": {"schema_version": "posterior-feature-vector.v4", "time_phase": {"phase": "near_window", "display_phase": "near_window"}},
+        "posterior_feature_vector": {"schema_version": "posterior-feature-vector.v10", "time_phase": {"phase": "near_window", "display_phase": "near_window"}},
         "quality_snapshot": {"schema_version": "quality-snapshot.v2"},
         "weather_posterior": {
             "schema_version": "weather-posterior.v1",
-            "core": {"schema_version": "weather-posterior-core.v4"},
+            "core": {"schema_version": "weather-posterior-core.v10"},
             "quantiles": {"p50_c": 13.1},
             "event_probs": {"new_high_next_60m": 0.79, "lock_by_window_end": 0.32},
         },

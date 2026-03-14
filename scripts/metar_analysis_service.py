@@ -245,6 +245,14 @@ def metar_observation_block(
             return "较上一报持平"
         return f"较上一报 {v:+.1f}{unit_txt}"
 
+    def _delta_pressure_text(v_hpa: float) -> str:
+        dv = float(v_hpa)
+        if abs(dv) < 0.05:
+            return "较上一报持平"
+        if abs(dv - round(dv)) < 0.05:
+            return f"较上一报 {int(round(dv)):+d} hPa"
+        return f"较上一报 {dv:+.1f} hPa"
+
     def _delta_temp_text(v_c: float) -> str:
         if unit == "C":
             dv = float(v_c)
@@ -510,15 +518,22 @@ def metar_observation_block(
             return {
                 "prev": prev_compact,
                 "trend": tr_txt,
-                "inline": f"（上一报{prev_compact}，{tr_txt}）",
+                "inline": tr_txt,
             }
 
         cur_set = set(cur_tokens)
         prev_set = set(prev_tokens)
         added = [t for t in cur_tokens if t not in prev_set]
         removed = [t for t in prev_tokens if t not in cur_set]
+        clear_tokens = {"CLR", "CAVOK", "SKC"}
+        prev_clear_only = bool(prev_tokens) and all(str(token).upper() in clear_tokens for token in prev_tokens)
+        cur_clear_only = bool(cur_tokens) and all(str(token).upper() in clear_tokens for token in cur_tokens)
 
-        if added and removed:
+        if added and removed and prev_clear_only and not cur_clear_only:
+            tr_txt = f"云层出现（新增{'/'.join(added)}）"
+        elif added and removed and cur_clear_only and not prev_clear_only:
+            tr_txt = f"云层消散（消退{'/'.join(removed)}）"
+        elif added and removed:
             rank = {"CLR": 0, "CAVOK": 0, "SKC": 0, "FEW": 1, "SCT": 2, "BKN": 3, "OVC": 4, "VV": 5}
 
             def _parse_tok(tok: str) -> tuple[str, int | None]:
@@ -593,7 +608,7 @@ def metar_observation_block(
         return {
             "prev": prev_compact,
             "trend": tr_txt,
-            "inline": f"（上一报{prev_compact}，{tr_txt}）",
+            "inline": tr_txt,
         }
 
     def _calc_rh_pct(t_c: Any, td_c: Any) -> float | None:
@@ -646,11 +661,11 @@ def metar_observation_block(
             if multiline_cmp:
                 cloud_line = (
                     f"{cloud}\n"
-                    f"  ↳ 上一报：{cloud_cmp.get('prev', '')}\n"
                     f"  ↳ 变化：{cloud_cmp.get('trend', '')}"
                 )
             else:
-                cloud_line = f"{cloud}{cloud_cmp.get('inline', '')}"
+                inline_txt = str(cloud_cmp.get("inline", "")).strip()
+                cloud_line = f"{cloud}，{inline_txt}" if inline_txt else cloud
 
         rh_now = _calc_rh_pct(x.get("temp"), x.get("dewp"))
         rh_prev = _calc_rh_pct(prev_x.get("temp"), prev_x.get("dewp")) if prev_x else None
@@ -667,7 +682,7 @@ def metar_observation_block(
             f"• **🌡️ 气温**：{_fmt_temp_value(x.get('temp'))}（{_delta_temp_text(dt)}）",
             f"• **💧 露点**：{_fmt_temp_value(x.get('dewp'))}（{_delta_temp_text(dp)}）",
             f"• **💦 湿度**：{rh_line}",
-            f"• **📊 气压**：{x.get('altim')} hPa（{_delta_text(dpres, ' hPa')}）",
+            f"• **📊 气压**：{x.get('altim')} hPa（{_delta_pressure_text(dpres)}）",
             f"• **💨 风**：{wind_line}",
             f"• **☁️ 云层**：{cloud_line}",
         ]

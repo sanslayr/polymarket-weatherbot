@@ -26,6 +26,7 @@ class WeatherPosteriorServiceTest(unittest.TestCase):
                 "branch_path_detail": "warm_support",
                 "branch_side": "warm",
                 "branch_dominant_prob": 0.94,
+                "ensemble_member_count": 51,
                 "branch_volatility": "low",
                 "next_transition_gate": "low_level_coupling",
                 "expected_next_family": "warm_support_track",
@@ -35,12 +36,23 @@ class WeatherPosteriorServiceTest(unittest.TestCase):
                 "fallback_stage": "stalling",
                 "fallback_prob": 0.36,
                 "matched_subset_active": False,
+                "circulation_signature_text": "当前更匹配的环流特征是500hPa 高度场偏高，脊性背景更占优、700hPa 干层混合信号更明显、925-850hPa 偏暖输送仍在，但地面抬温还没完全跟上",
+                "circulation_signature_score": 0.84,
             },
         )
 
         self.assertGreaterEqual(path_context["significant_forecast_detail_score"], 0.78)
-        self.assertIn("暖输送待接地", path_context["significant_forecast_detail_text"])
-        self.assertIn("下一步主看低层耦合", path_context["significant_forecast_detail_text"])
+        self.assertIn("当前实况更贴近系集里的偏暖风抬温延续分支", path_context["significant_forecast_detail_text"])
+        self.assertIn("48/51支", path_context["significant_forecast_detail_text"])
+        self.assertIn("若下一两报还抬不出新的升温段", path_context["significant_forecast_detail_text"])
+        self.assertEqual(len(path_context["significant_forecast_detail_parts"]), 3)
+        self.assertEqual(
+            path_context["observation_watch_items"],
+            ["地面风向是否继续偏暖", "最新1-2报升温能否续上", "云量是否继续放开"],
+        )
+        self.assertIn("700hPa 干层混合信号更明显", path_context["circulation_signature_text"])
+        self.assertAlmostEqual(path_context["circulation_signature_score"], 0.84, places=2)
+        self.assertFalse(path_context["high_impact_realtime_focus"])
 
     def test_builds_quantiles_and_event_probs_from_structured_features(self) -> None:
         primary_window = {
@@ -625,6 +637,542 @@ class WeatherPosteriorServiceTest(unittest.TestCase):
             conflicting_posterior["anchor"]["spread_c"],
         )
 
+    def test_member_evolution_distribution_moves_quantiles_beyond_summary_labels(self) -> None:
+        primary_window = {
+            "start_local": "2026-03-09T13:00",
+            "peak_local": "2026-03-09T16:00",
+            "end_local": "2026-03-09T18:00",
+            "peak_temp_c": 24.4,
+            "low_cloud_pct": 18.0,
+            "w850_kmh": 24.0,
+        }
+        metar_diag = {
+            "latest_report_local": "2026-03-09T12:00:00+00:00",
+            "latest_temp": 20.8,
+            "latest_dewpoint": 7.8,
+            "latest_rh": 44.0,
+            "latest_wspd": 7.0,
+            "latest_wdir": 182.0,
+            "latest_cloud_code": "FEW",
+            "latest_cloud_lowest_base_ft": 4600,
+            "latest_wx": "",
+            "cloud_effective_cover_smooth": 0.18,
+            "radiation_eff_smooth": 0.86,
+            "cloud_trend": "cloud thinning",
+            "latest_precip_state": "none",
+            "precip_trend": "none",
+            "temp_trend_smooth_c": 0.32,
+            "temp_bias_smooth_c": 0.24,
+            "temp_accel_2step_c": 0.03,
+            "observed_max_temp_c": 20.8,
+            "observed_max_time_local": "2026-03-09T12:00:00+00:00",
+            "observed_max_interval_lo_c": 20.6,
+            "observed_max_interval_hi_c": 21.1,
+            "metar_temp_quantized": False,
+            "metar_routine_cadence_min": 30,
+            "metar_recent_interval_min": 30,
+        }
+        forecast_decision = {
+            "meta": {
+                "station": "LTAC",
+                "date": "2026-03-09",
+                "model": "ecmwf",
+                "synoptic_provider": "ecmwf-open-data",
+                "runtime": "2026030900Z",
+                "window": dict(primary_window),
+            },
+            "quality": {
+                "source_state": "fresh",
+                "missing_layers": [],
+                "synoptic_coverage": 1.0,
+                "synoptic_provider_requested": "ecmwf-open-data",
+                "synoptic_provider_used": "ecmwf-open-data",
+            },
+            "features": {
+                "objects_3d": {"tracks": [], "count": 0, "anchors_count": 0},
+                "h850": {
+                    "review": {
+                        "thermal_advection_state": "probable",
+                        "transport_state": "warm",
+                        "surface_coupling_state": "partial",
+                        "surface_bias": "warm",
+                    }
+                },
+                "sounding": {"thermo": {"coverage": {"density_class": "moderate"}}},
+            },
+        }
+
+        shared_summary = {
+            "summary": {
+                "dominant_path": "warm_support",
+                "dominant_path_detail": "warm_support",
+                "dominant_prob": 0.80,
+                "dominant_detail_prob": 0.80,
+                "dominant_margin_prob": 0.58,
+                "split_state": "clustered",
+                "signal_dispersion_c": 1.1,
+            },
+            "probabilities": {
+                "warm_support": 0.80,
+                "transition": 0.20,
+                "cold_suppression": 0.0,
+            },
+            "diagnostics": {
+                "delta_t850_p10_c": 0.4,
+                "delta_t850_p50_c": 0.9,
+                "delta_t850_p90_c": 1.3,
+                "wind850_p50_kmh": 22.0,
+                "neutral_stable_prob": 0.0,
+                "weak_warm_transition_prob": 0.20,
+                "weak_cold_transition_prob": 0.0,
+            },
+            "source": {"provider": "ecmwf-ens-open-data"},
+        }
+        warm_members = [
+            {"number": 0, "path_label": "warm_support", "path_detail": "warm_support", "delta_t850_c": 1.55, "wind_speed_850_kmh": 28.0},
+            {"number": 1, "path_label": "warm_support", "path_detail": "warm_support", "delta_t850_c": 1.35, "wind_speed_850_kmh": 26.0},
+            {"number": 2, "path_label": "warm_support", "path_detail": "warm_support", "delta_t850_c": 1.20, "wind_speed_850_kmh": 25.0},
+            {"number": 3, "path_label": "warm_support", "path_detail": "warm_support", "delta_t850_c": 1.10, "wind_speed_850_kmh": 24.0},
+            {"number": 4, "path_label": "transition", "path_detail": "weak_warm_transition", "delta_t850_c": 0.65, "wind_speed_850_kmh": 22.0},
+        ]
+        soft_members = [
+            {"number": 0, "path_label": "warm_support", "path_detail": "warm_support", "delta_t850_c": 0.60, "wind_speed_850_kmh": 20.0},
+            {"number": 1, "path_label": "warm_support", "path_detail": "warm_support", "delta_t850_c": 0.52, "wind_speed_850_kmh": 19.0},
+            {"number": 2, "path_label": "warm_support", "path_detail": "warm_support", "delta_t850_c": 0.48, "wind_speed_850_kmh": 18.0},
+            {"number": 3, "path_label": "transition", "path_detail": "weak_warm_transition", "delta_t850_c": 0.20, "wind_speed_850_kmh": 17.0},
+            {"number": 4, "path_label": "transition", "path_detail": "weak_warm_transition", "delta_t850_c": 0.12, "wind_speed_850_kmh": 16.0},
+        ]
+
+        warm_canonical = build_canonical_raw_state(
+            primary_window=primary_window,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            ensemble_factor={**shared_summary, "member_count": 5, "members": warm_members},
+            temp_unit="C",
+        )
+        soft_canonical = build_canonical_raw_state(
+            primary_window=primary_window,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            ensemble_factor={**shared_summary, "member_count": 5, "members": soft_members},
+            temp_unit="C",
+        )
+        warm_features = build_posterior_feature_vector(
+            canonical_raw_state=warm_canonical,
+            temp_phase_decision={
+                "phase": "near_window",
+                "display_phase": "near_window",
+                "short_term_state": "holding",
+                "daily_peak_state": "open",
+                "second_peak_potential": "none",
+                "rebound_mode": "none",
+                "dominant_shape": "single_peak",
+                "plateau_hold_state": "none",
+            },
+        )
+        soft_features = build_posterior_feature_vector(
+            canonical_raw_state=soft_canonical,
+            temp_phase_decision={
+                "phase": "near_window",
+                "display_phase": "near_window",
+                "short_term_state": "holding",
+                "daily_peak_state": "open",
+                "second_peak_potential": "none",
+                "rebound_mode": "none",
+                "dominant_shape": "single_peak",
+                "plateau_hold_state": "none",
+            },
+        )
+        warm_posterior = build_weather_posterior(
+            canonical_raw_state=warm_canonical,
+            posterior_feature_vector=warm_features,
+            quality_snapshot=build_quality_snapshot(
+                canonical_raw_state=warm_canonical,
+                posterior_feature_vector=warm_features,
+            ),
+        )
+        soft_posterior = build_weather_posterior(
+            canonical_raw_state=soft_canonical,
+            posterior_feature_vector=soft_features,
+            quality_snapshot=build_quality_snapshot(
+                canonical_raw_state=soft_canonical,
+                posterior_feature_vector=soft_features,
+            ),
+        )
+
+        self.assertIn("member_conditioned_center_anchor", warm_posterior["reason_codes"])
+        self.assertIn("member_conditioned_quantiles", warm_posterior["reason_codes"])
+        self.assertGreater(
+            warm_posterior["anchor"]["posterior_median_c"],
+            soft_posterior["anchor"]["posterior_median_c"],
+        )
+        self.assertGreater(
+            warm_posterior["quantiles"]["p75_c"],
+            soft_posterior["quantiles"]["p75_c"],
+        )
+        self.assertGreater(
+            warm_posterior["quantiles"]["p90_c"],
+            soft_posterior["quantiles"]["p90_c"],
+        )
+
+    def test_member_trajectory_can_shift_member_conditioned_distribution(self) -> None:
+        primary_window = {
+            "start_local": "2026-03-09T12:00",
+            "peak_local": "2026-03-09T16:00",
+            "end_local": "2026-03-09T18:00",
+            "peak_temp_c": 24.4,
+            "low_cloud_pct": 18.0,
+            "w850_kmh": 24.0,
+        }
+        metar_diag = {
+            "latest_report_local": "2026-03-09T12:00:00+00:00",
+            "latest_temp": 20.8,
+            "latest_dewpoint": 7.8,
+            "latest_rh": 44.0,
+            "latest_wspd": 7.0,
+            "latest_wdir": 182.0,
+            "latest_cloud_code": "FEW",
+            "latest_cloud_lowest_base_ft": 4600,
+            "latest_wx": "",
+            "cloud_effective_cover_smooth": 0.18,
+            "radiation_eff_smooth": 0.86,
+            "cloud_trend": "cloud thinning",
+            "latest_precip_state": "none",
+            "precip_trend": "none",
+            "temp_trend_smooth_c": 0.32,
+            "temp_bias_smooth_c": 0.24,
+            "temp_accel_2step_c": 0.03,
+            "observed_max_temp_c": 20.8,
+            "observed_max_time_local": "2026-03-09T12:00:00+00:00",
+            "observed_max_interval_lo_c": 20.6,
+            "observed_max_interval_hi_c": 21.1,
+            "metar_temp_quantized": False,
+            "metar_routine_cadence_min": 30,
+            "metar_recent_interval_min": 30,
+        }
+        forecast_decision = {
+            "meta": {
+                "station": "LTAC",
+                "date": "2026-03-09",
+                "model": "ecmwf",
+                "synoptic_provider": "ecmwf-open-data",
+                "runtime": "2026030900Z",
+                "window": dict(primary_window),
+            },
+            "quality": {
+                "source_state": "fresh",
+                "missing_layers": [],
+                "synoptic_coverage": 1.0,
+                "synoptic_provider_requested": "ecmwf-open-data",
+                "synoptic_provider_used": "ecmwf-open-data",
+            },
+            "features": {
+                "objects_3d": {"tracks": [], "count": 0, "anchors_count": 0},
+                "h850": {
+                    "review": {
+                        "thermal_advection_state": "probable",
+                        "transport_state": "warm",
+                        "surface_coupling_state": "partial",
+                        "surface_bias": "warm",
+                    }
+                },
+                "sounding": {"thermo": {"coverage": {"density_class": "moderate"}}},
+            },
+        }
+
+        shared_members = [
+            {"number": 0, "path_label": "warm_support", "path_detail": "warm_support", "delta_t850_c": 0.9, "wind_speed_850_kmh": 24.0},
+            {"number": 1, "path_label": "warm_support", "path_detail": "warm_support", "delta_t850_c": 0.8, "wind_speed_850_kmh": 23.0},
+            {"number": 2, "path_label": "transition", "path_detail": "weak_warm_transition", "delta_t850_c": 0.4, "wind_speed_850_kmh": 20.0},
+        ]
+        shared_summary = {
+            "summary": {
+                "dominant_path": "warm_support",
+                "dominant_path_detail": "warm_support",
+                "dominant_prob": 0.72,
+                "dominant_detail_prob": 0.72,
+                "dominant_margin_prob": 0.44,
+                "split_state": "clustered",
+                "signal_dispersion_c": 0.9,
+            },
+            "probabilities": {
+                "warm_support": 0.72,
+                "transition": 0.28,
+                "cold_suppression": 0.0,
+            },
+            "diagnostics": {
+                "delta_t850_p10_c": 0.3,
+                "delta_t850_p50_c": 0.8,
+                "delta_t850_p90_c": 1.0,
+                "wind850_p50_kmh": 22.0,
+                "neutral_stable_prob": 0.0,
+                "weak_warm_transition_prob": 0.28,
+                "weak_cold_transition_prob": 0.0,
+            },
+            "source": {"provider": "ecmwf-ens-open-data"},
+        }
+        warm_trajectory = {
+            "members": [
+                {"number": 0, "prior3h_t850_delta_c": 0.4, "next3h_t850_delta_c": 0.8, "trajectory_accel_c": 0.4, "future_room_c": 0.8, "future_cooling_c": 0.0, "trajectory_shape": "warming_follow_through"},
+                {"number": 1, "prior3h_t850_delta_c": 0.4, "next3h_t850_delta_c": 0.6, "trajectory_accel_c": 0.2, "future_room_c": 0.6, "future_cooling_c": 0.0, "trajectory_shape": "warming_follow_through"},
+                {"number": 2, "prior3h_t850_delta_c": 0.2, "next3h_t850_delta_c": 0.3, "trajectory_accel_c": 0.1, "future_room_c": 0.3, "future_cooling_c": 0.0, "trajectory_shape": "warming_but_slowing"},
+            ]
+        }
+        flat_trajectory = {
+            "members": [
+                {"number": 0, "prior3h_t850_delta_c": 0.4, "next3h_t850_delta_c": 0.0, "trajectory_accel_c": -0.4, "future_room_c": 0.0, "future_cooling_c": 0.0, "trajectory_shape": "plateau_after_warming"},
+                {"number": 1, "prior3h_t850_delta_c": 0.4, "next3h_t850_delta_c": -0.1, "trajectory_accel_c": -0.5, "future_room_c": 0.0, "future_cooling_c": 0.1, "trajectory_shape": "warm_reversal"},
+                {"number": 2, "prior3h_t850_delta_c": 0.2, "next3h_t850_delta_c": 0.0, "trajectory_accel_c": -0.2, "future_room_c": 0.0, "future_cooling_c": 0.0, "trajectory_shape": "flat_hold"},
+            ]
+        }
+
+        warm_canonical = build_canonical_raw_state(
+            primary_window=primary_window,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            ensemble_factor={**shared_summary, "member_count": 3, "members": shared_members, "member_trajectory": warm_trajectory},
+            temp_unit="C",
+        )
+        flat_canonical = build_canonical_raw_state(
+            primary_window=primary_window,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            ensemble_factor={**shared_summary, "member_count": 3, "members": shared_members, "member_trajectory": flat_trajectory},
+            temp_unit="C",
+        )
+        warm_features = build_posterior_feature_vector(
+            canonical_raw_state=warm_canonical,
+            temp_phase_decision={
+                "phase": "near_window",
+                "display_phase": "near_window",
+                "short_term_state": "holding",
+                "daily_peak_state": "open",
+                "second_peak_potential": "none",
+                "rebound_mode": "none",
+                "dominant_shape": "single_peak",
+                "plateau_hold_state": "none",
+            },
+        )
+        flat_features = build_posterior_feature_vector(
+            canonical_raw_state=flat_canonical,
+            temp_phase_decision={
+                "phase": "near_window",
+                "display_phase": "near_window",
+                "short_term_state": "holding",
+                "daily_peak_state": "open",
+                "second_peak_potential": "none",
+                "rebound_mode": "none",
+                "dominant_shape": "single_peak",
+                "plateau_hold_state": "none",
+            },
+        )
+        warm_posterior = build_weather_posterior(
+            canonical_raw_state=warm_canonical,
+            posterior_feature_vector=warm_features,
+            quality_snapshot=build_quality_snapshot(
+                canonical_raw_state=warm_canonical,
+                posterior_feature_vector=warm_features,
+            ),
+        )
+        flat_posterior = build_weather_posterior(
+            canonical_raw_state=flat_canonical,
+            posterior_feature_vector=flat_features,
+            quality_snapshot=build_quality_snapshot(
+                canonical_raw_state=flat_canonical,
+                posterior_feature_vector=flat_features,
+            ),
+        )
+
+        self.assertGreater(
+            warm_posterior["anchor"]["posterior_median_c"],
+            flat_posterior["anchor"]["posterior_median_c"],
+        )
+        self.assertGreater(
+            warm_posterior["quantiles"]["p75_c"],
+            flat_posterior["quantiles"]["p75_c"],
+        )
+
+    def test_surface_member_alignment_can_raise_member_conditioned_distribution(self) -> None:
+        primary_window = {
+            "start_local": "2026-03-09T12:00",
+            "peak_local": "2026-03-09T16:00",
+            "end_local": "2026-03-09T18:00",
+            "peak_temp_c": 24.4,
+            "low_cloud_pct": 18.0,
+            "w850_kmh": 24.0,
+        }
+        metar_diag = {
+            "latest_report_local": "2026-03-09T12:00:00+00:00",
+            "latest_temp": 20.8,
+            "latest_dewpoint": 7.8,
+            "latest_rh": 44.0,
+            "latest_wspd": 7.0,
+            "latest_wdir": 182.0,
+            "latest_cloud_code": "FEW",
+            "latest_cloud_lowest_base_ft": 4600,
+            "latest_wx": "",
+            "cloud_effective_cover_smooth": 0.18,
+            "radiation_eff_smooth": 0.86,
+            "cloud_trend": "cloud thinning",
+            "latest_precip_state": "none",
+            "precip_trend": "none",
+            "temp_trend_smooth_c": 0.32,
+            "temp_bias_smooth_c": 0.24,
+            "temp_accel_2step_c": 0.03,
+            "observed_max_temp_c": 20.8,
+            "observed_max_time_local": "2026-03-09T12:00:00+00:00",
+            "observed_max_interval_lo_c": 20.6,
+            "observed_max_interval_hi_c": 21.1,
+            "metar_temp_quantized": False,
+            "metar_routine_cadence_min": 30,
+            "metar_recent_interval_min": 30,
+            "latest_pressure_hpa": 1009.0,
+        }
+        forecast_decision = {
+            "meta": {
+                "station": "LTAC",
+                "date": "2026-03-09",
+                "model": "ecmwf",
+                "synoptic_provider": "ecmwf-open-data",
+                "runtime": "2026030900Z",
+                "window": dict(primary_window),
+            },
+            "quality": {
+                "source_state": "fresh",
+                "missing_layers": [],
+                "synoptic_coverage": 1.0,
+                "synoptic_provider_requested": "ecmwf-open-data",
+                "synoptic_provider_used": "ecmwf-open-data",
+            },
+            "features": {
+                "objects_3d": {"tracks": [], "count": 0, "anchors_count": 0},
+                "h850": {
+                    "review": {
+                        "thermal_advection_state": "probable",
+                        "transport_state": "warm",
+                        "surface_coupling_state": "partial",
+                        "surface_bias": "warm",
+                    }
+                },
+                "sounding": {"thermo": {"coverage": {"density_class": "moderate"}}},
+            },
+        }
+        members = [
+            {"number": 0, "path_label": "warm_support", "path_detail": "warm_support", "delta_t850_c": 0.9, "wind_speed_850_kmh": 24.0},
+            {"number": 1, "path_label": "warm_support", "path_detail": "warm_support", "delta_t850_c": 0.8, "wind_speed_850_kmh": 23.0},
+            {"number": 2, "path_label": "transition", "path_detail": "weak_warm_transition", "delta_t850_c": 0.4, "wind_speed_850_kmh": 20.0},
+        ]
+        shared_summary = {
+            "summary": {
+                "dominant_path": "warm_support",
+                "dominant_path_detail": "warm_support",
+                "dominant_prob": 0.72,
+                "dominant_detail_prob": 0.72,
+                "dominant_margin_prob": 0.44,
+                "split_state": "clustered",
+                "signal_dispersion_c": 0.9,
+            },
+            "probabilities": {
+                "warm_support": 0.72,
+                "transition": 0.28,
+                "cold_suppression": 0.0,
+            },
+            "diagnostics": {
+                "delta_t850_p10_c": 0.3,
+                "delta_t850_p50_c": 0.8,
+                "delta_t850_p90_c": 1.0,
+                "wind850_p50_kmh": 22.0,
+                "neutral_stable_prob": 0.0,
+                "weak_warm_transition_prob": 0.28,
+                "weak_cold_transition_prob": 0.0,
+            },
+            "source": {"provider": "ecmwf-ens-open-data"},
+        }
+        aligned_trajectory = {
+            "members": [
+                {"number": 0, "t2m_current_c": 20.7, "wind_10m_current_kmh": 12.8, "msl_current_hpa": 1009.2, "next3h_t2m_delta_c": 0.7, "future_room_c": 0.9, "trajectory_shape": "warming_follow_through"},
+                {"number": 1, "t2m_current_c": 20.9, "wind_10m_current_kmh": 13.4, "msl_current_hpa": 1008.8, "next3h_t2m_delta_c": 0.5, "future_room_c": 0.7, "trajectory_shape": "warming_follow_through"},
+                {"number": 2, "t2m_current_c": 20.4, "wind_10m_current_kmh": 12.2, "msl_current_hpa": 1009.0, "next3h_t2m_delta_c": 0.2, "future_room_c": 0.3, "trajectory_shape": "warming_but_slowing"},
+            ]
+        }
+        mismatched_trajectory = {
+            "members": [
+                {"number": 0, "t2m_current_c": 18.6, "wind_10m_current_kmh": 6.0, "msl_current_hpa": 1012.5, "next3h_t2m_delta_c": 0.7, "future_room_c": 0.9, "trajectory_shape": "warming_follow_through"},
+                {"number": 1, "t2m_current_c": 18.9, "wind_10m_current_kmh": 7.0, "msl_current_hpa": 1012.2, "next3h_t2m_delta_c": 0.5, "future_room_c": 0.7, "trajectory_shape": "warming_follow_through"},
+                {"number": 2, "t2m_current_c": 18.4, "wind_10m_current_kmh": 6.2, "msl_current_hpa": 1012.8, "next3h_t2m_delta_c": 0.2, "future_room_c": 0.3, "trajectory_shape": "warming_but_slowing"},
+            ]
+        }
+
+        aligned_canonical = build_canonical_raw_state(
+            primary_window=primary_window,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            ensemble_factor={**shared_summary, "member_count": 3, "members": members, "member_trajectory": aligned_trajectory},
+            temp_unit="C",
+        )
+        mismatched_canonical = build_canonical_raw_state(
+            primary_window=primary_window,
+            metar_diag=metar_diag,
+            forecast_decision=forecast_decision,
+            ensemble_factor={**shared_summary, "member_count": 3, "members": members, "member_trajectory": mismatched_trajectory},
+            temp_unit="C",
+        )
+        aligned_features = build_posterior_feature_vector(
+            canonical_raw_state=aligned_canonical,
+            temp_phase_decision={
+                "phase": "near_window",
+                "display_phase": "near_window",
+                "short_term_state": "holding",
+                "daily_peak_state": "open",
+                "second_peak_potential": "none",
+                "rebound_mode": "none",
+                "dominant_shape": "single_peak",
+                "plateau_hold_state": "none",
+            },
+        )
+        mismatched_features = build_posterior_feature_vector(
+            canonical_raw_state=mismatched_canonical,
+            temp_phase_decision={
+                "phase": "near_window",
+                "display_phase": "near_window",
+                "short_term_state": "holding",
+                "daily_peak_state": "open",
+                "second_peak_potential": "none",
+                "rebound_mode": "none",
+                "dominant_shape": "single_peak",
+                "plateau_hold_state": "none",
+            },
+        )
+        aligned_posterior = build_weather_posterior(
+            canonical_raw_state=aligned_canonical,
+            posterior_feature_vector=aligned_features,
+            quality_snapshot=build_quality_snapshot(
+                canonical_raw_state=aligned_canonical,
+                posterior_feature_vector=aligned_features,
+            ),
+        )
+        mismatched_posterior = build_weather_posterior(
+            canonical_raw_state=mismatched_canonical,
+            posterior_feature_vector=mismatched_features,
+            quality_snapshot=build_quality_snapshot(
+                canonical_raw_state=mismatched_canonical,
+                posterior_feature_vector=mismatched_features,
+            ),
+        )
+
+        self.assertGreater(
+            aligned_posterior["anchor"]["posterior_median_c"],
+            mismatched_posterior["anchor"]["posterior_median_c"],
+        )
+        self.assertGreater(
+            aligned_posterior["quantiles"]["p75_c"],
+            mismatched_posterior["quantiles"]["p75_c"],
+        )
+        self.assertGreater(
+            aligned_features["member_evolution_state"]["members"][0]["surface_alignment_score"],
+            mismatched_features["member_evolution_state"]["members"][0]["surface_alignment_score"],
+        )
+
     def test_progress_aware_calibration_narrows_flat_near_end_case(self) -> None:
         primary_window = {
             "start_local": "2026-03-09T13:00",
@@ -1089,8 +1637,8 @@ class WeatherPosteriorServiceTest(unittest.TestCase):
         self.assertEqual(posterior["core"]["anchor"]["ensemble_dominant_path"], "warm_support")
         self.assertEqual(posterior["core"]["anchor"]["ensemble_full_dominant_path"], "cold_suppression")
         self.assertIn("ensemble_obs_matched_subset", posterior["reason_codes"])
-        self.assertLess(posterior["core"]["path_context"]["upper_tail_allowance_adjust_c"], 0.0)
-        self.assertIn("接地", posterior["core"]["path_context"]["significant_forecast_detail_text"])
+        self.assertGreaterEqual(posterior["core"]["path_context"]["upper_tail_allowance_adjust_c"], 0.0)
+        self.assertIn("接上", posterior["core"]["path_context"]["significant_forecast_detail_text"])
         self.assertLessEqual(posterior["calibration"]["cold_tail_allowance_c"], 0.0)
 
     def test_cold_path_significant_detail_expands_cold_tail_allowance(self) -> None:
@@ -1230,7 +1778,10 @@ class WeatherPosteriorServiceTest(unittest.TestCase):
         )
 
         self.assertGreater(posterior["core"]["path_context"]["cold_tail_allowance_c"], 0.0)
-        self.assertIn("对流压温", posterior["core"]["path_context"]["significant_forecast_detail_text"])
+        self.assertIn("雷雨压温", posterior["core"]["path_context"]["significant_forecast_detail_text"])
+        self.assertIn("雷达前沿和附近 PWS", posterior["core"]["path_context"]["significant_forecast_detail_text"])
+        self.assertIn("附近 PWS 是否继续先降温增风", posterior["core"]["path_context"]["significant_forecast_detail_text"])
+        self.assertTrue(posterior["core"]["path_context"]["high_impact_realtime_focus"])
         self.assertGreater(posterior["calibration"]["cold_tail_allowance_c"], 0.12)
 
 

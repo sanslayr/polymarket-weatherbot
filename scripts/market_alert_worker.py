@@ -10,12 +10,14 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from venv_utils import repo_venv_python
+
 
 def _reexec_into_skill_venv() -> None:
     if str(os.getenv("WEATHERBOT_SKIP_VENV_REEXEC", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}:
         return
     script_path = Path(__file__).resolve()
-    venv_python = script_path.parent.parent / ".venv_gfs" / "bin" / "python"
+    venv_python = repo_venv_python(script_path.parent.parent)
     if not venv_python.exists():
         return
     current_python = Path(os.path.realpath(sys.executable)) if sys.executable else None
@@ -162,6 +164,9 @@ def _station_task(
             "station": station,
             "event_url": event_url,
             "signal": signal,
+            "detector_observed_temp_c": metar_ctx.get("observed_max_temp_c"),
+            "detector_observed_temp_quantized": bool(metar_ctx.get("observed_max_temp_quantized")),
+            "detector_observed_time_local": metar_ctx.get("observed_max_time_local"),
             "monitor_ok": monitor_ok,
             "monitor_status": monitor_status,
             "monitor_diagnostics": monitor_diagnostics,
@@ -203,6 +208,9 @@ def _station_task(
         "event_url": event_url,
         "signal": signal,
         "text": text,
+        "detector_observed_temp_c": metar_ctx.get("observed_max_temp_c"),
+        "detector_observed_temp_quantized": bool(metar_ctx.get("observed_max_temp_quantized")),
+        "detector_observed_time_local": metar_ctx.get("observed_max_time_local"),
         "monitor_ok": monitor_ok,
         "monitor_status": monitor_status,
         "monitor_diagnostics": monitor_diagnostics,

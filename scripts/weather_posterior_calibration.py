@@ -353,6 +353,7 @@ def _progress_cold_tail_allowance(
 def _display_tail_weight(
     *,
     posterior_core: dict[str, Any],
+    event_probs: dict[str, Any],
     confidence_label: str,
 ) -> float:
     phase = str(((posterior_core.get("progress") or {}).get("phase")) or "")
@@ -363,6 +364,24 @@ def _display_tail_weight(
         "in_window": 0.0,
         "post": 0.0,
     }.get(phase, 0.25)
+
+    path_context = dict(posterior_core.get("path_context") or {})
+    active_side = str(path_context.get("active_path_side") or "")
+    branch_family = str(path_context.get("branch_family") or "")
+    follow_prob = _safe_float(path_context.get("expected_follow_through_prob")) or 0.0
+    new_high_prob = _safe_float(event_probs.get("new_high_next_60m"))
+    lock_prob = _safe_float(event_probs.get("lock_by_window_end"))
+    if phase in {"near_window", "in_window"}:
+        if (
+            active_side == "warm"
+            and branch_family in {"warm_support_track", "warm_landing_watch", "warm_transition_probe"}
+            and follow_prob >= 0.64
+            and new_high_prob is not None
+            and new_high_prob >= 0.58
+            and (lock_prob is None or lock_prob <= 0.55)
+        ):
+            tail_weight = max(tail_weight, 0.18 if phase == "in_window" else 0.12)
+
     if confidence_label == "high":
         tail_weight -= 0.10
     elif confidence_label == "low":
@@ -441,6 +460,7 @@ def _integrated_range_hint(
     p90 = _safe_float(quantiles.get("p90_c"))
     tail_weight = _display_tail_weight(
         posterior_core=posterior_core,
+        event_probs=event_probs,
         confidence_label=confidence_label,
     )
     if None in {p10, p25, p75, p90}:

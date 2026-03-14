@@ -14,9 +14,13 @@ from zoneinfo import ZoneInfo
 
 import build_station_links as BSL
 from analysis_snapshot_service import build_analysis_snapshot
-from ecmwf_ensemble_factor_service import build_ecmwf_ensemble_factor
+from ecmwf_ensemble_factor_service import (
+    build_ecmwf_ensemble_factor,
+    ensemble_factor_has_surface_member_detail,
+)
 from forecast_analysis_cache import (
     build_and_cache_forecast_analysis,
+    refresh_cached_forecast_analysis_snapshot,
     read_cached_forecast_analysis,
     should_build_ecmwf_ensemble_factor,
 )
@@ -199,6 +203,10 @@ def _parse_iso_dt(value: Any) -> datetime | None:
 
 def _should_build_ensemble_factor(primary_window: dict[str, Any], metar_diag: dict[str, Any]) -> bool:
     return should_build_ecmwf_ensemble_factor(primary_window, metar_diag)
+
+
+def _ensemble_factor_has_member_detail(payload: dict[str, Any] | None) -> bool:
+    return ensemble_factor_has_surface_member_detail(payload)
 
 
 def _build_metar_only_bundle(
@@ -544,14 +552,21 @@ def build_look_report_bundle(
         runtime_tag=runtime_pref,
         latest_report_local=str(metar_diag.get("latest_report_local") or ""),
         analysis_peak_local=analysis_peak_local,
+        allow_peak_mismatch_reuse=True,
     ) if model.lower() == "ecmwf" else None
 
     ensemble_factor: dict[str, Any] | None = None
     analysis_snapshot: dict[str, Any] | None = None
+    analysis_snapshot_cache_refreshable = False
+    ensemble_factor_has_detail = False
     if isinstance(cached_analysis, dict):
         ensemble_factor = dict(cached_analysis.get("ensemble_factor") or {})
+        ensemble_factor_has_detail = _ensemble_factor_has_member_detail(ensemble_factor)
         if bool(cached_analysis.get("analysis_snapshot_fresh")):
             analysis_snapshot = dict(cached_analysis.get("analysis_snapshot") or {})
+        if (not bool(cached_analysis.get("analysis_snapshot_fresh"))) or (not ensemble_factor_has_detail):
+            analysis_snapshot_cache_refreshable = True
+            analysis_snapshot = None
     elif model.lower() == "ecmwf":
         try:
             analysis_cache_payload = build_and_cache_forecast_analysis(
@@ -569,27 +584,37 @@ def build_look_report_bundle(
                 temp_shape_analysis=temp_shape_analysis,
                 temp_unit=unit_pref,
                 tz_name=tz_name,
+                metar24=metar24,
             )
             ensemble_factor = dict(analysis_cache_payload.get("ensemble_factor") or {})
+            ensemble_factor_has_detail = _ensemble_factor_has_member_detail(ensemble_factor)
             analysis_snapshot = dict(analysis_cache_payload.get("analysis_snapshot") or {})
+            if not ensemble_factor_has_detail:
+                analysis_snapshot = None
+                analysis_snapshot_cache_refreshable = True
         except Exception:
             ensemble_factor = None
             analysis_snapshot = None
 
     if not isinstance(analysis_snapshot, dict) or not analysis_snapshot:
-        if ensemble_factor is None and _should_build_ensemble_factor(analysis_window, metar_diag):
+        if model.lower() == "ecmwf" and (ensemble_factor is None or not ensemble_factor_has_detail):
             try:
                 ensemble_factor = build_ecmwf_ensemble_factor(
                     station_icao=station.icao,
                     station_lat=float(station.lat),
                     station_lon=float(station.lon),
                     peak_local=analysis_peak_local,
+                    analysis_local=str(metar_diag.get("latest_report_local") or ""),
                     tz_name=tz_name,
                     preferred_runtime_tag=runtime_pref,
+                    metar24=metar24,
+                    detail_stage="auto",
                     root=ROOT,
                 )
+                ensemble_factor_has_detail = _ensemble_factor_has_member_detail(ensemble_factor)
             except Exception:
-                ensemble_factor = None
+                if ensemble_factor is None:
+                    ensemble_factor = None
         analysis_snapshot = build_analysis_snapshot(
             primary_window=primary,
             metar_diag=metar_diag,
@@ -599,6 +624,22 @@ def build_look_report_bundle(
             synoptic_window=analysis_window,
             temp_shape_analysis=temp_shape_analysis,
         )
+        if analysis_snapshot_cache_refreshable and isinstance(cached_analysis, dict):
+            try:
+                refresh_cached_forecast_analysis_snapshot(
+                    cached_payload=cached_analysis,
+                    station_icao=station.icao,
+                    target_date=target_date,
+                    model=model,
+                    synoptic_provider=synoptic_provider_used,
+                    runtime_tag=runtime_pref,
+                    latest_report_local=str(metar_diag.get("latest_report_local") or ""),
+                    analysis_peak_local=analysis_peak_local,
+                    analysis_snapshot=analysis_snapshot,
+                    ensemble_factor=ensemble_factor,
+                )
+            except Exception:
+                pass
 
     t0 = time.perf_counter()
     body = choose_section_text(

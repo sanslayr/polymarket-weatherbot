@@ -14,7 +14,7 @@ from posterior_learning_sample_service import build_posterior_learning_sample  #
 
 def _sample_snapshot() -> dict:
     return {
-        "schema_version": "analysis-snapshot.v10",
+        "schema_version": "analysis-snapshot.v17",
         "unit": "C",
         "canonical_raw_state": {
             "schema_version": "canonical-raw-state.v3",
@@ -40,7 +40,7 @@ def _sample_snapshot() -> dict:
             },
         },
         "posterior_feature_vector": {
-            "schema_version": "posterior-feature-vector.v4",
+                "schema_version": "posterior-feature-vector.v10",
             "time_phase": {"phase": "near_window", "display_phase": "near_window"},
             "observation_state": {"latest_temp_c": 12.0},
             "peak_phase_state": {"daily_peak_state": "open", "second_peak_potential": "none"},
@@ -73,11 +73,11 @@ def _sample_snapshot() -> dict:
             "peak_time": {"best_time_local": "2026-03-14T15:00:00+03:00"},
             "reason_codes": ["ensemble_aligned", "warm_landing_pending"],
             "core": {
-                "schema_version": "weather-posterior-core.v4",
+                "schema_version": "weather-posterior-core.v10",
                 "anchor": {"posterior_median_c": 13.1},
                 "progress": {"analysis_window_mode": "forecast_primary"},
                 "path_context": {
-                    "significant_forecast_detail_text": "当前匹配的是暖输送待接地这支",
+                    "significant_forecast_detail_text": "当前匹配的是暖风抬温未站稳这支",
                 },
             },
         },
@@ -109,7 +109,7 @@ class PosteriorLearningSampleServiceTests(unittest.TestCase):
         self.assertEqual(sample["station_icao"], "LTAC")
         self.assertEqual(sample["phase"], "near_window")
         self.assertEqual(sample["feature_blocks"]["matched_branch_outlook_state"]["branch_family"], "warm_landing_watch")
-        self.assertEqual(sample["posterior_context"]["path_context"]["significant_forecast_detail_text"], "当前匹配的是暖输送待接地这支")
+        self.assertEqual(sample["posterior_context"]["path_context"]["significant_forecast_detail_text"], "当前匹配的是暖风抬温未站稳这支")
         self.assertEqual(sample["display_output"]["display_range"]["hi_c"], 13.9)
         self.assertEqual(sample["lineage"]["range_truth_source"], "weather_posterior")
         self.assertEqual(sample["source_context"]["entrypoint"], "unit_test")
